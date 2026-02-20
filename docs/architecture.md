@@ -8,26 +8,26 @@ A web-based de-escalation training platform for classroom use. Students respond 
 
 ```mermaid
 flowchart LR
-    subgraph CLIENT["CLIENT (Browser)"]
+    subgraph CLIENT["CLIENT (Browser — TypeScript)"]
         CAP["Capture\n―――――――――\nMediaPipe.js landmarks\nMeyda.js MFCCs"]
         RES["Response Handler\n―――――――――\nVideo branch switch\nFeedback overlay"]
     end
 
-    subgraph APP["APP CONTAINER"]
+    subgraph APP["APP CONTAINER (TypeScript / Node)"]
         SM["Session Manager\n―――――――――\nLifecycle & capacity\nQueue management"]
         CO["Coordinator\n―――――――――\nAssembles AnalysisWindows\nRoutes results"]
     end
 
-    subgraph PROXY["PROXY CONTAINER"]
+    subgraph PROXY["NGINX"]
         PX["Proxy\n―――――――――\nRound-robin routing\nSession pinning"]
     end
 
-    subgraph EVAL["EVALUATION CONTAINER  (scalable)"]
+    subgraph EVAL["EVALUATION CONTAINER (Python — scalable)"]
         TR["Transcription Pool\n―――――――――\nfaster-whisper + VAD\nPer-session buffers"]
         BA["Behaviour Analyser\n―――――――――\nMultimodal classifier\nLandmarks+MFCCs+Text"]
     end
 
-    subgraph FEED["FEEDBACK CONTAINER"]
+    subgraph FEED["FEEDBACK CONTAINER (TypeScript / Node)"]
         FG["Feedback Generator\n―――――――――\nOllama LLM wrapper\nEnd-of-session debrief"]
     end
 
@@ -125,8 +125,8 @@ classDiagram
         highlights: str[]
     }
 
-    AnalysisWindow --> ClipMetadata
     AnalysisWindow --> VideoFrame
+    AnalysisWindow --> ClipMetadata
     BehaviourResult --> AnalysisWindow
     ConversationTurn --> ClipMetadata
     ConversationTurn --> BehaviourResult
@@ -134,41 +134,56 @@ classDiagram
 
 ---
 
+## Language Choices
+
+| Container | Language | Reason |
+|---|---|---|
+| Client | TypeScript | Frontend |
+| App | TypeScript / Node | I/O heavy, WebSocket native, shares types with frontend |
+| Nginx | Config | Replaces proxy container entirely |
+| Evaluation | Python | faster-whisper and classifier require Python ML ecosystem |
+| Feedback | TypeScript / Node | Pure I/O — formats prompt, streams Ollama response |
+| Ollama | — | Existing Docker image |
+
+Python is used exclusively where the ML ecosystem requires it. All other containers use TypeScript/Node for better WebSocket concurrency and consistency with the frontend.
+
+---
+
 ## Interfaces
 
 All AI components are interface-driven. Implementations can be swapped without changing any other part of the system.
 
-| Interface                    | Container  | Responsibility                            |
-|------------------------------|------------|-------------------------------------------|
-| `TransportInterface`         | Client     | Abstracts WebSocket/WebRTC/HTTP transport |
-| `ResponseHandlerInterface`   | Client     | Reacts to escalation scores and feedback  |
-| `SessionManagerInterface`    | App        | Session lifecycle, capacity, queue        |
-| `CoordinatorInterface`       | App        | Assembles streams into AnalysisWindows    |
-| `TranscriptionInterface`     | Evaluation | Whisper pool, per-session VAD buffers     |
-| `BehaviourAnalyserInterface` | Evaluation | Multimodal escalation classifier          |
-| `FeedbackGeneratorInterface` | Feedback   | LLM debrief generation                    |
+| Interface | Container | Language | Responsibility |
+|---|---|---|---|
+| `TransportInterface` | Client | TypeScript | Abstracts WebSocket/WebRTC/HTTP transport |
+| `ResponseHandlerInterface` | Client | TypeScript | Reacts to escalation scores and feedback |
+| `SessionManagerInterface` | App | TypeScript | Session lifecycle, capacity, queue |
+| `CoordinatorInterface` | App | TypeScript | Assembles streams into AnalysisWindows |
+| `TranscriptionInterface` | Evaluation | Python | Whisper pool, per-session VAD buffers |
+| `BehaviourAnalyserInterface` | Evaluation | Python | Multimodal escalation classifier |
+| `FeedbackGeneratorInterface` | Feedback | TypeScript | LLM debrief generation |
 
 ---
 
 ## Deployment
 
-Designed for single-server classroom deployment with optional scaling for larger institutions.
+Designed for single-server classroom deployment with optional scaling for larger institutions. The proxy is Nginx — no custom proxy code is required.
 
 ```mermaid
 flowchart TD
     A["docker compose up\n(default — everything on one server)"]
     B["--scale evaluation=N\n(multiple Whisper workers, same server)"]
     C["FEEDBACK_URL=http://server2:8002\n(dedicated GPU machine for Ollama)"]
-    D["EVALUATION_URL=url1,url2,...\n(evaluation spread across multiple hosts)"]
+    D["EVALUATION_URL=url1,url2,...\n(evaluation spread across multiple hosts — Nginx round-robins)"]
 
     A --> B --> C --> D
 ```
 
-| Scenario                | How                                               |
-|-------------------------|---------------------------------------------------|
-| Single server           | `docker compose up` — no config changes needed    |
-| Scale evaluation        | `docker compose up --scale evaluation=N`          |
-| Offload feedback/Ollama | Set `FEEDBACK_URL` in `.env` to a second server   |
-| Multi-host evaluation   | Set `EVALUATION_URL` to comma-separated host list |
+| Scenario | How |
+|---|---|
+| Single server | `docker compose up` — no config changes needed |
+| Scale evaluation | `docker compose up --scale evaluation=N` |
+| Offload feedback/Ollama | Set `FEEDBACK_URL` in `.env` to a second server |
+| Multi-host evaluation | Set `EVALUATION_URL` to comma-separated host list in Nginx config |
 
-All configuration lives in `.env`. IT departments never need to touch application code to scale.
+All configuration lives in `.env` and `nginx.conf`. IT departments never need to touch application code to scale.

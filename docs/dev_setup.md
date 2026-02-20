@@ -2,6 +2,19 @@
 
 ---
 
+## Tech Stack
+
+| Container  | Language   | Framework                            |
+|------------|------------|--------------------------------------|
+| Client     | TypeScript | Browser APIs, MediaPipe.js, Meyda.js |
+| App        | TypeScript | Node.js, Fastify, ws                 |
+| Nginx      | —          | Config only, replaces custom proxy   |
+| Evaluation | Python     | FastAPI, faster-whisper              |
+| Feedback   | TypeScript | Node.js, Fastify                     |
+| Ollama     | —          | Existing Docker image                |
+
+---
+
 ## Prerequisites
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) (or Docker Engine + Compose plugin on Linux)
@@ -35,7 +48,7 @@ The app will be available at `http://localhost:8000`.
 
 ## Running with Stubs (Recommended for Development)
 
-During development you almost certainly want stub AI implementations so you don't need a trained classifier or a running Ollama instance. Set the following in `.env`:
+During development, you almost certainly want stub AI implementations so you don't need a trained classifier or a running Ollama instance. Set the following in `.env`:
 
 ```bash
 BEHAVIOUR_ANALYSER=stub
@@ -49,7 +62,7 @@ Then start only the containers you need:
 docker compose up app proxy evaluation feedback
 ```
 
-See `STUBS.md` for details on stub behaviour.
+See `STUBS.md` for details on stub behavior.
 
 ---
 
@@ -57,63 +70,113 @@ See `STUBS.md` for details on stub behaviour.
 
 All configuration lives in `.env`. The full reference is in `.env.example`. The most commonly changed variables during development:
 
-| Variable | Default | Description |
-|---|---|---|
-| `BEHAVIOUR_ANALYSER` | `stub` | `stub` or `production` |
-| `FEEDBACK_GENERATOR` | `stub` | `stub` or `production` |
-| `WHISPER_MODEL` | `base` | `tiny`, `base`, `small`, `medium`, `large-v3` |
-| `WHISPER_LANGUAGE` | `nl` | ISO 639-1 language code |
-| `WHISPER_WORKERS` | `4` | Whisper instances in the pool |
-| `DEVICE` | `cpu` | `cpu` or `cuda` |
-| `FEEDBACK_MODEL` | `llama3.2` | Ollama model name |
-| `OLLAMA_HOST` | `http://ollama:11434` | Override to use external Ollama |
+| Variable             | Default               | Description                                   |
+|----------------------|-----------------------|-----------------------------------------------|
+| `BEHAVIOUR_ANALYSER` | `stub`                | `stub` or `production`                        |
+| `FEEDBACK_GENERATOR` | `stub`                | `stub` or `production`                        |
+| `WHISPER_MODEL`      | `base`                | `tiny`, `base`, `small`, `medium`, `large-v3` |
+| `WHISPER_LANGUAGE`   | `nl`                  | ISO 639-1 language code                       |
+| `WHISPER_WORKERS`    | `4`                   | Whisper instances in the pool                 |
+| `DEVICE`             | `cpu`                 | `cpu` or `cuda`                               |
+| `FEEDBACK_MODEL`     | `llama3.2`            | Ollama model name                             |
+| `OLLAMA_HOST`        | `http://ollama:11434` | Override to use external Ollama               |
 
 ---
 
 ## Project Structure
 
+This is a monorepo — one repository containing all services. Each service is a self-contained directory with its own dependencies, Dockerfile, and `.gitignore`. There is no reason for one service to access files from another service's directory at runtime; communication happens exclusively over HTTP and WebSocket as defined in `docs/API_CONTRACT.md`.
+
 ```
 ar-training/
-├── docker/
-│   ├── app.Dockerfile
-│   ├── evaluation.Dockerfile
-│   ├── feedback.Dockerfile
-│   └── proxy.Dockerfile
+├── app/                        ← App container (TypeScript / Node)
+│   ├── src/
+│   │   ├── sessionManager.ts
+│   │   ├── coordinator.ts
+│   │   └── main.ts
+│   ├── package.json
+│   ├── tsconfig.json
+│   ├── Dockerfile
+│   └── .gitignore              ← ignores node_modules/, dist/
+│
+├── evaluation/                 ← Evaluation container (Python)
+│   ├── src/
+│   │   ├── interfaces.py
+│   │   ├── transcription.py
+│   │   ├── behaviour_analyser.py
+│   │   ├── stubs/
+│   │   │   └── behaviour_analyser.py
+│   │   └── main.py
+│   ├── requirements.txt
+│   ├── Dockerfile
+│   └── .gitignore              ← ignores __pycache__/, .venv/
+│
+├── feedback/                   ← Feedback container (TypeScript / Node)
+│   ├── src/
+│   │   ├── feedbackGenerator.ts
+│   │   └── main.ts
+│   ├── package.json
+│   ├── tsconfig.json
+│   ├── Dockerfile
+│   └── .gitignore
+│
+├── client/                     ← Browser client (TypeScript)
+│   ├── src/
+│   │   ├── capture.ts
+│   │   └── responseHandler.ts
+│   ├── package.json
+│   ├── tsconfig.json
+│   └── .gitignore
+│
+├── shared/                     ← Shared TypeScript types
+│   ├── types.ts                ← single source of truth for all TS DTOs
+│   └── package.json            ← referenced as file:../shared in TS services
+│
+├── nginx/
+│   └── nginx.conf
+│
 ├── scenarios/
 │   └── scenario_01/
 │       ├── metadata.json
 │       └── *.mp4
+│
 ├── models/
 │   └── classifier.pkl          ← not committed, provided separately
-├── config/
-│   └── settings.py
-├── src/
-│   ├── interfaces/             ← abstract base classes (shared across containers)
-│   │   ├── __init__.py
-│   │   └── interfaces.py
-│   ├── stubs/                  ← stub implementations for development
-│   │   ├── behaviour_analyser.py
-│   │   └── feedback_generator.py
-│   ├── app/                    ← App container source
-│   │   ├── session_manager.py
-│   │   ├── coordinator.py
-│   │   └── main.py
-│   ├── evaluation/             ← Evaluation container source
-│   │   ├── transcription.py
-│   │   ├── behaviour_analyser.py
-│   │   └── main.py
-│   ├── feedback/               ← Feedback container source
-│   │   ├── feedback_generator.py
-│   │   └── main.py
-│   └── proxy/                  ← Proxy container source
-│       └── main.py
+│
+├── docs/
+│   ├── ARCHITECTURE.md
+│   ├── API_CONTRACT.md
+│   ├── SESSION_LIFECYCLE.md
+│   ├── STUBS.md
+│   └── CONTRIBUTING.md
+│
 ├── docker-compose.yml
 ├── .env.example
-├── ARCHITECTURE.md
-├── API_CONTRACT.md
-├── SESSION_LIFECYCLE.md
-└── STUBS.md
+└── .gitignore                  ← repo-wide only: .env, *.log, .DS_Store
 ```
+
+### Shared Types
+
+The `shared/` package contains TypeScript type definitions used by `app/`, `feedback/`, and `client/`. Reference it as a local dependency:
+
+```json
+// app/package.json, feedback/package.json, client/package.json
+{
+  "dependencies": {
+    "@ar-training/shared": "file:../shared"
+  }
+}
+```
+
+The Python `evaluation/` container defines its own dataclasses in `src/interfaces.py` — these mirror the shared TypeScript types and the JSON shapes in `docs/API_CONTRACT.md`.
+
+### IDE Setup
+
+**Recommended: WebStorm** opened at the repo root. WebStorm discovers all `package.json` files automatically and provides full IntelliSense across all TypeScript services including cross-service resolution of the `shared/` package. Mark `scenarios/`, `models/`, and `docs/` as excluded directories (Settings → Directories) to prevent WebStorm from indexing video files and keep search fast.
+
+For Python, WebStorm provides basic syntax support when you configure a Python interpreter pointing at `evaluation/.venv` (Settings → Languages & Frameworks → Python Interpreter). If you find yourself spending significant time in the evaluation container, open it separately in **PyCharm** with `evaluation/` as the project root for full Python IntelliSense.
+
+**Alternative: VS Code** at the repo root with the Pylance, ESLint, and Docker extensions handles all languages in one window.
 
 ---
 
@@ -170,8 +233,15 @@ The rest of the system requires no changes.
 
 ## Code Style
 
+**TypeScript (App, Feedback, Client)**
+- TypeScript strict mode enabled
+- Interfaces for all data transfer objects — defined once in `src/shared/types.ts` and imported by all TypeScript containers and the client
+- Abstract classes for all swappable components
+- No business logic in entrypoints (`main.ts`) — delegate to interface implementations
+
+**Python (Evaluation)**
 - Python 3.11+
 - Type hints on all function signatures
 - Dataclasses for all data transfer objects
 - Abstract base classes for all swappable components
-- No business logic in container entrypoints (`main.py`) — delegate to interface implementations
+- No business logic in entrypoints (`main.py`) — delegate to interface implementations
