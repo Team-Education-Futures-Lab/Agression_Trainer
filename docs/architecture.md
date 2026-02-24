@@ -125,8 +125,8 @@ classDiagram
         highlights: str[]
     }
 
-    AnalysisWindow --> VideoFrame
     AnalysisWindow --> ClipMetadata
+    AnalysisWindow --> VideoFrame
     BehaviourResult --> AnalysisWindow
     ConversationTurn --> ClipMetadata
     ConversationTurn --> BehaviourResult
@@ -136,14 +136,14 @@ classDiagram
 
 ## Language Choices
 
-| Container | Language | Reason |
-|---|---|---|
-| Client | TypeScript | Frontend |
-| App | TypeScript / Node | I/O heavy, WebSocket native, shares types with frontend |
-| Nginx | Config | Replaces proxy container entirely |
-| Evaluation | Python | faster-whisper and classifier require Python ML ecosystem |
-| Feedback | TypeScript / Node | Pure I/O — formats prompt, streams Ollama response |
-| Ollama | — | Existing Docker image |
+| Container  | Language          | Reason                                                    |
+|------------|-------------------|-----------------------------------------------------------|
+| Client     | TypeScript        | Frontend                                                  |
+| App        | TypeScript / Node | I/O heavy, WebSocket native, shares types with frontend   |
+| Nginx      | Config            | Replaces proxy container entirely                         |
+| Evaluation | Python            | faster-whisper and classifier require Python ML ecosystem |
+| Feedback   | TypeScript / Node | Pure I/O — formats prompt, streams Ollama response        |
+| Ollama     | —                 | Existing Docker image                                     |
 
 Python is used exclusively where the ML ecosystem requires it. All other containers use TypeScript/Node for better WebSocket concurrency and consistency with the frontend.
 

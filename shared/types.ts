@@ -199,6 +199,74 @@ export interface ClipMetadata {
     branch_conditions: BranchCondition[];
 }
 
+// ─── Evaluation — cross-container results ────────────────────────────────────
+
+/**
+ * A summary of the multimodal signals detected in a single analysis window.
+ * Produced by the Evaluation container, forwarded to the Feedback container
+ * as part of each ConversationTurn.
+ */
+export interface SignalSummary {
+    /** 0.0 (relaxed) to 1.0 (tense). */
+    voice_tension: number;
+    /** Syllables per second. */
+    speech_pace: number;
+    /** Average landmark movement per frame. */
+    hand_velocity: number;
+    /** 0.0 (erratic) to 1.0 (steady). */
+    gaze_stability: number;
+    /** Ratio of frames where an open palm is detected. */
+    open_palm_ratio: number;
+    /** Notable signals detected, e.g. `"raised_voice"`, `"stub_mode"`. */
+    notable_signals: string[];
+}
+
+/**
+ * The result of analyzing a single ~2s analysis window.
+ * Produced by the Evaluation container, consumed by the App container
+ * (for immediate client branching) and the Feedback container (for debrief).
+ */
+export interface BehaviourResult {
+    window_id: WindowID;
+    session_id: string;
+    /** -1.0 = strongly de-escalating, 1.0 = strongly escalating. */
+    escalation_score: number;
+    dominant_emotion: string;
+    /** 0.0 to 1.0. */
+    confidence: number;
+    signal_summary: SignalSummary;
+}
+
+// ─── Feedback — cross-container types ────────────────────────────────────────
+
+/**
+ * A single turn in the conversation — one clip the student responded to,
+ * paired with the behavior analysis of their response.
+ *
+ * Accumulated by the App container during a session and compiled into a
+ * FeedbackRequest at session end.
+ */
+export interface ConversationTurn {
+    turn_id: number;
+    clip: ClipMetadata;
+    student_response: BehaviourResult;
+    student_transcript: string;
+}
+
+/**
+ * Sent from the App container to the Feedback container at session end.
+ * Contains the full conversation history needed to generate a debrief.
+ *
+ * Wire format: POST /feedback/generate
+ */
+export interface FeedbackRequest {
+    session_id: string;
+    scenario_id: string;
+    /** ISO 639-1 language code, e.g. `"nl"`. */
+    language: string;
+    history: ConversationTurn[];
+}
+
 // ─── Client-side session state ────────────────────────────────────────────────
 
 /**

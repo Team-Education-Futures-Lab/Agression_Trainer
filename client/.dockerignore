@@ -1,0 +1,29 @@
+# Dependencies — reinstalled inside the container
+**/node_modules/
+
+# Build output
+**/dist/
+
+# Generated files
+client/public/mediapipe/
+
+# ML models — mounted at runtime, not baked into images
+models/
+
+# Scenario videos — mounted at runtime
+scenarios/**/*.mp4
+
+# Environment files
+.env
+**/.env.local
+
+# Python cache
+**/__pycache__/
+**/.venv/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

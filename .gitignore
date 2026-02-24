@@ -1,8 +1,8 @@
 # ── Environment ────────────────────────────────────────────────────────────
 # Never commit secrets or local config overrides.
-.env
-.env.local
-.env.*.local
+**/.env
+**/.env.local
+**/.env.*.local
 
 # ── Models ────────────────────────────────────────────────────────────────
 # Model files are large binaries that don't belong in git.

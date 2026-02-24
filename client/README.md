@@ -8,8 +8,9 @@ Browser-based React application. Captures webcam and microphone input, extracts 
 
 ```bash
 cd client
-npm install       # also copies MediaPipe WASM files to public/mediapipe/ via postinstall
-npm run dev       # starts Vite dev server at http://localhost:5173
+npm install                # also copies MediaPipe WASM files to public/mediapipe/
+cp .env.local.example .env.local   # configure App container URLs
+npm run dev                # starts Vite dev server at http://localhost:5173
 ```
 
 ---
@@ -20,43 +21,32 @@ The client separates two concerns that have no dependency on each other:
 
 ### Capture pipeline (`capture.ts`)
 
-A continuous media stream that runs independently of any session. It starts on page load and keeps running regardless of whether a backend session exists. It has no knowledge of sessions, transport, or the server.
+A continuous media stream that runs independently of any session. Starts on page load and keeps running regardless of whether a backend session exists. Has no knowledge of sessions, transport, or the server.
 
 - Extracts face and hand landmarks from the webcam using MediaPipe.js
 - Computes MFCCs from the microphone using Meyda.js
 - Accumulates raw PCM audio and resamples to 16kHz for Whisper
-- Emits `RawVideoFrame` and `RawAudioChunk` events continuously
-
-Consumers subscribe to these events and unsubscribe when done:
+- Exposes `frames()` and `audio()` as async iterables that broadcast to multiple consumers independently
 
 ```typescript
-const unsub = capture.on("frame", (frame: RawVideoFrame) => { ... });
-// later:
-unsub();
+// Any number of consumers can subscribe independently
+for await (const frame of capture.frames()) { ... }
+for await (const chunk of capture.audio()) { ... }
 ```
 
-### Session handler (`App.tsx`)
+### Session handler (`sessionHandler.ts`)
 
-Manages the session lifecycle. When a session connects, it subscribes to the capture stream, stamps each item with the current `session_id`, and forwards it to transport. On disconnect it unsubscribes.
+Manages the session lifecycle. When a session connects, subscribes to the capture streams, stamps each item with the current `session_id`, and forwards to transport. Unsubscribes on disconnect.
 
-This separation means the camera preview and debug overlay are always functional, even when no backend is available.
+### Transport (`transport.ts`)
 
----
-
-## Key files
-
-| File                   | Responsibility                                        |
-|------------------------|-------------------------------------------------------|
-| `src/capture.ts`       | Continuous MediaPipe + audio stream, session-agnostic |
-| `src/transport.ts`     | `TransportInterface` + WebSocket implementation       |
-| `src/App.tsx`          | Session lifecycle, wires capture → transport          |
-| `src/DebugOverlay.tsx` | Landmark visualisation + MFCC heatmap (dev only)      |
+`TransportInterface` abstracts all server communication. The default implementation uses WebSocket. Can be swapped for WebRTC or another protocol without changing anything else.
 
 ---
 
 ## Client-internal types
 
-`RawVideoFrame` and `RawAudioChunk` are defined in `@ar-training/shared` but are **client-internal only** — they are never sent over the wire. The session handler stamps them with a `session_id` to produce the wire-format `VideoFrame` and `AudioChunk` defined in `docs/API_CONTRACT.md`.
+`RawVideoFrame` and `RawAudioChunk` are defined in `src/types.ts` and are **client-internal only** — they never cross a container boundary. The session handler stamps them with a `session_id` to produce the wire-format `VideoFrame` and `AudioChunk` defined in `docs/API_CONTRACT.md`.
 
 ---
 
@@ -64,7 +54,7 @@ This separation means the camera preview and debug overlay are always functional
 
 MediaPipe requires WebAssembly files to be served locally. These are copied from `node_modules` into `public/mediapipe/` automatically during `npm install` via the `postinstall` script. This folder is not committed to version control.
 
-If the WASM files are missing, run:
+If the files are missing, run:
 
 ```bash
 node scripts/copy-mediapipe-wasm.js
@@ -79,16 +69,25 @@ node scripts/copy-mediapipe-wasm.js
 | `VITE_APP_WS_URL`   | `ws://localhost:8000`   | WebSocket URL for the App container |
 | `VITE_APP_HTTP_URL` | `http://localhost:8000` | HTTP URL for the App container      |
 
-Create a `.env.local` file in the `client/` directory to override these during development.
+Copy `.env.local.example` to `.env.local` and adjust for your setup.
+
+---
+
+## Future considerations
+
+- **MediaPipe GPU delegate** — currently set to `CPU` for compatibility. Switch to `GPU` in `capture.ts` once tested on target hardware.
+- **AudioWorklet migration** — `ScriptProcessorNode` is deprecated. Migrate to `AudioWorkletNode` before production.
+- **Web Worker for MediaPipe** — running MediaPipe inference in a Worker would free the main thread for React rendering. The `CaptureSession` interface is already isolated to make this straightforward.
 
 ---
 
 ## Production build
 
-The production image is a static nginx container. The React app is compiled to static files by Vite and served by nginx with SPA routing and correct WASM MIME types.
+The production image is a static nginx container. Vite compiles the React app to static files which nginx serves with SPA routing and correct WASM MIME types.
 
 ```bash
+# Always build from the repo root
 docker compose up --build client
 ```
 
-Do not run `docker build` directly from the `client/` directory — the build context must be the repo root so that `shared/` is available. See `docs/CONTRIBUTING.md` for details.
+Do not run `docker build` directly from the `client/` directory — the build context must include `shared/`. See `docs/CONTRIBUTING.md` for details.
