@@ -4,14 +4,14 @@
 
 ## Tech Stack
 
-| Container  | Language   | Framework                            |
-|------------|------------|--------------------------------------|
-| Client     | TypeScript | Browser APIs, MediaPipe.js, Meyda.js |
-| App        | TypeScript | Node.js, Fastify, ws                 |
-| Nginx      | —          | Config only, replaces custom proxy   |
-| Evaluation | Python     | FastAPI, faster-whisper              |
-| Feedback   | TypeScript | Node.js, Fastify                     |
-| Ollama     | —          | Existing Docker image                |
+| Container  | Language   | Framework                                      |
+|------------|------------|------------------------------------------------|
+| Client     | TypeScript | React, Vite, MediaPipe.js, Meyda.js            |
+| App        | TypeScript | Node.js, Fastify, ws                           |
+| Nginx      | —          | Config only, replaces custom proxy             |
+| Evaluation | Python     | FastAPI, faster-whisper                        |
+| Feedback   | TypeScript | Node.js, Fastify                               |
+| Ollama     | —          | Existing Docker image                          |
 
 ---
 
@@ -21,7 +21,7 @@
 - [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) — only if using a GPU
 - Git
 
-No local Python or Node installation is required. Everything runs inside containers.
+No local Python or Node installation is required for deployment. Everything runs inside containers.
 
 ---
 
@@ -90,72 +90,102 @@ This is a monorepo — one repository containing all services. Each service is a
 ```
 ar-training/
 ├── app/                        ← App container (TypeScript / Node)
-│   ├── src/
-│   │   ├── sessionManager.ts
-│   │   ├── coordinator.ts
-│   │   └── main.ts
+│   │                             Handles WebSocket connections, session lifecycle,
+│   │                             and coordinates data flow between client and AI services.
+│   ├── src/                    ← Application source code
 │   ├── package.json
 │   ├── tsconfig.json
 │   ├── Dockerfile
-│   └── .gitignore              ← ignores node_modules/, dist/
+│   ├── README.md               ← Implementation details for this service
+│   └── .gitignore
 │
 ├── evaluation/                 ← Evaluation container (Python)
-│   ├── src/
-│   │   ├── interfaces.py
-│   │   ├── transcription.py
-│   │   ├── behaviour_analyser.py
-│   │   ├── stubs/
-│   │   │   └── behaviour_analyser.py
-│   │   └── main.py
+│   │                             Runs Whisper transcription and the multimodal
+│   │                             behaviour classifier. GPU-optional, horizontally scalable.
+│   ├── src/                    ← Application source code
 │   ├── requirements.txt
 │   ├── Dockerfile
-│   └── .gitignore              ← ignores __pycache__/, .venv/
+│   ├── README.md               ← Implementation details for this service
+│   └── .gitignore
 │
 ├── feedback/                   ← Feedback container (TypeScript / Node)
-│   ├── src/
-│   │   ├── feedbackGenerator.ts
-│   │   └── main.ts
+│   │                             Wraps Ollama to generate end-of-session debrief advice.
+│   ├── src/                    ← Application source code
 │   ├── package.json
 │   ├── tsconfig.json
 │   ├── Dockerfile
+│   ├── README.md               ← Implementation details for this service
 │   └── .gitignore
 │
-├── client/                     ← Browser client (TypeScript)
-│   ├── src/
-│   │   ├── capture.ts
-│   │   └── responseHandler.ts
+├── client/                     ← Browser client (TypeScript / React)
+│   │                             Captures webcam and microphone, extracts landmarks
+│   │                             and audio features, and communicates with the App container.
+│   ├── src/                    ← Application source code
+│   ├── public/                 ← Static assets served directly by Vite / nginx.
+│   │                             Contains generated files (e.g. MediaPipe WASM) that
+│   │                             are not committed to version control.
+│   ├── scripts/                ← Build-time helper scripts (e.g. copying WASM files
+│   │                             from node_modules into public/ after npm install)
 │   ├── package.json
 │   ├── tsconfig.json
+│   ├── vite.config.ts
+│   ├── index.html
+│   ├── nginx.conf              ← Nginx config used in the production Docker image
+│   ├── Dockerfile
+│   ├── README.md               ← Implementation details for this service
 │   └── .gitignore
 │
-├── shared/                     ← Shared TypeScript types
-│   ├── types.ts                ← single source of truth for all TS DTOs
-│   └── package.json            ← referenced as file:../shared in TS services
+├── shared/                     ← Shared TypeScript types (not a runnable service)
+│   │                             Single source of truth for all DTOs that cross
+│   │                             container boundaries. Referenced as a local npm
+│   │                             dependency by app/, feedback/, and client/.
+│   ├── types.ts
+│   └── package.json
 │
-├── nginx/
-│   └── nginx.conf
+├── nginx/                      ← Proxy configuration
+│   └── nginx.conf              ← Routes /evaluate/* and /feedback/* to the
+│                                 correct containers, pins WebSocket sessions
 │
-├── scenarios/
+├── scenarios/                  ← Scenario content (video + metadata)
+│   │                             Each subdirectory is one scenario. Video files
+│   │                             are tracked with Git LFS.
 │   └── scenario_01/
-│       ├── metadata.json
+│       ├── metadata.json       ← Clip definitions, transcripts, branch conditions
 │       └── *.mp4
 │
-├── models/
-│   └── classifier.pkl          ← not committed, provided separately
+├── models/                     ← Trained ML model files (not committed)
+│   └── classifier.pkl          ← Provided separately, mounted at runtime
 │
-├── docs/
+├── docs/                       ← Project-level documentation
+│   │                             Implementation details live in each service's README.
 │   ├── ARCHITECTURE.md
 │   ├── API_CONTRACT.md
 │   ├── SESSION_LIFECYCLE.md
 │   ├── STUBS.md
 │   └── CONTRIBUTING.md
 │
-├── docker-compose.yml
-├── .env.example
-└── .gitignore                  ← repo-wide only: .env, *.log, .DS_Store
+├── docker-compose.yml          ← Defines all services and their relationships
+├── .env.example                ← Template for required environment variables
+└── .gitignore                  ← Repo-wide: .env, *.log, .DS_Store
 ```
 
-### Shared Types
+---
+
+## Building with Docker
+
+All Dockerfiles expect the build context to be the **repo root**, not the service directory. This is required because services that depend on `shared/` need it to be in scope during the build.
+
+Always build via `docker compose` from the repo root:
+
+```bash
+docker compose up --build
+```
+
+Do not run `docker build` directly inside a service directory — the build will fail because `shared/` will be outside the build context.
+
+---
+
+## Shared Types
 
 The `shared/` package contains TypeScript type definitions used by `app/`, `feedback/`, and `client/`. Reference it as a local dependency:
 
@@ -170,7 +200,11 @@ The `shared/` package contains TypeScript type definitions used by `app/`, `feed
 
 The Python `evaluation/` container defines its own dataclasses in `src/interfaces.py` — these mirror the shared TypeScript types and the JSON shapes in `docs/API_CONTRACT.md`.
 
-### IDE Setup
+Each service's README describes how it uses these types internally.
+
+---
+
+## IDE Setup
 
 **Recommended: WebStorm** opened at the repo root. WebStorm discovers all `package.json` files automatically and provides full IntelliSense across all TypeScript services including cross-service resolution of the `shared/` package. Mark `scenarios/`, `models/`, and `docs/` as excluded directories (Settings → Directories) to prevent WebStorm from indexing video files and keep search fast.
 
@@ -219,9 +253,9 @@ docker compose down -v
 
 ## Implementing a Real AI Component
 
-Each AI component has a corresponding interface in `src/interfaces/interfaces.py`. To add a real implementation:
+Each AI component has a corresponding interface in `evaluation/src/interfaces.py`. To add a real implementation:
 
-1. Create a new file in the appropriate container's source directory (e.g. `src/evaluation/my_classifier.py`)
+1. Create a new file in the appropriate container's source directory (e.g. `evaluation/src/my_classifier.py`)
 2. Subclass the relevant interface (`BehaviourAnalyserInterface` or `FeedbackGeneratorInterface`)
 3. Implement all abstract methods
 4. Register the new implementation in the container's factory function (see `STUBS.md` for the pattern)
@@ -234,10 +268,11 @@ The rest of the system requires no changes.
 ## Code Style
 
 **TypeScript (App, Feedback, Client)**
-- TypeScript strict mode enabled
-- Interfaces for all data transfer objects — defined once in `src/shared/types.ts` and imported by all TypeScript containers and the client
-- Abstract classes for all swappable components
-- No business logic in entrypoints (`main.ts`) — delegate to interface implementations
+- TypeScript strict mode enabled (`erasableSyntaxOnly: true` — no parameter properties)
+- Interfaces for all data transfer objects — defined once in `shared/types.ts` and imported by all TypeScript services and the client
+- Abstract classes / interfaces for all swappable components
+- No business logic in entrypoints (`main.ts`, `App.tsx`) — delegate to implementations
+- Capture and session concerns must remain separated — `CaptureSession` never references session IDs or transport
 
 **Python (Evaluation)**
 - Python 3.11+

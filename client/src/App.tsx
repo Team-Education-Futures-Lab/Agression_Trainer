@@ -1,7 +1,8 @@
-import type {ServerMessage, SessionState} from "@ar-training/shared"
-import {CaptureSession} from "./capture.ts";
-import {WebSocketTransport} from "./transport.ts";
-import {useEffect, useRef, useState} from "react";
+import { useEffect, useRef, useState } from "react";
+import { CaptureSession } from "./capture";
+import { WebSocketTransport } from "./transport";
+import DebugOverlay from "./DebugOverlay";
+import type { SessionState, ServerMessage, VideoFrame, AudioChunk } from "@ar-training/shared";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -15,7 +16,7 @@ const transport = new WebSocketTransport(WS_BASE);
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
-    const videoRef = useRef<HTMLVideoElement>(null);
+    const videoRef = useRef<HTMLVideoElement | null>(null);
 
     const [ready, setReady]                 = useState(false);
     const [sessionState, setSessionState]   = useState<SessionState>("idle");
@@ -25,13 +26,16 @@ export default function App() {
     const [chunkCount, setChunkCount]       = useState(0);
     const [lastMessage, setLastMessage]     = useState<string>("");
     const [error, setError]                 = useState<string | null>(null);
+    const [showDebug, setShowDebug]         = useState(false);
+    const [lastFrame, setLastFrame]         = useState<VideoFrame | null>(null);
+    const [lastChunk, setLastChunk]         = useState<AudioChunk | null>(null);
 
     // ── Init MediaPipe on mount ────────────────────────────────────────────────
 
     useEffect(() => {
         capture.init()
             .then(() => setReady(true))
-            .catch(err => setError(`MediaPipe init failed: ${err.message}`));
+            .catch(e => setError(`MediaPipe init failed: ${e.message}`));
     }, []);
 
     // ── Wire transport → state ─────────────────────────────────────────────────
@@ -39,39 +43,56 @@ export default function App() {
     useEffect(() => {
         transport.onMessage((msg: ServerMessage) => {
             setLastMessage(JSON.stringify(msg, null, 2));
-            switch (msg.type) {
-                case "session_update":
-                    setEscalation(msg.escalation_score);
-                    if (msg.queue_position != null) setSessionState("queued");
-                    break;
-                case "session_complete":
-                    setSessionState("completed");
-                    break;
-                case "error":
-                    setError(msg.message);
-                    setSessionState("error");
-                    break;
+            if (msg.type === "session_update") {
+                setEscalation(msg.escalation_score);
+                if (msg.queue_position != null) setSessionState("queued");
+            } else if (msg.type === "session_complete") {
+                setSessionState("completed");
+            } else if (msg.type === "error") {
+                setError(msg.message);
+                setSessionState("error");
             }
         });
 
         transport.onStateChange(state => {
-            if (state === "disconnected")   setSessionState(s => s === "idle" ? "idle" : "dropped");
-            if (state === "error")          setSessionState("error");
+            if (state === "disconnected") setSessionState(s => s === "idle" ? "idle" : "dropped");
+            if (state === "error")        setSessionState("error");
         });
     }, []);
+
+    const handleTestCamera = async () => {
+        if (!videoRef.current) return;
+        setError(null);
+        try {
+            await capture.start({
+                sessionId: "test",
+                videoEl: videoRef.current,
+                onFrame: (frame) => {
+                    setLastFrame(frame);
+                    setFrameCount(n => n + 1);
+                },
+                onAudio: (chunk) => {
+                    setLastChunk(chunk);
+                    setChunkCount(n => n + 1);
+                },
+                onError: (e) => setError(e.message),
+            });
+        } catch (e: unknown) {
+            setError(e instanceof Error ? e.message : String(e));
+        }
+    };
 
     // ── Session start ──────────────────────────────────────────────────────────
 
     const handleStart = async () => {
         if (!videoRef.current) return;
-
         setError(null);
         setSessionState("connecting");
 
         try {
             const res = await fetch(`${HTTP_BASE}/session/create`, {
                 method: "POST",
-                headers: {"Content-Type": "application/json"},
+                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     user_id: "dev-user",
                     scenario_id: "scenario_01",
@@ -81,7 +102,7 @@ export default function App() {
 
             if (!res.ok) {
                 const data = await res.json();
-                throw new Error(data.message ?? `HTTP status ${res.status}`);
+                throw new Error(data.message ?? `HTTP ${res.status}`);
             }
 
             const data = await res.json();
@@ -96,10 +117,12 @@ export default function App() {
                 videoEl: videoRef.current,
                 onFrame: (frame) => {
                     transport.sendFrame(frame);
+                    setLastFrame(frame);
                     setFrameCount(n => n + 1);
                 },
                 onAudio: (chunk) => {
                     transport.sendAudio(chunk);
+                    setLastChunk(chunk);
                     setChunkCount(n => n + 1);
                 },
                 onError: (e) => {
@@ -107,8 +130,8 @@ export default function App() {
                     setSessionState("error");
                 },
             });
-        } catch (error: unknown) {
-            const msg = error instanceof Error ? error.message : String(error);
+        } catch (e: unknown) {
+            const msg = e instanceof Error ? e.message : String(e);
             setError(msg);
             setSessionState("error");
         }
@@ -147,6 +170,13 @@ export default function App() {
 
             <div style={styles.controls}>
                 <button
+                    onClick={handleTestCamera}
+                    disabled={!ready || isActive}
+                    style={btnStyle(!ready || isActive)}
+                >
+                    Test Camera
+                </button>
+                <button
                     onClick={handleStart}
                     disabled={!ready || isActive}
                     style={btnStyle(!ready || isActive)}
@@ -159,6 +189,12 @@ export default function App() {
                     style={btnStyle(!isActive, true)}
                 >
                     Stop Session
+                </button>
+                <button
+                    onClick={() => setShowDebug(v => !v)}
+                    style={btnStyle(false, false, true)}
+                >
+                    {showDebug ? "Hide Debug" : "Show Debug"}
                 </button>
             </div>
 
@@ -180,6 +216,13 @@ export default function App() {
                     <pre style={styles.messagePre}>{lastMessage}</pre>
                 </div>
             )}
+            {showDebug && (
+                <DebugOverlay
+                    lastFrame={lastFrame}
+                    lastChunk={lastChunk}
+                    rawVideoEl={videoRef.current}
+                />
+            )}
         </div>
     );
 }
@@ -197,8 +240,8 @@ function Stat({ label, value, color = "#94a3b8" }: { label: string; value: strin
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function btnStyle(disabled: boolean, danger = false): React.CSSProperties {
-    const bg = disabled ? "#334155" : danger ? "#ef4444" : "#6366f1";
+function btnStyle(disabled: boolean, danger = false, neutral = false): React.CSSProperties {
+    const bg = disabled ? "#334155" : danger ? "#ef4444" : neutral ? "#334155" : "#6366f1";
     return {
         padding: "8px 20px", borderRadius: 8, border: "none",
         cursor: disabled ? "not-allowed" : "pointer",
