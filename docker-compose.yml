@@ -1,8 +1,23 @@
 services:
+
+  # ── Client ──────────────────────────────────────────────────────────────────
   client:
     build:
       context: .
       dockerfile: client/Dockerfile
     ports:
       - "3000:80"
+    restart: unless-stopped
+
+  # ── App ─────────────────────────────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: app/Dockerfile
+    env_file: app/.env
+    environment:
+      EVALUATION_URL: http://evaluation:8001
+      FEEDBACK_URL:   http://feedback:8002
+    ports:
+      - "3001:3000"
     restart: unless-stopped

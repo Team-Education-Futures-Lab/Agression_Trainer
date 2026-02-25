@@ -199,6 +199,25 @@ export interface ClipMetadata {
     branch_conditions: BranchCondition[];
 }
 
+// ─── Evaluation — cross-container requests ───────────────────────────────────
+
+/**
+ * A ~2 second window of captured data sent to the Evaluation container for analysis.
+ * Assembled by the Coordinator from incoming VideoFrames and AudioChunks.
+ *
+ * Wire format: POST /evaluate/analyze
+ */
+export interface AnalysisWindow {
+    window_id:     WindowID;
+    session_id:    string;
+    frames:        VideoFrame[];
+    /** Flattened MFCCs from all AudioChunks in the window. [n_frames][13] */
+    mfccs:         number[][];
+    /** Transcript from Whisper for this window, empty string if not yet available. */
+    transcript:    string;
+    clip_metadata: ClipMetadata;
+}
+
 // ─── Evaluation — cross-container results ────────────────────────────────────
 
 /**
