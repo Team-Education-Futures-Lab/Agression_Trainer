@@ -8,6 +8,7 @@ import type {
 } from "@ar-training/shared";
 import type { CoordinatorConfig } from "./types.js";
 import {clearTimeout} from "node:timers";
+import {createParser, type EventSourceMessage} from "eventsource-parser";
 
 export type SendFn = (message: ServerMessage) => void;
 
@@ -112,36 +113,22 @@ export class Coordinator {
 
         if (!res.ok || !res.body) return;
 
-        const reader = res.body.getReader();
         const decoder = new TextDecoder();
-        let buffer = "";
-
-        while (true) {
-            const {done, value} = await reader.read();
-            if (done) break;
-
-            buffer += decoder.decode(value, {stream: true});
-            const lines = buffer.split("\n");
-            buffer = lines.pop() ?? "";
-
-            for (const line of lines) {
-                if (!line.startsWith("data: ")) continue;
-                const json = line.slice(6).trim();
-                if (!json) continue;
-
+        const parser = createParser({
+            onEvent(event: EventSourceMessage) {
                 try {
-                    const event = JSON.parse(json) as { type: string; token?: string; feedback?: object };
+                    const data = JSON.parse(event.data) as { type: string; token?: string; feedback?: object };
 
-                    if (event.type === "token") {
+                    if (data.type === "token") {
                         const msg: FeedbackToken = {
                             type:       "feedback_token",
                             session_id: sessionId,
-                            token:      event.token ?? "",
+                            token:      data.token ?? "",
                         };
                         state.sendFn(msg);
 
-                    } else if (event.type === "complete") {
-                        const fb = event.feedback as { advice: string; severity: "low" | "medium" | "high"; highlights: string[] };
+                    } else if (data.type === "complete") {
+                        const fb = data.feedback as { advice: string; severity: "low" | "medium" | "high"; highlights: string[] };
                         const msg: SessionComplete = {
                             type:       "session_complete",
                             session_id: sessionId,
@@ -155,6 +142,10 @@ export class Coordinator {
                     // Malformed SSE event — skip and continue
                 }
             }
+        });
+
+        for await (const chunk of res.body) {
+            parser.feed(decoder.decode(chunk, {stream: true}));
         }
     }
 
