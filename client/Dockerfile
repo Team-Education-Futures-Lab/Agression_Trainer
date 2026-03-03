@@ -3,27 +3,21 @@ FROM node:22-alpine AS builder
 
 WORKDIR /app
 
-# Copy shared package — available because build context is the repo root.
-# See docs/CONTRIBUTING.md for why builds must be run from the repo root.
+# Copy both packages — build context must be repo root
 COPY shared/ ./shared/
+COPY client/ ./client/
 
 WORKDIR /app/client
 
-# Verify shared package is present — fails with a clear message if the build
-# context is not the repo root (e.g. docker build run from client/ directly)
+# Verify shared package is present
 RUN test -f /app/shared/types.ts && test -f /app/shared/package.json || \
     { echo "ERROR: shared/ package not found. Build from repo root: docker build -f client/Dockerfile ."; exit 1; }
 
-# Copy scripts first — needed by postinstall which runs during npm ci
-COPY client/scripts/ ./scripts/
+# Copy MediaPipe WASM script and run postinstall manually
+# npm ci is replaced with npm install so the file: reference resolves correctly
+RUN npm install
 
-# Install dependencies.
-# postinstall copies MediaPipe WASM files into public/mediapipe/ automatically.
-COPY client/package.json client/package-lock.json ./
-RUN npm ci
-
-# Copy source and build
-COPY client/ .
+# Build
 RUN npm run build
 
 # ── Stage 2: Serve ────────────────────────────────────────────────────────────

@@ -4,33 +4,39 @@ import type {
     ClipMetadata,
     ServerMessage,
     AnalysisWindow,
-    BehaviourResult, FeedbackRequest, FeedbackToken, SessionComplete
+    BehaviourResult
 } from "@ar-training/shared";
 import type { CoordinatorConfig } from "./types.js";
 import {clearTimeout} from "node:timers";
-import {createParser, type EventSourceMessage} from "eventsource-parser";
+import {EvaluationRouter} from "./evaluation-router.js";
 
 export type SendFn = (message: ServerMessage) => void;
 
 // ─── Per-session state ────────────────────────────────────────────────────────
 
 interface SessionState {
-    clip:            ClipMetadata;
-    sendFn:          SendFn;
-    frames:          VideoFrame[];
-    mfccs:           number[][][];
-    sequence:        number;
-    clipScores:      number[];
-    timer:           NodeJS.Timeout;
+    clip:           ClipMetadata;
+    sendFn:         SendFn;
+    frames:         VideoFrame[];
+    mfccs:          number[][][];
+    sequence:       number;
+    clipScores:     number[];
+    lastResult:     BehaviourResult | null;
+    lastTranscript: string;
+    timer:          NodeJS.Timeout;
 }
 
 // ─── Coordinator ──────────────────────────────────────────────────────────────
 export class Coordinator {
-    private readonly config: CoordinatorConfig;
-    private readonly sessions: Map<string, SessionState> = new Map();
+    private readonly config:     CoordinatorConfig;
+    private readonly router:     EvaluationRouter;
+    private readonly sessions:   Map<string, SessionState> = new Map();
+    private readonly authHeader: string;
 
     constructor(config: CoordinatorConfig) {
-        this.config = config;
+        this.config     = config;
+        this.router     = new EvaluationRouter(config.evaluationUrls);
+        this.authHeader = `Bearer ${config.internalApiKey}`;
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -40,10 +46,12 @@ export class Coordinator {
         this.sessions.set(sessionId, {
             clip,
             sendFn,
-            frames: [],
-            mfccs: [],
-            sequence: 0,
-            clipScores: [],
+            frames:         [],
+            mfccs:          [],
+            sequence:       0,
+            clipScores:     [],
+            lastResult:     null,
+            lastTranscript: "",
             timer,
         });
     }
@@ -53,6 +61,7 @@ export class Coordinator {
         if (!state) return;
         clearTimeout(state.timer);
         this.sessions.delete(sessionId);
+        this.router.releaseSession(sessionId);
     }
 
     onFrame(frame: VideoFrame): void {
@@ -86,8 +95,9 @@ export class Coordinator {
         state.clipScores = [];
 
         try {
-            await fetch(`${this.config.evaluationUrl}/evaluate/reset/${sessionId}`, {
-                method: "POST",
+            await fetch(`${this.router.getUrl(sessionId)}/evaluate/reset/${sessionId}`, {
+                method:  "POST",
+                headers: { "Authorization": this.authHeader },
             });
         } catch {
             // Non-fatal — session continues regardless
@@ -101,52 +111,14 @@ export class Coordinator {
         return sum / state.clipScores.length;
     }
 
-    async streamFeedback(sessionId: string, feedbackReq: FeedbackRequest, feedbackUrl: string): Promise<void> {
+    getLastResult(sessionId: string): BehaviourResult | null {
+        return this.sessions.get(sessionId)?.lastResult ?? null;
+    }
+
+    getLastTranscript(sessionId: string): string | null {
         const state = this.sessions.get(sessionId);
-        if (!state) return;
-
-        const res = await fetch(`${feedbackUrl}/feedback/generate/stream`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(feedbackReq),
-        });
-
-        if (!res.ok || !res.body) return;
-
-        const decoder = new TextDecoder();
-        const parser = createParser({
-            onEvent(event: EventSourceMessage) {
-                try {
-                    const data = JSON.parse(event.data) as { type: string; token?: string; feedback?: object };
-
-                    if (data.type === "token") {
-                        const msg: FeedbackToken = {
-                            type:       "feedback_token",
-                            session_id: sessionId,
-                            token:      data.token ?? "",
-                        };
-                        state.sendFn(msg);
-
-                    } else if (data.type === "complete") {
-                        const fb = data.feedback as { advice: string; severity: "low" | "medium" | "high"; highlights: string[] };
-                        const msg: SessionComplete = {
-                            type:       "session_complete",
-                            session_id: sessionId,
-                            advice:     fb.advice,
-                            severity:   fb.severity,
-                            highlights: fb.highlights,
-                        };
-                        state.sendFn(msg);
-                    }
-                } catch {
-                    // Malformed SSE event — skip and continue
-                }
-            }
-        });
-
-        for await (const chunk of res.body) {
-            parser.feed(decoder.decode(chunk, {stream: true}));
-        }
+        if (!state || state.lastTranscript === "") return null;
+        return state.lastTranscript;
     }
 
     // ── Internal ──────────────────────────────────────────────────────────────
@@ -161,12 +133,12 @@ export class Coordinator {
 
     private async dispatchWindow(
         sessionId: string,
-        state: SessionState,
-        force: boolean,
+        state:     SessionState,
+        force:     boolean,
     ): Promise<void> {
         if (!force && state.frames.length < this.config.minFramesPerWindow) {
             state.frames = [];
-            state.mfccs = [];
+            state.mfccs  = [];
             return;
         }
 
@@ -174,35 +146,39 @@ export class Coordinator {
         const windowId = `${sessionId}:${state.sequence}`;
 
         const window: AnalysisWindow = {
-            window_id: windowId,
-            session_id: sessionId,
-            frames: state.frames,
-            mfccs: state.mfccs.flat(1),
-            transcript: "",
+            window_id:     windowId,
+            session_id:    sessionId,
+            frames:        state.frames,
+            mfccs:         state.mfccs.flat(1),
+            transcript:    "",
             clip_metadata: state.clip,
         };
 
         state.frames = [];
-        state.mfccs = [];
+        state.mfccs  = [];
 
         try {
-            const res = await fetch(`${this.config.evaluationUrl}/evaluate/analyse`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
+            const res = await fetch(`${this.router.getUrl(sessionId)}/evaluate/analyse`, {
+                method:  "POST",
+                headers: {
+                    "Content-Type":  "application/json",
+                    "Authorization": this.authHeader,
+                },
                 body: JSON.stringify(window),
             });
 
             if (!res.ok) return;
 
-            const result = await res.json() as BehaviourResult;
+            const result      = await res.json() as BehaviourResult;
             state.clipScores.push(result.escalation_score);
+            state.lastResult  = result;
 
             state.sendFn({
-                type: "session_update",
-                session_id: sessionId,
-                window_id: windowId,
+                type:             "session_update",
+                session_id:       sessionId,
+                window_id:        windowId,
                 escalation_score: result.escalation_score,
-                queue_position: null,
+                queue_position:   null,
             });
         } catch {}
     }

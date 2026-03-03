@@ -1,0 +1,57 @@
+{
+    "scenario_id": "scenario_01",
+    "title": "Boze student",
+    "description": "Een student is boos over een onvoldoende en confronteert de docent. Oefen met het behouden van een kalme, constructieve toon onder druk.",
+    "language": "nl",
+    "entry_clip": "clip_01_intro",
+
+    "clips": {
+        "clip_01_intro": {
+            "file": "clip_01_intro.mp4",
+            "transcript": "Dit is niet eerlijk! Ik heb zo hard gewerkt en dan krijg ik toch een onvoldoende. U snapt gewoon niet hoe moeilijk dit voor mij is.",
+            "notable_features": ["raised_voice", "aggressive_posture", "direct_eye_contact"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score":  0.2,  "next_clip": "clip_02_calm" },
+                { "min_score":  0.2, "max_score":  1.01, "next_clip": "clip_02_escalated" }
+            ]
+        },
+
+        "clip_02_calm": {
+            "file": "clip_02_calm.mp4",
+            "transcript": "Oké... misschien heb ik me laten meeslepen. Kunt u me uitleggen wat er precies mis was?",
+            "notable_features": ["calm_voice", "open_posture"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score":  0.3,  "next_clip": "clip_03_end_good" },
+                { "min_score":  0.3, "max_score":  1.01, "next_clip": "clip_03_end_bad" }
+            ]
+        },
+
+        "clip_02_escalated": {
+            "file": "clip_02_escalated.mp4",
+            "transcript": "Ziet u wel! U luistert toch niet. Dit is altijd hetzelfde met u!",
+            "notable_features": ["raised_voice", "pointing_gesture", "aggressive_posture"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score":  0.0,  "next_clip": "clip_03_end_bad" },
+                { "min_score":  0.0, "max_score":  1.01, "next_clip": "clip_03_end_bad" }
+            ]
+        },
+
+        "clip_03_end_good": {
+            "file": "clip_03_end_good.mp4",
+            "transcript": "Dank u wel. Ik begrijp het nu beter. Ik zal er de volgende keer beter op letten.",
+            "notable_features": ["calm_voice", "open_posture", "backing_away"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
+            ]
+        },
+
+        "clip_03_end_bad": {
+            "file": "clip_03_end_bad.mp4",
+            "transcript": "Laat maar. Ik ga dit melden bij de schoolleiding.",
+            "notable_features": ["raised_voice", "aggressive_posture"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
+            ]
+        }
+    }
+}

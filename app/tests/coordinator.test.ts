@@ -11,9 +11,10 @@ const WINDOW_MS      = 2_000;
 
 function makeConfig(): CoordinatorConfig {
     return {
-        evaluationUrl: EVALUATION_URL,
+        evaluationUrls:     [EVALUATION_URL],
+        internalApiKey:     "test-key",
         minFramesPerWindow: MIN_FRAMES,
-        windowMs: WINDOW_MS,
+        windowMs:           WINDOW_MS,
     };
 }
 
@@ -384,6 +385,44 @@ describe("Coordinator", () => {
             expect(body.mfccs).toHaveLength(0);
         });
     });
+
+    describe("last result and transcript", () => {
+        it("getLastResult returns null before any window is dispatched", () => {
+            const coord = new Coordinator(makeConfig());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+            expect(coord.getLastResult("s1")).toBeNull();
+        });
+
+        it("getLastResult returns the most recent BehaviourResult after a dispatch", async () => {
+            const result = makeBehaviourResult("s1", "s1:1", 0.3);
+            mockFetchSuccess(result);
+
+            const coord = new Coordinator(makeConfig());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+
+            for (let i = 0; i < MIN_FRAMES; i++) coord.onFrame(makeFrame("s1", i));
+            await vi.advanceTimersByTimeAsync(WINDOW_MS);
+
+            expect(coord.getLastResult("s1")).toEqual(result);
+        });
+
+        it("getLastTranscript returns null before any transcript is set", () => {
+            const coord = new Coordinator(makeConfig());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+            expect(coord.getLastTranscript("s1")).toBeNull();
+        });
+
+        it("getLastResult returns null for an unknown session", () => {
+            const coord = new Coordinator(makeConfig());
+            expect(coord.getLastResult("unknown")).toBeNull();
+        });
+
+        it("getLastTranscript returns null for an unknown session", () => {
+            const coord = new Coordinator(makeConfig());
+            expect(coord.getLastTranscript("unknown")).toBeNull();
+        });
+    });
+
 
     // ── SendFn lifecycle ──────────────────────────────────────────────────────
 

@@ -15,11 +15,7 @@ flowchart LR
 
     subgraph APP["APP CONTAINER (TypeScript / Node)"]
         SM["Session Manager\n―――――――――\nLifecycle & capacity\nQueue management"]
-        CO["Coordinator\n―――――――――\nAssembles AnalysisWindows\nRoutes results"]
-    end
-
-    subgraph PROXY["NGINX"]
-        PX["Proxy\n―――――――――\nRound-robin routing\nSession pinning"]
+        CO["Coordinator\n―――――――――\nAssembles AnalysisWindows\nRoutes to AI services"]
     end
 
     subgraph EVAL["EVALUATION CONTAINER (Python — scalable)"]
@@ -37,10 +33,8 @@ flowchart LR
 
     CAP -->|"VideoFrame + AudioChunk\n(WebSocket)"| APP
     APP -->|"SessionUpdate\n(escalation_score)"| RES
-    APP -->|"POST /evaluate"| PROXY
-    APP -->|"POST /feedback"| PROXY
-    PROXY -->|"round-robin + pinned WS"| EVAL
-    PROXY -->|"POST /feedback/*"| FEED
+    APP -->|"POST /evaluate/analyse\nWS /ws/{session_id}"| EVAL
+    APP -->|"POST /feedback/generate/stream"| FEED
     EVAL -->|"BehaviourResult + Transcript"| APP
     FEED -->|"Feedback (SSE stream)"| APP
     FEED -->|"POST /api/generate"| OLL
@@ -54,7 +48,7 @@ Each session follows this sequence:
 
 1. **Capture** — The browser extracts face/hand landmarks (MediaPipe.js) and audio features (Meyda.js) from the webcam/microphone. Raw PCM and pre-computed MFCCs are sent to the App container over WebSocket, stamped with a `session_id`.
 
-2. **Coordinate** — The Coordinator assembles incoming frames, MFCCs, and transcripts into \~2s `AnalysisWindows`, each tagged with a `WindowID (session_id:sequence)` so async results can always be matched back to the correct session.
+2. **Coordinate** — The Coordinator assembles incoming frames, MFCCs, and transcripts into ~2s `AnalysisWindows`, each tagged with a `WindowID (session_id:sequence)` so async results can always be matched back to the correct session.
 
 3. **Evaluate** — The Evaluation container runs two things in parallel: Whisper transcribes the raw PCM audio, and the multimodal classifier analyses the full window (landmarks + MFCCs + transcript + clip context) to produce an `escalation_score`.
 
@@ -140,7 +134,6 @@ classDiagram
 |------------|-------------------|-----------------------------------------------------------|
 | Client     | TypeScript        | Frontend                                                  |
 | App        | TypeScript / Node | I/O heavy, WebSocket native, shares types with frontend   |
-| Nginx      | Config            | Replaces proxy container entirely                         |
 | Evaluation | Python            | faster-whisper and classifier require Python ML ecosystem |
 | Feedback   | TypeScript / Node | Pure I/O — formats prompt, streams Ollama response        |
 | Ollama     | —                 | Existing Docker image                                     |
@@ -153,37 +146,43 @@ Python is used exclusively where the ML ecosystem requires it. All other contain
 
 All AI components are interface-driven. Implementations can be swapped without changing any other part of the system.
 
-| Interface | Container | Language | Responsibility |
-|---|---|---|---|
-| `TransportInterface` | Client | TypeScript | Abstracts WebSocket/WebRTC/HTTP transport |
-| `ResponseHandlerInterface` | Client | TypeScript | Reacts to escalation scores and feedback |
-| `SessionManagerInterface` | App | TypeScript | Session lifecycle, capacity, queue |
-| `CoordinatorInterface` | App | TypeScript | Assembles streams into AnalysisWindows |
-| `TranscriptionInterface` | Evaluation | Python | Whisper pool, per-session VAD buffers |
-| `BehaviourAnalyserInterface` | Evaluation | Python | Multimodal escalation classifier |
-| `FeedbackGeneratorInterface` | Feedback | TypeScript | LLM debrief generation |
+| Interface                    | Container  | Language   | Responsibility                            |
+|------------------------------|------------|------------|-------------------------------------------|
+| `TransportInterface`         | Client     | TypeScript | Abstracts WebSocket/WebRTC/HTTP transport |
+| `ResponseHandlerInterface`   | Client     | TypeScript | Reacts to escalation scores and feedback  |
+| `SessionManagerInterface`    | App        | TypeScript | Session lifecycle, capacity, queue        |
+| `CoordinatorInterface`       | App        | TypeScript | Assembles streams into AnalysisWindows    |
+| `TranscriptionInterface`     | Evaluation | Python     | Whisper pool, per-session VAD buffers     |
+| `BehaviourAnalyserInterface` | Evaluation | Python     | Multimodal escalation classifier          |
+| `FeedbackGeneratorInterface` | Feedback   | TypeScript | LLM debrief generation                    |
 
 ---
 
 ## Deployment
 
-Designed for single-server classroom deployment with optional scaling for larger institutions. The proxy is Nginx — no custom proxy code is required.
+Designed for single-server classroom deployment with optional scaling for larger institutions.
+
+The App container routes requests to AI services directly using URLs read from environment variables. There is no proxy container — adding or moving AI service instances is a one-line `.env` change, and no application code needs to be touched.
 
 ```mermaid
 flowchart TD
     A["docker compose up\n(default — everything on one server)"]
-    B["--scale evaluation=N\n(multiple Whisper workers, same server)"]
+    B["--scale evaluation=N\n(multiple Whisper workers, same server)\nApp round-robins across instances"]
     C["FEEDBACK_URL=http://server2:8002\n(dedicated GPU machine for Ollama)"]
-    D["EVALUATION_URL=url1,url2,...\n(evaluation spread across multiple hosts — Nginx round-robins)"]
+    D["EVALUATION_URLS=url1,url2,...\n(evaluation spread across multiple hosts)\nApp round-robins across the list"]
 
     A --> B --> C --> D
 ```
 
-| Scenario | How |
-|---|---|
-| Single server | `docker compose up` — no config changes needed |
-| Scale evaluation | `docker compose up --scale evaluation=N` |
-| Offload feedback/Ollama | Set `FEEDBACK_URL` in `.env` to a second server |
-| Multi-host evaluation | Set `EVALUATION_URL` to comma-separated host list in Nginx config |
+| Scenario                | How                                                                        |
+|-------------------------|----------------------------------------------------------------------------|
+| Single server           | `docker compose up` — no config changes needed                             |
+| Scale evaluation        | `docker compose up --scale evaluation=N` — App detects instances via DNS   |
+| Offload feedback/Ollama | Set `FEEDBACK_URL` in `.env` to point at a second server                   |
+| Multi-host evaluation   | Set `EVALUATION_URLS` in `.env` to a comma-separated list of host URLs     |
 
-All configuration lives in `.env` and `nginx.conf`. IT departments never need to touch application code to scale.
+All routing configuration lives in `.env`. IT departments never need to touch application code to scale.
+
+### TLS in multi-server deployments
+
+When AI services run on separate machines, connections cross the public internet and must be encrypted. TLS termination should be handled at the infrastructure layer on each remote machine (e.g. Caddy or the institution's existing reverse proxy) rather than inside the containers. The App container then points `EVALUATION_URLS` / `FEEDBACK_URL` at `https://` addresses. No certificate management is required inside this stack.

@@ -4,14 +4,13 @@
 
 ## Tech Stack
 
-| Container  | Language   | Framework                                      |
-|------------|------------|------------------------------------------------|
-| Client     | TypeScript | React, Vite, MediaPipe.js, Meyda.js            |
-| App        | TypeScript | Node.js, Fastify, ws                           |
-| Nginx      | —          | Config only, replaces custom proxy             |
-| Evaluation | Python     | FastAPI, faster-whisper                        |
-| Feedback   | TypeScript | Node.js, Fastify                               |
-| Ollama     | —          | Existing Docker image                          |
+| Container  | Language   | Framework                           |
+|------------|------------|-------------------------------------|
+| Client     | TypeScript | React, Vite, MediaPipe.js, Meyda.js |
+| App        | TypeScript | Node.js, Fastify, ws                |
+| Evaluation | Python     | FastAPI, faster-whisper             |
+| Feedback   | TypeScript | Node.js, Fastify                    |
+| Ollama     | —          | Existing Docker image               |
 
 ---
 
@@ -42,13 +41,13 @@ docker compose run --rm ollama ollama pull llama3.2
 docker compose up --build
 ```
 
-The app will be available at `http://localhost:8000`.
+The app will be available at `http://localhost:3000` (client) and `http://localhost:3001` (app API).
 
 ---
 
 ## Running with Stubs (Recommended for Development)
 
-During development, you almost certainly want stub AI implementations so you don't need a trained classifier or a running Ollama instance. Set the following in `.env`:
+During development, you almost certainly want stub AI implementations so you don't need a trained classifier or a running Ollama instance. Set the following in `app/.env`:
 
 ```bash
 BEHAVIOUR_ANALYSER=stub
@@ -58,81 +57,86 @@ FEEDBACK_GENERATOR=stub
 Then start only the containers you need:
 
 ```bash
-# Run without the Ollama sidecar (stub doesn't need it)
-docker compose up app proxy evaluation feedback
+# Omit the Ollama sidecar — stubs don't need it
+docker compose up app client evaluation feedback
 ```
 
-See `STUBS.md` for details on stub behavior.
+See `stub_guide.md` for details on stub behaviour.
 
 ---
 
 ## Environment Variables
 
-All configuration lives in `.env`. The full reference is in `.env.example`. The most commonly changed variables during development:
+The App container reads its configuration from `app/.env`. The most commonly changed variables during development:
 
-| Variable             | Default               | Description                                   |
-|----------------------|-----------------------|-----------------------------------------------|
-| `BEHAVIOUR_ANALYSER` | `stub`                | `stub` or `production`                        |
-| `FEEDBACK_GENERATOR` | `stub`                | `stub` or `production`                        |
-| `WHISPER_MODEL`      | `base`                | `tiny`, `base`, `small`, `medium`, `large-v3` |
-| `WHISPER_LANGUAGE`   | `nl`                  | ISO 639-1 language code                       |
-| `WHISPER_WORKERS`    | `4`                   | Whisper instances in the pool                 |
-| `DEVICE`             | `cpu`                 | `cpu` or `cuda`                               |
-| `FEEDBACK_MODEL`     | `llama3.2`            | Ollama model name                             |
-| `OLLAMA_HOST`        | `http://ollama:11434` | Override to use external Ollama               |
+| Variable             | Default                  | Description                                                                                                                                     |
+|----------------------|--------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|
+| `INTERNAL_API_KEY`   | _(required)_             | Shared secret for App→Evaluation and App→Feedback requests. Generate once with `openssl rand -hex 32` and set the same value in all containers. |
+| `EVALUATION_URL`     | `http://evaluation:8001` | Single evaluation instance (default)                                                                                                            |
+| `EVALUATION_URLS`    | _(unset)_                | Comma-separated list for multi-host setups                                                                                                      |
+| `FEEDBACK_URL`       | `http://feedback:8002`   | Feedback service URL                                                                                                                            |
+| `BEHAVIOUR_ANALYSER` | `stub`                   | `stub` or `production`                                                                                                                          |
+| `FEEDBACK_GENERATOR` | `stub`                   | `stub` or `production`                                                                                                                          |
+| `WHISPER_MODEL`      | `base`                   | `tiny`, `base`, `small`, `medium`, `large-v3`                                                                                                   |
+| `WHISPER_LANGUAGE`   | `nl`                     | ISO 639-1 language code                                                                                                                         |
+| `WHISPER_WORKERS`    | `4`                      | Whisper instances in the pool                                                                                                                   |
+| `DEVICE`             | `cpu`                    | `cpu` or `cuda`                                                                                                                                 |
+| `FEEDBACK_MODEL`     | `llama3.2`               | Ollama model name                                                                                                                               |
+| `OLLAMA_HOST`        | `http://ollama:11434`    | Override to use external Ollama                                                                                                                 |
+
+When `EVALUATION_URLS` is set it takes precedence over `EVALUATION_URL`. The App container round-robins across all listed hosts and pins each session's audio WebSocket to a consistent instance using the session ID as a hash key.
 
 ---
 
 ## Project Structure
 
-This is a monorepo — one repository containing all services. Each service is a self-contained directory with its own dependencies, Dockerfile, and `.gitignore`. There is no reason for one service to access files from another service's directory at runtime; communication happens exclusively over HTTP and WebSocket as defined in `docs/API_CONTRACT.md`.
+This is a monorepo — one repository containing all services. Each service is a self-contained directory with its own dependencies, Dockerfile, and `.gitignore`. There is no reason for one service to access files from another service's directory at runtime; communication happens exclusively over HTTP and WebSocket as defined in `api_contract.md`.
 
 ```
 ar-training/
 ├── app/                        ← App container (TypeScript / Node)
 │   │                             Handles WebSocket connections, session lifecycle,
-│   │                             and coordinates data flow between client and AI services.
-│   ├── src/                    ← Application source code
+│   │                             and routes data between client and AI services.
+│   ├── src/
 │   ├── package.json
 │   ├── tsconfig.json
 │   ├── Dockerfile
-│   ├── README.md               ← Implementation details for this service
+│   ├── .env                    ← Local env (not committed — copy from .env.example)
+│   ├── README.md
 │   └── .gitignore
 │
 ├── evaluation/                 ← Evaluation container (Python)
 │   │                             Runs Whisper transcription and the multimodal
 │   │                             behaviour classifier. GPU-optional, horizontally scalable.
-│   ├── src/                    ← Application source code
+│   ├── src/
 │   ├── requirements.txt
 │   ├── Dockerfile
-│   ├── README.md               ← Implementation details for this service
+│   ├── README.md
 │   └── .gitignore
 │
 ├── feedback/                   ← Feedback container (TypeScript / Node)
 │   │                             Wraps Ollama to generate end-of-session debrief advice.
-│   ├── src/                    ← Application source code
+│   ├── src/
 │   ├── package.json
 │   ├── tsconfig.json
 │   ├── Dockerfile
-│   ├── README.md               ← Implementation details for this service
+│   ├── README.md
 │   └── .gitignore
 │
 ├── client/                     ← Browser client (TypeScript / React)
 │   │                             Captures webcam and microphone, extracts landmarks
-│   │                             and audio features, and communicates with the App container.
-│   ├── src/                    ← Application source code
-│   ├── public/                 ← Static assets served directly by Vite / nginx.
-│   │                             Contains generated files (e.g. MediaPipe WASM) that
-│   │                             are not committed to version control.
-│   ├── scripts/                ← Build-time helper scripts (e.g. copying WASM files
-│   │                             from node_modules into public/ after npm install)
+│   │                             and audio features, communicates with the App container.
+│   │                             Served by its own Nginx instance in production.
+│   ├── src/
+│   ├── public/                 ← Static assets (MediaPipe WASM etc, not committed)
+│   ├── scripts/                ← Build-time helpers (copies WASM from node_modules)
 │   ├── package.json
 │   ├── tsconfig.json
 │   ├── vite.config.ts
 │   ├── index.html
-│   ├── nginx.conf              ← Nginx config used in the production Docker image
+│   ├── nginx.conf              ← Nginx config for the production Docker image
 │   ├── Dockerfile
-│   ├── README.md               ← Implementation details for this service
+│   ├── README.md
 │   └── .gitignore
 │
 ├── shared/                     ← Shared TypeScript types (not a runnable service)
@@ -141,10 +145,6 @@ ar-training/
 │   │                             dependency by app/, feedback/, and client/.
 │   ├── types.ts
 │   └── package.json
-│
-├── nginx/                      ← Proxy configuration
-│   └── nginx.conf              ← Routes /evaluate/* and /feedback/* to the
-│                                 correct containers, pins WebSocket sessions
 │
 ├── scenarios/                  ← Scenario content (video + metadata)
 │   │                             Each subdirectory is one scenario. Video files
@@ -157,15 +157,14 @@ ar-training/
 │   └── classifier.pkl          ← Provided separately, mounted at runtime
 │
 ├── docs/                       ← Project-level documentation
-│   │                             Implementation details live in each service's README.
-│   ├── ARCHITECTURE.md
-│   ├── API_CONTRACT.md
-│   ├── SESSION_LIFECYCLE.md
-│   ├── STUBS.md
-│   └── CONTRIBUTING.md
+│   ├── architecture.md
+│   ├── api_contract.md
+│   ├── session_lifecycle.md
+│   ├── stub_guide.md
+│   ├── scenario_schema.md
+│   └── dev_setup.md            ← This file
 │
-├── docker-compose.yml          ← Defines all services and their relationships
-├── .env.example                ← Template for required environment variables
+├── docker-compose.yml
 └── .gitignore                  ← Repo-wide: .env, *.log, .DS_Store
 ```
 
@@ -198,9 +197,7 @@ The `shared/` package contains TypeScript type definitions used by `app/`, `feed
 }
 ```
 
-The Python `evaluation/` container defines its own dataclasses in `src/interfaces.py` — these mirror the shared TypeScript types and the JSON shapes in `docs/API_CONTRACT.md`.
-
-Each service's README describes how it uses these types internally.
+The Python `evaluation/` container defines its own dataclasses in `src/interfaces.py` — these mirror the shared TypeScript types and the JSON shapes in `api_contract.md`.
 
 ---
 
@@ -223,19 +220,20 @@ docker compose up
 # Start with rebuilt images (after code changes)
 docker compose up --build
 
-# Scale evaluation workers
+# Scale evaluation workers on the same server
 docker compose up --scale evaluation=3
 
 # View logs for a specific container
 docker compose logs -f evaluation
 
-# Run a one-off command inside a container
+# Run tests inside a container
+docker compose run --rm app npm test
 docker compose run --rm evaluation python -m pytest
 
-# Stop everything and remove containers
+# Stop everything
 docker compose down
 
-# Stop and also remove volumes (clears Ollama model cache)
+# Stop and remove volumes (clears Ollama model cache)
 docker compose down -v
 ```
 
@@ -245,7 +243,7 @@ docker compose down -v
 
 1. Create a directory under `scenarios/` named after your `scenario_id`
 2. Add video clips as `.mp4` files
-3. Create `metadata.json` following the schema in `scenarios/schema.md`
+3. Create `metadata.json` following the schema in `scenario_schema.md`
 4. Verify the branching graph has no dead ends (every non-terminal clip must have conditions covering `-1.0` to `1.0`)
 5. Restart the App container — scenarios are loaded at startup
 
@@ -258,8 +256,8 @@ Each AI component has a corresponding interface in `evaluation/src/interfaces.py
 1. Create a new file in the appropriate container's source directory (e.g. `evaluation/src/my_classifier.py`)
 2. Subclass the relevant interface (`BehaviourAnalyserInterface` or `FeedbackGeneratorInterface`)
 3. Implement all abstract methods
-4. Register the new implementation in the container's factory function (see `STUBS.md` for the pattern)
-5. Set the corresponding environment variable in `.env`
+4. Register the new implementation in the container's factory function (see `stub_guide.md` for the pattern)
+5. Set the corresponding environment variable in `app/.env`
 
 The rest of the system requires no changes.
 

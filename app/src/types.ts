@@ -48,8 +48,12 @@ export interface SessionContext {
  * See .env.example for defaults.
  */
 export interface CoordinatorConfig {
-    /** Base URL of the Evaluation container, e.g. "http://evaluation:8001". */
-    evaluationUrl:      string;
+    /** One or more Evaluation instance base URLs.
+     *  A single entry is the common case; multiple entries enable session-pinned
+     *  load distribution via EvaluationRouter. */
+    evaluationUrls:     string[];
+    /** Shared secret sent as Authorization: Bearer on all outbound AI requests. */
+    internalApiKey:     string;
     /** Minimum number of frames required to dispatch a window. Windows below
      *  this threshold are discarded. Flush bypasses this check. */
     minFramesPerWindow: number;

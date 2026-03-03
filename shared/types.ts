@@ -67,7 +67,26 @@ export interface AudioChunk {
     mfccs: number[][];
 }
 
-export type ClientMessage = VideoFrame | AudioChunk;
+/**
+ * Sent by the client when a scenario clip finishes playing.
+ *
+ * The App container uses this to:
+ *   1. Flush any partial analysis window for the clip
+ *   2. Compute the clip's average escalation_score
+ *   3. Resolve the next clip from branch_conditions
+ *   4. Append a ConversationTurn to the session history
+ *   5. Transition ACTIVE → PAUSED → ACTIVE (or COMPLETED if terminal)
+ *
+ * The client must stop sending VideoFrame and AudioChunk messages after
+ * sending this and wait for a ClipReady or SessionComplete response.
+ */
+export interface ClipEnded {
+    type: "clip_ended";
+    session_id: string;
+    clip_id: string;
+}
+
+export type ClientMessage = VideoFrame | AudioChunk | ClipEnded;
 
 // ─── Server → Client (WebSocket) ─────────────────────────────────────────────
 
@@ -120,7 +139,23 @@ export interface ServerError {
     message: string;
 }
 
-export type ServerMessage = SessionUpdate | SessionComplete | FeedbackToken | ServerError;
+/**
+ * Sent by the App container after processing a ClipEnded message.
+ * Tells the client which clip to load and play next.
+ *
+ * When next_clip_id is null the scenario is complete — the client should
+ * wait for FeedbackToken and SessionComplete messages.
+ */
+export interface ClipReady {
+    type: "clip_ready";
+    session_id: string;
+    /** The clip the client should load and begin playing. Null if terminal. */
+    next_clip_id: string | null;
+    /** The escalation_score that drove this branching decision. */
+    clip_score: number;
+}
+
+export type ServerMessage = SessionUpdate | SessionComplete | FeedbackToken | ServerError | ClipReady;
 
 // ─── HTTP — Session management ────────────────────────────────────────────────
 

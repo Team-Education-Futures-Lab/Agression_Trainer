@@ -1,24 +1,72 @@
 import Fastify from "fastify";
-import websocketPlugin from "@fastify/websocket";
+import * as websocketPlugin from "@fastify/websocket";
 import { loadConfig } from "./config.js";
 import { SessionManager } from "./session-manager.js";
 import { Coordinator } from "./coordinator.js";
-import { StubScenarioLoader } from "./scenario-loader.js";
+import { FileScenarioLoader } from "./scenario-loader.js";
 import type { CreateSessionRequest, ClientMessage } from "@ar-training/shared";
+import {FeedbackClient} from "./feedback-client.js";
+import {ClipController} from "./clip-controller.js";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
-const config      = loadConfig();
-const app         = Fastify({ logger: true });
-const sessions    = new SessionManager(config.sessionManager);
-const coordinator = new Coordinator(config.coordinator);
-const scenarios   = new StubScenarioLoader();
+const config     = loadConfig();
+const app        = Fastify({ logger: true });
+const sessions   = new SessionManager(config.sessionManager);
+const coord      = new Coordinator(config.coordinator);
+const scenarios  = new FileScenarioLoader(config.scenariosDir);
+const feedback   = new FeedbackClient(config.feedbackUrl, config.internalApiKey);
+const controller = new ClipController(sessions, coord, scenarios, feedback);
 
 await app.register(websocketPlugin);
 
 // ─── Health ───────────────────────────────────────────────────────────────────
 
-app.get("/health", async () => ({ status: "ok" }));
+
+app.get("/health", async (_req, reply) => {
+    const evalResults = await Promise.allSettled(
+        config.evaluationUrls.map(url =>
+            fetch(`${url}/evaluate/health`).then(r => r.ok)
+        )
+    );
+
+    const evalInstances: Record<string, "ok" | "unreachable"> = {};
+    let evalOkCount = 0;
+
+    for (let i = 0; i < evalResults.length; i++) {
+        const url    = config.evaluationUrls[i];
+        const result = evalResults[i];
+        if (result.status === "fulfilled" && result.value) {
+            evalInstances[url] = "ok";
+            evalOkCount++;
+        } else {
+            evalInstances[url] = "unreachable";
+        }
+    }
+
+    const evalTotal  = config.evaluationUrls.length;
+    const evalStatus = evalOkCount === evalTotal ? "ok"
+            : evalOkCount === 0         ? "critical"
+            :                             "degraded";
+
+    const feedOk     = await fetch(`${config.feedbackUrl}/feedback/health`)
+        .then(r => r.ok).catch(() => false);
+    const feedStatus = feedOk ? "ok" : "unreachable";
+
+    const overallStatus = evalStatus === "critical"                              ? "critical"
+        : evalStatus === "degraded" || feedStatus === "unreachable" ? "degraded"
+            : "ok";
+
+    return reply
+        .code(overallStatus === "critical" ? 503 : 200)
+        .send({
+            status: overallStatus,
+            services: {
+                evaluation: { status: evalStatus, instances: evalInstances },
+                feedback:   { status: feedStatus },
+            },
+        });
+});
 
 // ─── Session routes ───────────────────────────────────────────────────────────
 
@@ -27,9 +75,8 @@ app.post<{ Body: CreateSessionRequest }>("/session/create", async (req, reply) =
     const result = sessions.createSession(user_id, scenario_id, language);
 
     if (result.status === "at_capacity") {
-        return reply.code(503).send({ error: "at_capacity", message: "Server is at capacity, try again later." });
+        return reply.code(503).send({ error: "at_capacity", message: "Server is at capacity." });
     }
-
     if (result.status === "queued") {
         return reply.code(200).send({
             session_id:     result.context.session_id,
@@ -37,7 +84,6 @@ app.post<{ Body: CreateSessionRequest }>("/session/create", async (req, reply) =
             queue_position: result.queue_position,
         });
     }
-
     return reply.code(200).send({
         session_id:  result.context.session_id,
         state:       "active",
@@ -48,11 +94,9 @@ app.post<{ Body: CreateSessionRequest }>("/session/create", async (req, reply) =
 
 app.post<{ Params: { session_id: string } }>("/session/:session_id/resume", async (req, reply) => {
     const result = sessions.resumeSession(req.params.session_id);
-
     if (result.status === "not_found") {
         return reply.code(404).send({ error: "session_not_found", message: "Session not found or expired." });
     }
-
     const ctx = result.context;
     return reply.code(200).send({
         session_id:      ctx.session_id,
@@ -66,35 +110,33 @@ app.post<{ Params: { session_id: string } }>("/session/:session_id/resume", asyn
 app.post<{ Params: { session_id: string } }>("/session/:session_id/end", async (req, reply) => {
     const { session_id } = req.params;
     const ctx = sessions.getSession(session_id);
-
     if (!ctx) {
         return reply.code(404).send({ error: "session_not_found", message: "Session not found or expired." });
     }
 
-    await coordinator.flushSession(session_id);
+    await coord.flushSession(session_id);
+    const feedbackReq = sessions.buildFeedbackRequest(session_id);
     sessions.endSession(session_id);
 
-    const feedbackReq = sessions.buildFeedbackRequest(session_id);
     if (feedbackReq) {
-        coordinator.streamFeedback(session_id, feedbackReq, config.feedbackUrl).catch(err => {
-            app.log.error({ err, session_id }, "Feedback streaming failed");
-        });
+        // sendFn is no longer available here since the WS is still open —
+        // this path is for explicit /end calls outside of the normal clip flow.
+        // For now we fire-and-forget; the WS handler will forward messages.
+        app.log.warn({ session_id }, "session/end called outside clip flow — feedback not streamed to client");
     }
 
     return reply.code(200).send({
         session_id,
         state:   "completed",
-        message: "Feedback generation started. Deliver via WebSocket.",
+        message: "Session ended.",
     });
 });
 
 app.get<{ Params: { session_id: string } }>("/session/:session_id/queue", async (req, reply) => {
     const result = sessions.getQueueStatus(req.params.session_id);
-
     if (result.state === "not_found") {
         return reply.code(404).send({ error: "session_not_found", message: "Session not found or expired." });
     }
-
     return reply.code(200).send({
         session_id:     req.params.session_id,
         state:          result.state,
@@ -110,10 +152,9 @@ app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
 
     if (!ctx || ctx.state !== "CONNECTING") {
         socket.send(JSON.stringify({
-            type:       "error",
-            session_id,
-            code:       "session_not_found",
-            message:    "Session not found or not in CONNECTING state.",
+            type: "error", session_id,
+            code: "session_not_found",
+            message: "Session not found or not in CONNECTING state.",
         }));
         socket.close();
         return;
@@ -124,17 +165,16 @@ app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
 
     if (!clip) {
         socket.send(JSON.stringify({
-            type:       "error",
-            session_id,
-            code:       "scenario_not_found",
-            message:    `No entry clip found for scenario ${ctx.scenario_id}.`,
+            type: "error", session_id,
+            code: "scenario_not_found",
+            message: `No entry clip found for scenario ${ctx.scenario_id}.`,
         }));
         socket.close();
         return;
     }
 
     const sendFn = (msg: object) => socket.send(JSON.stringify(msg));
-    coordinator.registerSession(session_id, clip, sendFn);
+    coord.registerSession(session_id, clip, sendFn);
     sessions.markActive(session_id);
     sessions.setCurrentClip(session_id, clip.clip_id);
 
@@ -143,21 +183,25 @@ app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
         try {
             msg = JSON.parse(raw.toString()) as ClientMessage;
         } catch {
-            app.log.warn({ session_id }, "Received malformed WebSocket message");
+            app.log.warn({ session_id }, "Malformed WebSocket message");
             return;
         }
 
         if (msg.type === "video_frame") {
-            coordinator.onFrame(msg);
+            coord.onFrame(msg);
         } else if (msg.type === "audio_chunk") {
-            coordinator.onAudio(msg);
+            coord.onAudio(msg);
+        } else if (msg.type === "clip_ended") {
+            controller.handleClipEnded(msg, sendFn).catch(err =>
+                app.log.error({ err, session_id }, "clip_ended handling failed")
+            );
         } else {
-            app.log.warn({ session_id }, "Received unknown WebSocket message type");
+            app.log.warn({ session_id }, "Unknown WebSocket message type");
         }
     });
 
     socket.on("close", () => {
-        coordinator.deregisterSession(session_id);
+        coord.deregisterSession(session_id);
         sessions.markDropped(session_id);
     });
 });

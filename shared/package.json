@@ -1,8 +1,14 @@
 {
-  "name": "@ar-trainer/shared",
+  "name": "@ar-training/shared",
   "version": "1.0.0",
   "description": "Shared TypeScript types for AR Training — single source of truth for all DTOs",
   "main": "types.ts",
   "types": "types.ts",
+  "exports": {
+    ".": {
+      "types": "./types.ts",
+      "default": "./types.ts"
+    }
+  },
   "private": true
 }

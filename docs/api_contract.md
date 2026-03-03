@@ -13,9 +13,9 @@ This document is the source of truth for inter-container communication. If a Pyt
 **Request**
 ```json
 {
-  "user_id": "string",
-  "scenario_id": "string",
-  "language": "string  // ISO 639-1, e.g. 'nl'"
+    "user_id": "string",
+    "scenario_id": "string",
+    "language": "string  // ISO 639-1, e.g. 'nl'"
 }
 ```
 
@@ -108,6 +108,60 @@ No request body required.
 
 ---
 
+### `GET /health`
+
+Called by monitoring tools and the compose healthcheck. Queries all configured
+evaluation instances and the feedback service in parallel and reports per-instance
+reachability.
+
+**Status levels**
+
+| `status`    | Meaning                                                                 |
+|-------------|-------------------------------------------------------------------------|
+| `ok`        | All instances and feedback reachable.                                   |
+| `degraded`  | Some (but not all) evaluation instances unreachable, or feedback down. Sessions can still be served at reduced capacity; debriefs may be unavailable. |
+| `critical`  | All evaluation instances unreachable. Sessions cannot be meaningfully processed. |
+
+**Response 200 — ok or degraded**
+```json
+{
+  "status": "ok | degraded",
+  "services": {
+    "evaluation": {
+      "status": "ok | degraded",
+      "instances": {
+        "http://eval1:8001": "ok",
+        "http://eval2:8001": "unreachable"
+      }
+    },
+    "feedback": {
+      "status": "ok | unreachable"
+    }
+  }
+}
+```
+
+**Response 503 — critical (all evaluation instances down)**
+```json
+{
+  "status": "critical",
+  "services": {
+    "evaluation": {
+      "status": "critical",
+      "instances": {
+        "http://eval1:8001": "unreachable",
+        "http://eval2:8001": "unreachable"
+      }
+    },
+    "feedback": {
+      "status": "ok | unreachable"
+    }
+  }
+}
+```
+
+---
+
 ### `WebSocket /ws/{session_id}`
 
 Connection must be established after a successful `/session/create` or `/session/resume`.
@@ -164,7 +218,16 @@ Connection must be established after a successful `/session/create` or `/session
 }
 ```
 
-**Feedback** — sent once at session end
+**FeedbackToken** — streamed during debrief generation
+```json
+{
+  "type": "feedback_token",
+  "session_id": "string",
+  "token": "string"
+}
+```
+
+**SessionComplete** — sent once when debrief generation finishes
 ```json
 {
   "type": "session_complete",
@@ -174,15 +237,6 @@ Connection must be established after a successful `/session/create` or `/session
   "highlights": [
     "string  // e.g. 'Turn 2: voice tension spiked when student pushed back'"
   ]
-}
-```
-
-**FeedbackToken** — sent during streaming generation, before final Feedback
-```json
-{
-  "type": "feedback_token",
-  "session_id": "string",
-  "token": "string"
 }
 ```
 
@@ -198,7 +252,19 @@ Connection must be established after a successful `/session/create` or `/session
 
 ---
 
-## Proxy → Evaluation Container
+## App → Evaluation Container
+
+The App container calls the Evaluation container directly using the URL(s) in `EVALUATION_URL` / `EVALUATION_URLS`. There is no proxy between them.
+
+### Authentication
+
+All requests from the App container include a shared secret in the `Authorization` header:
+
+```
+Authorization: Bearer <INTERNAL_API_KEY>
+```
+
+The Evaluation container validates this on every request and returns `401` if the header is absent or the key does not match. The key is set in `.env` and must be identical across all containers that communicate internally.
 
 ### `POST /evaluate/analyse`
 
@@ -249,7 +315,7 @@ Connection must be established after a successful `/session/create` or `/session
 
 ### `POST /evaluate/reset/{session_id}`
 
-No request body.
+No request body. Called by the App container at the end of each clip to clear the per-session audio buffer before the next clip begins.
 
 **Response 200**
 ```json
@@ -260,9 +326,11 @@ No request body.
 
 ### `WebSocket /ws/{session_id}`
 
-Proxied directly from the App container. Same `AudioChunk` message format as the client-facing WebSocket.
+Opened by the App container once per session to stream AudioChunks for Whisper transcription. The App container pins each session to a consistent Evaluation instance (via session ID hash) so the per-session VAD buffer stays coherent.
 
-#### Server → App messages (over this WebSocket)
+Same `AudioChunk` message format as the client-facing WebSocket.
+
+#### Evaluation → App messages
 
 **Transcript — partial**
 ```json
@@ -306,7 +374,13 @@ Proxied directly from the App container. Same `AudioChunk` message format as the
 
 ---
 
-## Proxy → Feedback Container
+## App → Feedback Container
+
+The App container calls the Feedback container directly using the URL in `FEEDBACK_URL`. There is no proxy between them.
+
+### Authentication
+
+Same shared secret scheme as Evaluation — all requests carry `Authorization: Bearer <INTERNAL_API_KEY>`. The Feedback container returns `401` if the header is absent or the key does not match.
 
 ### `POST /feedback/generate`
 
@@ -362,36 +436,8 @@ data: {"type": "complete", "feedback": { ...Feedback object... }}\n\n
 **Response 200**
 ```json
 {
-  "status": "ok",
-  "ollama_reachable": "boolean",
-  "model": "string  // e.g. 'llama3.2'"
-}
-```
-
----
-
-## Proxy — Health Aggregation
-
-### `GET /health`
-
-**Response 200 — all healthy**
-```json
-{
-  "status": "ok",
-  "services": {
-    "evaluation": "ok",
-    "feedback": "ok"
-  }
-}
-```
-
-**Response 503 — any service degraded**
-```json
-{
-  "status": "degraded",
-  "services": {
-    "evaluation": "ok",
-    "feedback": "unreachable"
-  }
+    "status": "ok",
+    "ollama_reachable": "boolean",
+    "model": "string  // e.g. 'llama3.2'"
 }
 ```

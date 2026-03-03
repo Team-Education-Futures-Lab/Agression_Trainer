@@ -1,4 +1,6 @@
-import type { ClipMetadata } from "@ar-training/shared";
+import type {BranchCondition, ClipMetadata} from "@ar-training/shared";
+import {readdirSync, readFileSync} from "node:fs";
+import { join } from "node:path";
 
 // ─── Interface ────────────────────────────────────────────────────────────────
 
@@ -16,53 +18,120 @@ export interface ScenarioLoader {
     getEntryClip(scenarioId: string): string | null;
 }
 
-// ─── Stub ─────────────────────────────────────────────────────────────────────
+// ─── Schema ───────────────────────────────────────────────────────────────────
+
+// Raw shape of a clip entry inside metadata.json.
+// Validated on load; errors are thrown at startup rather than at request time.
+interface RawClip {
+    file:              string;
+    transcript:        string;
+    notable_features:  string[];
+    branch_conditions: BranchCondition[];
+}
+
+interface RawScenario {
+    scenario_id: string;
+    entry_clip:  string;
+    clips:       Record<string, RawClip>;
+}
+
+// ─── FileScenarioLoader ───────────────────────────────────────────────────────
 
 /**
- * Stub implementation for development.
- * Returns a single hardcoded scenario so the full pipeline can be exercised
- * before real scenario files exist.
+ * Loads scenario metadata from the scenarios/ directory at startup.
+ * Each subdirectory must contain a metadata.json following the schema
+ * documented in docs/scenario_schema.md.
  *
- * Replace with FileScenarioLoader once scenarios/ directory is populated.
+ * Throws at construction time if any metadata.json is missing required fields,
+ * so misconfigured scenarios are caught before any session is served.
  */
-export class StubScenarioLoader implements ScenarioLoader {
-    private readonly clips: Map<string, ClipMetadata> = new Map([
-        ["scenario_01:clip_01_intro", {
-            clip_id:           "clip_01_intro",
-            scenario_id:       "scenario_01",
-            transcript:        "Dit is niet eerlijk! Ik heb zo hard gewerkt.",
-            notable_features:  ["raised_voice", "aggressive_posture"],
-            branch_conditions: [
-                { min_score: -1.0, max_score:  0.2,  next_clip: "clip_02_calm" },
-                { min_score:  0.2, max_score:  1.01, next_clip: "clip_02_escalated" },
-            ],
-        }],
-        ["scenario_01:clip_02_calm", {
-            clip_id:           "clip_02_calm",
-            scenario_id:       "scenario_01",
-            transcript:        "Oké... misschien heb ik me laten meeslepen.",
-            notable_features:  ["calm_voice", "open_posture"],
-            branch_conditions: [
-                { min_score: -1.0, max_score: 1.01, next_clip: null },
-            ],
-        }],
-        ["scenario_01:clip_02_escalated", {
-            clip_id:           "clip_02_escalated",
-            scenario_id:       "scenario_01",
-            transcript:        "Ziet u wel! U luistert toch niet.",
-            notable_features:  ["raised_voice", "pointing_gesture"],
-            branch_conditions: [
-                { min_score: -1.0, max_score: 1.01, next_clip: null },
-            ],
-        }],
-    ]);
+export class FileScenarioLoader implements ScenarioLoader {
+    // Keyed by "scenario_id:clip_id"
+    private readonly clips:       Map<string, ClipMetadata> = new Map();
+    // Keyed by scenario_id
+    private readonly entryClips:  Map<string, string>       = new Map();
+
+    constructor(scenariosDir: string) {
+        this.load(scenariosDir);
+    }
 
     getClip(scenarioId: string, clipId: string): ClipMetadata | null {
         return this.clips.get(`${scenarioId}:${clipId}`) ?? null;
     }
 
     getEntryClip(scenarioId: string): string | null {
-        if (scenarioId === "scenario_01") return "clip_01_intro";
-        return null;
+        return this.entryClips.get(scenarioId) ?? null;
+    }
+
+    // ── Internal ──────────────────────────────────────────────────────────────
+
+    private load(scenariosDir: string): void {
+        let entries: string[];
+        try {
+            entries = readdirSync(scenariosDir, {withFileTypes: true})
+                .filter(e => e.isDirectory())
+                .map(e => e.name);
+        } catch {
+            throw new Error(`Cannot read scenarios directory: ${scenariosDir}`);
+        }
+
+        if (entries.length === 0) {
+            throw new Error(`No scenario directories found in: ${scenariosDir}`);
+        }
+
+        for (const dir of entries) {
+            const metaPath = join(scenariosDir, dir, "metadata.json");
+            this.loadScenario(metaPath);
+        }
+    }
+
+
+    private loadScenario(metaPath: string): void {
+        let raw: RawScenario;
+        try {
+            const text = readFileSync(metaPath, "utf-8");
+            raw = JSON.parse(text) as RawScenario;
+        } catch {
+            throw new Error(`Failed to read or parse scenario metadata: ${metaPath}`);
+        }
+
+        this.validate(raw, metaPath);
+
+        this.entryClips.set(raw.scenario_id, raw.entry_clip);
+
+        for (const [clipId, clip] of Object.entries(raw.clips)) {
+            const meta: ClipMetadata = {
+                clip_id:           clipId,
+                scenario_id:       raw.scenario_id,
+                transcript:        clip.transcript,
+                notable_features:  clip.notable_features,
+                branch_conditions: clip.branch_conditions,
+            };
+            this.clips.set(`${raw.scenario_id}:${clipId}`, meta);
+        }
+    }
+
+    private validate(raw: RawScenario, path: string): void {
+        if (!raw.scenario_id) throw new Error(`${path}: missing scenario_id`);
+        if (!raw.entry_clip)  throw new Error(`${path}: missing entry_clip`);
+        if (!raw.clips || Object.keys(raw.clips).length === 0) {
+            throw new Error(`${path}: clips must be a non-empty object`);
+        }
+        if (!(raw.entry_clip in raw.clips)) {
+            throw new Error(`${path}: entry_clip "${raw.entry_clip}" not found in clips`);
+        }
+        for (const [clipId, clip] of Object.entries(raw.clips)) {
+            if (!clip.branch_conditions?.length) {
+                throw new Error(`${path}: clip "${clipId}" has no branch_conditions`);
+            }
+            // Verify all non-null next_clip references exist in the same scenario.
+            for (const cond of clip.branch_conditions) {
+                if (cond.next_clip !== null && !(cond.next_clip in raw.clips)) {
+                    throw new Error(
+                        `${path}: clip "${clipId}" references unknown next_clip "${cond.next_clip}"`
+                    );
+                }
+            }
+        }
     }
 }
