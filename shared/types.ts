@@ -91,20 +91,24 @@ export type ClientMessage = VideoFrame | AudioChunk | ClipEnded;
 // ─── Server → Client (WebSocket) ─────────────────────────────────────────────
 
 /**
- * Sent by the App container after every analysis window (~2s).
+ * Sent by the App container when a transcript segment arrives from the
+ * Transcription container during a clip.
  *
- * `escalation_score` drives immediate video branching on the client.
+ * Carries the accumulated transcript for the current clip so far.
+ * Intended for development and debugging — the client may choose not to
+ * display this to students in production.
+ *
  * `queue_position` is non-null only while the session is in the QUEUED state.
  */
 export interface SessionUpdate {
     type: "session_update";
     session_id: string;
-    window_id: WindowID;
-    /** Ranges from -1.0 (de-escalating) to 1.0 (escalating). */
-    escalation_score: number;
+    /** Accumulated transcript for the current clip so far. */
+    transcript: string;
     /** Position in the waiting queue, or null if the session is active. */
     queue_position: number | null;
 }
+
 
 /**
  * Sent once at the end of a session when feedback generation is complete.

@@ -2,7 +2,7 @@
 
 The AI components — `BehaviourAnalyserInterface` and `FeedbackGeneratorInterface` — require trained models that do not yet exist. Stub implementations allow the full pipeline to be developed and tested end-to-end before real models are available.
 
-Stubs are not fallback behaviour. They exist only for development and integration testing. They should never be deployed in a real session.
+Stubs are not fallback behavior. They exist only for development and integration testing. They should never be deployed in a real session.
 
 ---
 
@@ -55,7 +55,6 @@ Returns a deterministic but plausible `BehaviourResult` based on the clip contex
 ### Implementation
 
 ```python
-from dataclasses import dataclass
 from interfaces import BehaviourAnalyserInterface, AnalysisWindow, BehaviourResult, SignalSummary
 
 class StubBehaviourAnalyser(BehaviourAnalyserInterface):
@@ -136,7 +135,6 @@ class StubFeedbackGenerator(FeedbackGeneratorInterface):
 
     async def generate_stream(self, req: FeedbackRequest) -> AsyncIterator[str]:
         feedback = await self.generate(req)
-        # Simulate token-by-token streaming by yielding words one at a time
         for word in feedback.advice.split():
             yield word + " "
 ```
@@ -149,20 +147,23 @@ With both stubs active, a complete session should flow as follows:
 
 1. `POST /session/create` → `SessionContext` with `state: active`
 2. Open WebSocket → send `VideoFrame` and `AudioChunk` messages
-3. Receive `SessionUpdate` with `escalation_score` from `StubBehaviourAnalyser`
-4. Client branches video based on score
-5. Repeat for each clip
-6. `POST /session/{id}/end`
-7. Receive `feedback_token` stream then `session_complete` from `StubFeedbackGenerator`
+3. Receive `SessionUpdate` messages carrying the live accumulated transcript as Whisper processes audio
+4. Send `ClipEnded` when the clip finishes playing
+5. Receive `ClipReady` with the resolved `next_clip_id` and `clip_score` from `StubBehaviourAnalyser`
+6. If `next_clip_id` is non-null: load the next clip and repeat from step 2
+7. If `next_clip_id` is null: the scenario is complete — wait for the debrief
+8. Receive `FeedbackToken` stream then `SessionComplete` from `StubFeedbackGenerator`
 
 If this flow completes without errors, the full inter-container pipeline is working correctly and real model implementations can be dropped in independently.
+
+> **Note:** `POST /session/{id}/end` exists as an explicit termination route but is not part of the normal clip flow. Feedback is triggered automatically when a terminal clip is reached via `ClipEnded`. The `/end` route handles abnormal termination only.
 
 ---
 
 ## What Stubs Do Not Test
 
 - Accuracy or quality of escalation scoring
-- Whisper transcription (the `TranscriptionInterface` should use a real Whisper instance even during stub testing — it is infrastructure, not a model)
+- Whisper transcription — the Transcription container always uses a real Whisper instance, even during stub testing. It is infrastructure, not a model
 - Ollama availability or prompt formatting
 - Edge cases in `BranchCondition` evaluation with real score distributions
 

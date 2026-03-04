@@ -4,13 +4,14 @@
 
 ## Tech Stack
 
-| Container  | Language   | Framework                           |
-|------------|------------|-------------------------------------|
-| Client     | TypeScript | React, Vite, MediaPipe.js, Meyda.js |
-| App        | TypeScript | Node.js, Fastify, ws                |
-| Evaluation | Python     | FastAPI, faster-whisper             |
-| Feedback   | TypeScript | Node.js, Fastify                    |
-| Ollama     | —          | Existing Docker image               |
+| Container     | Language   | Framework                           |
+|---------------|------------|-------------------------------------|
+| Client        | TypeScript | React, Vite, MediaPipe.js, Meyda.js |
+| App           | TypeScript | Node.js, Fastify, ws                |
+| Transcription | Python     | FastAPI, faster-whisper             |
+| Evaluation    | Python     | FastAPI                             |
+| Feedback      | TypeScript | Node.js, Fastify                    |
+| Ollama        | —          | Existing Docker image               |
 
 ---
 
@@ -58,10 +59,10 @@ Then start only the containers you need:
 
 ```bash
 # Omit the Ollama sidecar — stubs don't need it
-docker compose up app client evaluation feedback
+docker compose up app client transcription evaluation feedback
 ```
 
-See `stub_guide.md` for details on stub behaviour.
+The Transcription container should always run with a real Whisper instance — it is infrastructure, not a model. See `stub_guide.md` for details on stub behaviour.
 
 ---
 
@@ -69,22 +70,21 @@ See `stub_guide.md` for details on stub behaviour.
 
 The App container reads its configuration from `app/.env`. The most commonly changed variables during development:
 
-| Variable             | Default                  | Description                                                                                                                                     |
-|----------------------|--------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|
-| `INTERNAL_API_KEY`   | _(required)_             | Shared secret for App→Evaluation and App→Feedback requests. Generate once with `openssl rand -hex 32` and set the same value in all containers. |
-| `EVALUATION_URL`     | `http://evaluation:8001` | Single evaluation instance (default)                                                                                                            |
-| `EVALUATION_URLS`    | _(unset)_                | Comma-separated list for multi-host setups                                                                                                      |
-| `FEEDBACK_URL`       | `http://feedback:8002`   | Feedback service URL                                                                                                                            |
-| `BEHAVIOUR_ANALYSER` | `stub`                   | `stub` or `production`                                                                                                                          |
-| `FEEDBACK_GENERATOR` | `stub`                   | `stub` or `production`                                                                                                                          |
-| `WHISPER_MODEL`      | `base`                   | `tiny`, `base`, `small`, `medium`, `large-v3`                                                                                                   |
-| `WHISPER_LANGUAGE`   | `nl`                     | ISO 639-1 language code                                                                                                                         |
-| `WHISPER_WORKERS`    | `4`                      | Whisper instances in the pool                                                                                                                   |
-| `DEVICE`             | `cpu`                    | `cpu` or `cuda`                                                                                                                                 |
-| `FEEDBACK_MODEL`     | `llama3.2`               | Ollama model name                                                                                                                               |
-| `OLLAMA_HOST`        | `http://ollama:11434`    | Override to use external Ollama                                                                                                                 |
-
-When `EVALUATION_URLS` is set it takes precedence over `EVALUATION_URL`. The App container round-robins across all listed hosts and pins each session's audio WebSocket to a consistent instance using the session ID as a hash key.
+| Variable             | Default                     | Description                                                                                                                        |
+|----------------------|-----------------------------|------------------------------------------------------------------------------------------------------------------------------------|
+| `INTERNAL_API_KEY`   | _(required)_                | Shared secret for all App→AI service requests. Generate once with `openssl rand -hex 32` and set the same value in all containers. |
+| `EVALUATION_URL`     | `http://evaluation:8001`    | Evaluation instance URL(s). Comma-separated list enables multi-instance load distribution with session pinning.                    |
+| `TRANSCRIPTION_URL`  | `http://transcription:8003` | Transcription instance URL(s). Comma-separated list supported for multi-instance setups.                                           |
+| `FEEDBACK_URL`       | `http://feedback:8002`      | Feedback service URL                                                                                                               |
+| `SCENARIOS_DIR`      | _(required)_                | Path to the scenarios directory, mounted from the repo root at runtime.                                                            |
+| `BEHAVIOUR_ANALYSER` | `stub`                      | `stub` or `production`                                                                                                             |
+| `FEEDBACK_GENERATOR` | `stub`                      | `stub` or `production`                                                                                                             |
+| `WHISPER_MODEL`      | `base`                      | `tiny`, `base`, `small`, `medium`, `large-v3`                                                                                      |
+| `WHISPER_LANGUAGE`   | `nl`                        | ISO 639-1 language code                                                                                                            |
+| `WHISPER_WORKERS`    | `4`                         | Whisper instances in the pool                                                                                                      |
+| `DEVICE`             | `cpu`                       | `cpu` or `cuda`                                                                                                                    |
+| `FEEDBACK_MODEL`     | `llama3.2`                  | Ollama model name                                                                                                                  |
+| `OLLAMA_HOST`        | `http://ollama:11434`       | Override to use external Ollama                                                                                                    |
 
 ---
 
@@ -105,9 +105,19 @@ ar-training/
 │   ├── README.md
 │   └── .gitignore
 │
+├── transcription/              ← Transcription container (Python)
+│   │                             Runs faster-whisper with VAD for continuous
+│   │                             per-session audio transcription.
+│   ├── src/
+│   ├── requirements.txt
+│   ├── Dockerfile
+│   ├── README.md
+│   └── .gitignore
+│
 ├── evaluation/                 ← Evaluation container (Python)
-│   │                             Runs Whisper transcription and the multimodal
-│   │                             behaviour classifier. GPU-optional, horizontally scalable.
+│   │                             Runs the multimodal behaviour classifier.
+│   │                             Receives complete clip windows with full transcripts.
+│   │                             GPU-optional, horizontally scalable.
 │   ├── src/
 │   ├── requirements.txt
 │   ├── Dockerfile
@@ -197,7 +207,7 @@ The `shared/` package contains TypeScript type definitions used by `app/`, `feed
 }
 ```
 
-The Python `evaluation/` container defines its own dataclasses in `src/interfaces.py` — these mirror the shared TypeScript types and the JSON shapes in `api_contract.md`.
+The Python `transcription/` and `evaluation/` containers define their own dataclasses in `src/interfaces.py` — these mirror the shared TypeScript types and the JSON shapes in `api_contract.md`.
 
 ---
 
@@ -205,7 +215,7 @@ The Python `evaluation/` container defines its own dataclasses in `src/interface
 
 **Recommended: WebStorm** opened at the repo root. WebStorm discovers all `package.json` files automatically and provides full IntelliSense across all TypeScript services including cross-service resolution of the `shared/` package. Mark `scenarios/`, `models/`, and `docs/` as excluded directories (Settings → Directories) to prevent WebStorm from indexing video files and keep search fast.
 
-For Python, WebStorm provides basic syntax support when you configure a Python interpreter pointing at `evaluation/.venv` (Settings → Languages & Frameworks → Python Interpreter). If you find yourself spending significant time in the evaluation container, open it separately in **PyCharm** with `evaluation/` as the project root for full Python IntelliSense.
+For Python, WebStorm provides basic syntax support when you configure a Python interpreter pointing at the relevant service's `.venv`. If you find yourself spending significant time in a Python container, open it separately in **PyCharm** with that service directory as the project root for full Python IntelliSense.
 
 **Alternative: VS Code** at the repo root with the Pylance, ESLint, and Docker extensions handles all languages in one window.
 
@@ -220,11 +230,12 @@ docker compose up
 # Start with rebuilt images (after code changes)
 docker compose up --build
 
-# Scale evaluation workers on the same server
+# Scale transcription or evaluation workers
+docker compose up --scale transcription=3
 docker compose up --scale evaluation=3
 
 # View logs for a specific container
-docker compose logs -f evaluation
+docker compose logs -f transcription
 
 # Run tests inside a container
 docker compose run --rm app npm test
@@ -251,10 +262,10 @@ docker compose down -v
 
 ## Implementing a Real AI Component
 
-Each AI component has a corresponding interface in `evaluation/src/interfaces.py`. To add a real implementation:
+Each AI component has a corresponding interface in its container's `src/interfaces.py`. To add a real implementation:
 
-1. Create a new file in the appropriate container's source directory (e.g. `evaluation/src/my_classifier.py`)
-2. Subclass the relevant interface (`BehaviourAnalyserInterface` or `FeedbackGeneratorInterface`)
+1. Create a new file in the appropriate container's source directory
+2. Subclass the relevant interface
 3. Implement all abstract methods
 4. Register the new implementation in the container's factory function (see `stub_guide.md` for the pattern)
 5. Set the corresponding environment variable in `app/.env`
@@ -272,7 +283,7 @@ The rest of the system requires no changes.
 - No business logic in entrypoints (`main.ts`, `App.tsx`) — delegate to implementations
 - Capture and session concerns must remain separated — `CaptureSession` never references session IDs or transport
 
-**Python (Evaluation)**
+**Python (Transcription, Evaluation)**
 - Python 3.11+
 - Type hints on all function signatures
 - Dataclasses for all data transfer objects

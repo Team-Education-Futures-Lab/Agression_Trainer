@@ -13,9 +13,9 @@ This document is the source of truth for inter-container communication. If a Pyt
 **Request**
 ```json
 {
-    "user_id": "string",
-    "scenario_id": "string",
-    "language": "string  // ISO 639-1, e.g. 'nl'"
+  "user_id": "string",
+  "scenario_id": "string",
+  "language": "string  // ISO 639-1, e.g. 'nl'"
 }
 ```
 
@@ -73,14 +73,14 @@ This document is the source of truth for inter-container communication. If a Pyt
 
 ### `POST /session/{session_id}/end`
 
-No request body required.
+No request body required. Handles abnormal termination only — in the normal clip flow, sessions complete automatically when a terminal clip is reached via `ClipEnded`.
 
 **Response 200**
 ```json
 {
   "session_id": "string",
   "state": "completed",
-  "message": "Feedback generation started. Deliver via WebSocket."
+  "message": "string"
 }
 ```
 
@@ -111,16 +111,16 @@ No request body required.
 ### `GET /health`
 
 Called by monitoring tools and the compose healthcheck. Queries all configured
-evaluation instances and the feedback service in parallel and reports per-instance
+evaluation, transcription, and feedback instances in parallel and reports per-instance
 reachability.
 
 **Status levels**
 
-| `status`    | Meaning                                                                 |
-|-------------|-------------------------------------------------------------------------|
-| `ok`        | All instances and feedback reachable.                                   |
-| `degraded`  | Some (but not all) evaluation instances unreachable, or feedback down. Sessions can still be served at reduced capacity; debriefs may be unavailable. |
-| `critical`  | All evaluation instances unreachable. Sessions cannot be meaningfully processed. |
+| `status`   | Meaning                                                                                                                                                          |
+|------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `ok`       | All instances and feedback reachable.                                                                                                                            |
+| `degraded` | Some (but not all) evaluation or transcription instances unreachable, or feedback down. Sessions may be served at reduced capacity; debriefs may be unavailable. |
+| `critical` | All evaluation or all transcription instances unreachable. Sessions cannot be meaningfully processed.                                                            |
 
 **Response 200 — ok or degraded**
 ```json
@@ -128,10 +128,16 @@ reachability.
   "status": "ok | degraded",
   "services": {
     "evaluation": {
-      "status": "ok | degraded",
+      "status": "ok | degraded | critical",
       "instances": {
         "http://eval1:8001": "ok",
         "http://eval2:8001": "unreachable"
+      }
+    },
+    "transcription": {
+      "status": "ok | degraded | critical",
+      "instances": {
+        "http://transcription1:8003": "ok"
       }
     },
     "feedback": {
@@ -141,7 +147,7 @@ reachability.
 }
 ```
 
-**Response 503 — critical (all evaluation instances down)**
+**Response 503 — critical (all evaluation or transcription instances down)**
 ```json
 {
   "status": "critical",
@@ -149,8 +155,13 @@ reachability.
     "evaluation": {
       "status": "critical",
       "instances": {
-        "http://eval1:8001": "unreachable",
-        "http://eval2:8001": "unreachable"
+        "http://eval1:8001": "unreachable"
+      }
+    },
+    "transcription": {
+      "status": "ok",
+      "instances": {
+        "http://transcription1:8003": "ok"
       }
     },
     "feedback": {
@@ -205,18 +216,42 @@ Connection must be established after a successful `/session/create` or `/session
 }
 ```
 
+**ClipEnded** — sent when a scenario clip finishes playing
+```json
+{
+  "type": "clip_ended",
+  "session_id": "string",
+  "clip_id": "string  // the clip that just finished"
+}
+```
+
+The client must stop sending `VideoFrame` and `AudioChunk` messages after sending this and wait for a `ClipReady` or `SessionComplete` response.
+
 #### Server → Client messages
 
-**SessionUpdate** — sent after every analysis window
+**SessionUpdate** — sent when a finalised transcript segment arrives from the Transcription container
 ```json
 {
   "type": "session_update",
   "session_id": "string",
-  "window_id": "string  // '{session_id}:{sequence}'",
-  "escalation_score": "float  // -1.0 to 1.0",
+  "transcript": "string  // accumulated transcript for the current clip so far",
   "queue_position": "integer | null"
 }
 ```
+
+This message is intended for development and debugging. The client may choose not to display the transcript to students in production.
+
+**ClipReady** — sent in response to a `ClipEnded` message
+```json
+{
+  "type": "clip_ready",
+  "session_id": "string",
+  "next_clip_id": "string | null  // null when the scenario is complete",
+  "clip_score": "float  // escalation_score from the clip's BehaviourResult"
+}
+```
+
+When `next_clip_id` is `null` the scenario is complete — the client should wait for `FeedbackToken` and `SessionComplete` messages.
 
 **FeedbackToken** — streamed during debrief generation
 ```json
@@ -252,9 +287,9 @@ Connection must be established after a successful `/session/create` or `/session
 
 ---
 
-## App → Evaluation Container
+## App → Transcription Container
 
-The App container calls the Evaluation container directly using the URL(s) in `EVALUATION_URL` / `EVALUATION_URLS`. There is no proxy between them.
+The App container maintains one persistent WebSocket connection per session to the Transcription container for continuous audio streaming. The App container pins each session to a consistent Transcription instance (via session ID hash) so the per-session VAD buffer stays coherent.
 
 ### Authentication
 
@@ -264,18 +299,96 @@ All requests from the App container include a shared secret in the `Authorizatio
 Authorization: Bearer <INTERNAL_API_KEY>
 ```
 
-The Evaluation container validates this on every request and returns `401` if the header is absent or the key does not match. The key is set in `.env` and must be identical across all containers that communicate internally.
+The Transcription container validates this on every request and returns `401` if the header is absent or the key does not match.
+
+### `WebSocket /ws/{session_id}`
+
+Opened by the App container once per session. Same `AudioChunk` message format as the client-facing WebSocket.
+
+#### Transcription → App messages
+
+**Transcript — partial**
+```json
+{
+  "type": "transcript",
+  "session_id": "string",
+  "text": "string",
+  "window_seq": "integer",
+  "is_final": false,
+  "confidence": "float"
+}
+```
+
+**Transcript — final**
+```json
+{
+  "type": "transcript",
+  "session_id": "string",
+  "text": "string",
+  "window_seq": "integer",
+  "is_final": true,
+  "confidence": "float"
+}
+```
+
+---
+
+### `POST /transcription/finalise/{session_id}`
+
+No request body. Called by the App container just before clip evaluation is dispatched, asking the Transcription container to flush any in-flight audio and emit a final `Transcript` message.
+
+**Response 200**
+```json
+{ "session_id": "string", "status": "finalised" }
+```
+
+---
+
+### `POST /transcription/reset/{session_id}`
+
+No request body. Called by the App container at the end of each clip to clear the per-session VAD buffer before the next clip begins.
+
+**Response 200**
+```json
+{ "session_id": "string", "status": "reset" }
+```
+
+---
+
+### `GET /transcription/health`
+
+**Response 200**
+```json
+{
+  "status": "ok",
+  "whisper_workers": {
+    "total": "integer",
+    "available": "integer"
+  },
+  "device": "cpu | cuda"
+}
+```
+
+---
+
+## App → Evaluation Container
+
+The App container calls the Evaluation container directly using the URL(s) in `EVALUATION_URL`. There is no proxy between them. One `AnalysisWindow` is dispatched per clip, covering the student's complete response with the full accumulated transcript.
+
+### Authentication
+
+Same shared secret scheme as Transcription — all requests carry `Authorization: Bearer <INTERNAL_API_KEY>`. The Evaluation container returns `401` if the header is absent or the key does not match.
 
 ### `POST /evaluate/analyse`
 
 **Request** — AnalysisWindow
 ```json
 {
-  "window_id": "string  // '{session_id}:{sequence}'",
+  "window_id": "string  // '{session_id}:{clip_sequence}'",
   "session_id": "string",
   "frames": [ "VideoFrame  // same shape as WebSocket VideoFrame message" ],
   "mfccs": [["float"]],
-  "transcript": "string",
+  "transcript": "string  // complete transcript of the student's response for this clip",
   "clip_metadata": {
     "clip_id": "string",
     "scenario_id": "string",
@@ -315,45 +428,11 @@ The Evaluation container validates this on every request and returns `401` if th
 
 ### `POST /evaluate/reset/{session_id}`
 
-No request body. Called by the App container at the end of each clip to clear the per-session audio buffer before the next clip begins.
+No request body. Called by the App container at the end of each clip.
 
 **Response 200**
 ```json
 { "session_id": "string", "status": "reset" }
-```
-
----
-
-### `WebSocket /ws/{session_id}`
-
-Opened by the App container once per session to stream AudioChunks for Whisper transcription. The App container pins each session to a consistent Evaluation instance (via session ID hash) so the per-session VAD buffer stays coherent.
-
-Same `AudioChunk` message format as the client-facing WebSocket.
-
-#### Evaluation → App messages
-
-**Transcript — partial**
-```json
-{
-  "type": "transcript",
-  "session_id": "string",
-  "text": "string",
-  "window_seq": "integer",
-  "is_final": false,
-  "confidence": "float"
-}
-```
-
-**Transcript — final**
-```json
-{
-  "type": "transcript",
-  "session_id": "string",
-  "text": "string",
-  "window_seq": "integer",
-  "is_final": true,
-  "confidence": "float"
-}
 ```
 
 ---
@@ -364,10 +443,6 @@ Same `AudioChunk` message format as the client-facing WebSocket.
 ```json
 {
   "status": "ok",
-  "whisper_workers": {
-    "total": "integer",
-    "available": "integer"
-  },
   "device": "cpu | cuda"
 }
 ```
@@ -380,7 +455,7 @@ The App container calls the Feedback container directly using the URL in `FEEDBA
 
 ### Authentication
 
-Same shared secret scheme as Evaluation — all requests carry `Authorization: Bearer <INTERNAL_API_KEY>`. The Feedback container returns `401` if the header is absent or the key does not match.
+Same shared secret scheme — all requests carry `Authorization: Bearer <INTERNAL_API_KEY>`. The Feedback container returns `401` if the header is absent or the key does not match.
 
 ### `POST /feedback/generate`
 
@@ -436,8 +511,8 @@ data: {"type": "complete", "feedback": { ...Feedback object... }}\n\n
 **Response 200**
 ```json
 {
-    "status": "ok",
-    "ollama_reachable": "boolean",
-    "model": "string  // e.g. 'llama3.2'"
+  "status": "ok",
+  "ollama_reachable": "boolean",
+  "model": "string  // e.g. 'llama3.2'"
 }
 ```

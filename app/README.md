@@ -1,17 +1,17 @@
 # App Container
 
-The App container is the single entry point for all clients. It manages session lifecycle, assembles incoming webcam and audio data into analysis windows, coordinates clip transitions, and delivers feedback at session end.
+The App container is the single entry point for all clients. It manages session lifecycle, accumulates webcam and audio data across each clip, coordinates clip transitions, and delivers feedback at session end.
 
-No ML models are loaded here — all processing is delegated to the Evaluation and Feedback containers.
+No ML models are loaded here — all processing is delegated to the Evaluation, Transcription, and Feedback containers.
 
 ---
 
 ## Responsibilities
 
 - **Session management** — capacity enforcement, queue management, state transitions, and recovery from dropped connections
-- **Window assembly** — accumulates `VideoFrame` and `AudioChunk` messages into ~2s `AnalysisWindow` objects and dispatches them to the Evaluation container
-- **Result routing** — forwards `BehaviourResult` scores back to the client as `SessionUpdate` messages over WebSocket
-- **Clip transitions** — on `ClipEnded`, flushes the current window, resolves the next clip from branch conditions, commits a `ConversationTurn`, and notifies the client via `ClipReady`
+- **Data accumulation** — buffers `VideoFrame`, `AudioChunk`, and live transcript segments for the full duration of each clip, then dispatches a single complete `AnalysisWindow` to the Evaluation container when the clip ends
+- **Transcription streaming** — forwards audio to the Transcription container continuously during a clip and accumulates partial/final transcript segments, sending `SessionUpdate` messages to the client on each finalised segment for debugging
+- **Clip transitions** — on `ClipEnded`, finalizes the transcript, dispatches the clip window, resolves the next clip from branch conditions, commits a `ConversationTurn`, resets both the Evaluation and Transcription buffers, and notifies the client via `ClipReady`
 - **Feedback delivery** — at session end, compiles the full `ConversationTurn` history into a `FeedbackRequest` and streams the LLM debrief back to the client token by token
 
 ---
@@ -22,13 +22,15 @@ No ML models are loaded here — all processing is delegated to the Evaluation a
 
 **`SessionManager`** — owns session state. Tracks every session from creation through completion or expiry, enforces capacity limits, manages the waiting queue, and preserves session state across dropped connections within the recovery window.
 
-**`Coordinator`** — owns the data pipeline for each active session. Buffers incoming frames and audio, assembles analysis windows on a 2-second timer, dispatches windows to the Evaluation container, and accumulates per-clip escalation scores.
+**`Coordinator`** — owns the data pipeline for each active session. Buffers incoming frames, MFCCs, and transcript segments for the full clip duration. On flush, finalises the transcript via `TranscriptionClient` and dispatches one `AnalysisWindow` to the Evaluation container covering the student's complete response to the clip.
 
-**`ClipController`** — owns the clip transition sequence. On receiving a `ClipEnded` message it flushes the coordinator, computes the clip's average score, resolves the next clip from branch conditions, appends a `ConversationTurn` to session history, resets the evaluation audio buffer, and either advances to the next clip or triggers feedback and ends the session.
+**`TranscriptionClient`** — manages one persistent WebSocket connection per session to the Transcription container. Forwards `AudioChunk` messages for continuous Whisper transcription and receives partial and final `Transcript` messages back. Uses `ServiceRouter` for session pinning so VAD buffers stay coherent across requests.
+
+**`ClipController`** — owns the clip transition sequence. On receiving a `ClipEnded` message it flushes the coordinator (finalising transcript and dispatching to Evaluation), reads the clip score from the single `BehaviourResult`, resolves the next clip from branch conditions, appends a `ConversationTurn` to session history, resets both buffers, and either advances to the next clip or triggers feedback and ends the session.
 
 **`FeedbackClient`** — sends a `FeedbackRequest` to the Feedback container and streams SSE tokens back to the client via a `SendFn`. The only class that knows about the Feedback container's HTTP API.
 
-**`EvaluationRouter`** — selects which Evaluation instance to use for a given session and keeps that mapping stable for the session's lifetime (session pinning). Uses FNV-1a hashing so the same session ID always resolves to the same instance, keeping per-session Whisper VAD buffers coherent.
+**`ServiceRouter`** — generic session-pinned router for any multi-instance backend service. Uses FNV-1a hashing so the same session ID always resolves to the same instance. Used by both `Coordinator` (for Evaluation) and `TranscriptionClient` (for Transcription).
 
 **`FileScenarioLoader`** — reads all scenario subdirectories at startup, parses and validates each `metadata.json`, and throws at construction time if any scenario is misconfigured. Implements `ScenarioLoader` — swap with any other implementation without touching the rest of the codebase.
 
@@ -40,27 +42,27 @@ No ML models are loaded here — all processing is delegated to the Evaluation a
 
 See `docs/api_contract.md` for the full wire format.
 
-| Method | Path                  | Description                                                    |
-|--------|-----------------------|----------------------------------------------------------------|
-| `POST` | `/session/create`     | Create a session — returns active or queued                    |
-| `POST` | `/session/:id/resume` | Resume a dropped session within the recovery window            |
-| `POST` | `/session/:id/end`    | End a session explicitly (abnormal path)                       |
-| `GET`  | `/session/:id/queue`  | Poll queue position                                            |
-| `WS`   | `/ws/:session_id`     | Stream frames and audio, receive updates and feedback          |
-| `GET`  | `/health`             | Aggregated health across all evaluation instances and feedback |
+| Method | Path                  | Description                                                                      |
+|--------|-----------------------|----------------------------------------------------------------------------------|
+| `POST` | `/session/create`     | Create a session — returns active or queued                                      |
+| `POST` | `/session/:id/resume` | Resume a dropped session within the recovery window                              |
+| `POST` | `/session/:id/end`    | End a session explicitly (abnormal path only)                                    |
+| `GET`  | `/session/:id/queue`  | Poll queue position                                                              |
+| `WS`   | `/ws/:session_id`     | Stream frames and audio, receive transcript updates and feedback                 |
+| `GET`  | `/health`             | Aggregated health across evaluation, transcription, and feedback                 |
 
 ### WebSocket message types
 
-| Direction       | Type               | Description                                    |
-|-----------------|--------------------|------------------------------------------------|
-| Client → Server | `video_frame`      | Landmark data from MediaPipe                   |
-| Client → Server | `audio_chunk`      | PCM audio and pre-computed MFCCs               |
-| Client → Server | `clip_ended`       | Signals that a clip has finished playing       |
-| Server → Client | `session_update`   | Escalation score after each analysis window    |
-| Server → Client | `clip_ready`       | Next clip ID and clip score after a transition |
-| Server → Client | `feedback_token`   | Streaming LLM token during debrief             |
-| Server → Client | `session_complete` | Final debrief when generation finishes         |
-| Server → Client | `error`            | Recoverable or fatal error                     |
+| Direction       | Type               | Description                                                              |
+|-----------------|--------------------|--------------------------------------------------------------------------|
+| Client → Server | `video_frame`      | Landmark data from MediaPipe                                             |
+| Client → Server | `audio_chunk`      | PCM audio and pre-computed MFCCs                                         |
+| Client → Server | `clip_ended`       | Signals that a clip has finished playing                                 |
+| Server → Client | `session_update`   | Accumulated transcript so far — sent on each finalised Whisper segment   |
+| Server → Client | `clip_ready`       | Next clip ID and clip score after a transition                           |
+| Server → Client | `feedback_token`   | Streaming LLM token during debrief                                       |
+| Server → Client | `session_complete` | Final debrief when generation finishes                                   |
+| Server → Client | `error`            | Recoverable or fatal error                                               |
 
 ---
 
@@ -68,20 +70,19 @@ See `docs/api_contract.md` for the full wire format.
 
 Copy `.env.example` to `.env` and adjust as needed. All variables have defaults except those marked required.
 
-| Variable                | Default  | Description                                                                                                                       |
-|-------------------------|----------|-----------------------------------------------------------------------------------------------------------------------------------|
-| `PORT`                  | `3000`   | Internal listen port                                                                                                              |
-| `EVALUATION_URL`        | required | Base URL of the Evaluation container. Treated as a comma-separated list — multiple values enable multi-instance load distribution |
-| `FEEDBACK_URL`          | required | Base URL of the Feedback container                                                                                                |
-| `SCENARIOS_DIR`         | required | Path to the scenarios directory, mounted from the repo root                                                                       |
-| `INTERNAL_API_KEY`      | required | Shared secret sent as `Authorization: Bearer` on all requests to Evaluation and Feedback. Generate with `openssl rand -hex 32`    |
-| `MAX_SESSIONS`          | `32`     | Maximum concurrent active sessions                                                                                                |
-| `MAX_QUEUE_SIZE`        | `10`     | Maximum sessions in the waiting queue                                                                                             |
-| `CAPACITY_POLICY`       | `QUEUE`  | `QUEUE` or `REJECT` when at capacity                                                                                              |
-| `SESSION_TIMEOUT_MS`    | `30000`  | ms to wait for WebSocket before dropping session                                                                                  |
-| `RECOVERY_WINDOW_MS`    | `30000`  | ms a dropped session can be resumed                                                                                               |
-| `WINDOW_MS`             | `2000`   | Analysis window duration in ms                                                                                                    |
-| `MIN_FRAMES_PER_WINDOW` | `10`     | Minimum frames required to dispatch a window                                                                                      |
+| Variable             | Default  | Description                                                                                                                       |
+|----------------------|----------|-----------------------------------------------------------------------------------------------------------------------------------|
+| `PORT`               | `3000`   | Internal listen port                                                                                                              |
+| `EVALUATION_URL`     | required | Base URL of the Evaluation container. Treated as a comma-separated list — multiple values enable multi-instance load distribution |
+| `TRANSCRIPTION_URL`  | required | Base URL of the Transcription container. Comma-separated list supported for multi-instance setups                                 |
+| `FEEDBACK_URL`       | required | Base URL of the Feedback container                                                                                                |
+| `SCENARIOS_DIR`      | required | Path to the scenarios directory, mounted from the repo root                                                                       |
+| `INTERNAL_API_KEY`   | required | Shared secret sent as `Authorization: Bearer` on all requests to AI services. Generate with `openssl rand -hex 32`                |
+| `MAX_SESSIONS`       | `32`     | Maximum concurrent active sessions                                                                                                |
+| `MAX_QUEUE_SIZE`     | `10`     | Maximum sessions in the waiting queue                                                                                             |
+| `CAPACITY_POLICY`    | `QUEUE`  | `QUEUE` or `REJECT` when at capacity                                                                                              |
+| `SESSION_TIMEOUT_MS` | `30000`  | ms to wait for WebSocket before dropping session                                                                                  |
+| `RECOVERY_WINDOW_MS` | `30000`  | ms a dropped session can be resumed                                                                                               |
 
 ---
 
@@ -119,14 +120,14 @@ npm run dev
 
 Tests live in `tests/` and are written with Vitest. Run the full suite with `npm test`.
 
-| File                              | Coverage                                                                                        |
-|-----------------------------------|-------------------------------------------------------------------------------------------------|
-| `tests/session-manager.test.ts`   | Session lifecycle, capacity, queue, state transitions, conversation history                     |
-| `tests/coordinator.test.ts`       | Window assembly, evaluation communication, clip management, last result tracking                |
-| `tests/clip-controller.test.ts`   | Clip transition sequence, branch resolution, turn construction, terminal and non-terminal paths |
-| `tests/feedback-client.test.ts`   | SSE token streaming, request shape, failure handling                                            |
-| `tests/evaluation-router.test.ts` | Session pinning, instance distribution, WebSocket URL conversion                                |
-| `tests/scenario-loader.test.ts`   | Scenario loading, metadata validation, error cases                                              |
+| File                            | Coverage                                                                                         |
+|---------------------------------|--------------------------------------------------------------------------------------------------|
+| `tests/session-manager.test.ts` | Session lifecycle, capacity, queue, state transitions, conversation history                      |
+| `tests/coordinator.test.ts`     | Clip-scoped dispatch, transcript accumulation, reset behaviour, transcription client integration |
+| `tests/clip-controller.test.ts` | Clip transition sequence, branch resolution, turn construction, terminal and non-terminal paths  |
+| `tests/feedback-client.test.ts` | SSE token streaming, request shape, failure handling                                             |
+| `tests/service-router.test.ts`  | Session pinning, instance distribution, WebSocket URL conversion                                 |
+| `tests/scenario-loader.test.ts` | Scenario loading, metadata validation, error cases                                               |
 
 Time-dependent tests use `vi.useFakeTimers()` so recovery windows and session timeouts can be tested without real delays. Outbound HTTP calls are stubbed with `vi.stubGlobal("fetch", vi.fn())`.
 

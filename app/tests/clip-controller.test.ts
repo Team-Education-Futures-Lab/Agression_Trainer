@@ -61,12 +61,11 @@ function makeMockSessions(overrides: Partial<SessionManager> = {}): SessionManag
 
 function makeMockCoord(overrides: Partial<Coordinator> = {}): Coordinator {
     return {
-        flushSession:        vi.fn().mockResolvedValue(undefined),
-        resetSession:        vi.fn().mockResolvedValue(undefined),
-        getClipAverageScore: vi.fn().mockReturnValue(0.1),
-        getLastResult:       vi.fn().mockReturnValue(null),
-        getLastTranscript:   vi.fn().mockReturnValue(null),
-        setClip:             vi.fn(),
+        flushSession:      vi.fn().mockResolvedValue(undefined),
+        resetSession:      vi.fn().mockResolvedValue(undefined),
+        getLastResult:     vi.fn().mockReturnValue(null),
+        getLastTranscript: vi.fn().mockReturnValue(null),
+        setClip:           vi.fn(),
         ...overrides,
     } as unknown as Coordinator;
 }
@@ -152,8 +151,10 @@ describe("ClipController", () => {
 
     describe("ClipReady notification", () => {
         it("sends a ClipReady message with the resolved next_clip_id", async () => {
-            const coord    = makeMockCoord({ getClipAverageScore: vi.fn().mockReturnValue(0.1) });
-            const ctrl     = new ClipController(
+            const coord = makeMockCoord({
+                getLastResult: vi.fn().mockReturnValue(makeBehaviourResult("s1")),
+            });
+            const ctrl = new ClipController(
                 makeMockSessions(), coord,
                 makeMockScenarios(makeClip("clip_01", "clip_02")),
                 makeMockFeedback(),
@@ -165,7 +166,7 @@ describe("ClipController", () => {
             const msg = sendFn.mock.calls[0][0];
             expect(msg.type).toBe("clip_ready");
             expect(msg.next_clip_id).toBe("clip_02");
-            expect(msg.clip_score).toBeCloseTo(0.1);
+            expect(msg.clip_score).toBe(0.2); // escalation_score from makeBehaviourResult
         });
 
         it("sends ClipReady with next_clip_id null for a terminal clip", async () => {

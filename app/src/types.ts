@@ -48,17 +48,12 @@ export interface SessionContext {
  * See .env.example for defaults.
  */
 export interface CoordinatorConfig {
-    /** One or more Evaluation instance base URLs.
-     *  A single entry is the common case; multiple entries enable session-pinned
-     *  load distribution via EvaluationRouter. */
-    evaluationUrls:     string[];
+    /** One or more Evaluation instance base URLs. */
+    evaluationUrls:  string[];
+    /** One or more Transcription instance base URLs. */
+    transcriptionUrls: string[];
     /** Shared secret sent as Authorization: Bearer on all outbound AI requests. */
-    internalApiKey:     string;
-    /** Minimum number of frames required to dispatch a window. Windows below
-     *  this threshold are discarded. Flush bypasses this check. */
-    minFramesPerWindow: number;
-    /** Duration of each analysis window in milliseconds. Default: 2000. */
-    windowMs:           number;
+    internalApiKey:  string;
 }
 
 // ─── Session Manager config ───────────────────────────────────────────────────
@@ -84,8 +79,6 @@ export interface SessionManagerConfig {
 
 /**
  * Result of SessionManager.createSession().
- * The Fastify route handler translates this into the correct HTTP response
- * as defined in docs/API_CONTRACT.md.
  *
  *   "active"      → 200 { state: "active", ... }
  *   "queued"      → 200 { state: "queued", queue_position, ... }
@@ -98,8 +91,6 @@ export type CreateSessionResult =
 
 /**
  * Result of SessionManager.resumeSession().
- * The Fastify route handler translates this into the correct HTTP response
- * as defined in docs/API_CONTRACT.md.
  *
  *   "ok"        → 200 { session_id, state, scenario_id, current_clip_id, turn_count }
  *   "not_found" → 404 { error: "session_not_found" }
@@ -110,8 +101,6 @@ export type ResumeSessionResult =
 
 /**
  * Result of SessionManager.getQueueStatus().
- * The Fastify route handler translates this into the correct HTTP response
- * as defined in docs/API_CONTRACT.md.
  *
  *   "queued"    → 200 { state: "queued", queue_position }
  *   "active"    → 200 { state: "active", queue_position: null }

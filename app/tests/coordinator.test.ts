@@ -1,21 +1,30 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Coordinator } from "../src/coordinator.js";
-import type { VideoFrame, AudioChunk, ClipMetadata, BehaviourResult, SessionUpdate } from "@ar-training/shared";
-import {CoordinatorConfig} from "../src/types";
+import type { VideoFrame, AudioChunk, ClipMetadata, BehaviourResult } from "@ar-training/shared";
+import type { CoordinatorConfig } from "../src/types.js";
+import type { TranscriptionClient } from "../src/transcription-client.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const EVALUATION_URL = "http://evaluation:8001";
-const MIN_FRAMES     = 10;
-const WINDOW_MS      = 2_000;
 
 function makeConfig(): CoordinatorConfig {
     return {
-        evaluationUrls:     [EVALUATION_URL],
-        internalApiKey:     "test-key",
-        minFramesPerWindow: MIN_FRAMES,
-        windowMs:           WINDOW_MS,
+        evaluationUrls:    [EVALUATION_URL],
+        transcriptionUrls: ["http://transcription:8003"],
+        internalApiKey:    "test-key",
     };
+}
+
+function makeMockTranscription(): TranscriptionClient {
+    return {
+        openSession:     vi.fn(),
+        closeSession:    vi.fn(),
+        sendAudio:       vi.fn(),
+        finaliseSession: vi.fn().mockResolvedValue(undefined),
+        resetSession:    vi.fn().mockResolvedValue(undefined),
+        getUrl:          vi.fn().mockReturnValue("http://transcription:8003"),
+    } as unknown as TranscriptionClient;
 }
 
 function makeFrame(sessionId: string, frameId: number): VideoFrame {
@@ -89,78 +98,193 @@ function mockFetchFailure(): void {
 describe("Coordinator", () => {
 
     beforeEach(() => {
-        vi.useFakeTimers();
-        // Always stub fetch as a spy so expect(fetch).not.toHaveBeenCalled()
-        // works even in tests that never trigger a fetch call.
         vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-            ok:   false,
+            ok:     false,
             status: 500,
         }));
     });
 
     afterEach(() => {
-        vi.useRealTimers();
         vi.unstubAllGlobals();
     });
 
-    // ── Window assembly ───────────────────────────────────────────────────────
+    // ── Session registration ──────────────────────────────────────────────────
 
-    describe("window assembly", () => {
-        it("does not dispatch a window before the timer fires", async () => {
-            const coord  = new Coordinator(makeConfig());
-            const sendFn = vi.fn();
-            coord.registerSession("s1", makeClip("clip_01"), sendFn);
+    describe("session registration", () => {
+        it("opens a transcription session on register", () => {
+            const transcription = makeMockTranscription();
+            const coord = new Coordinator(makeConfig(), transcription);
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+            expect(transcription.openSession).toHaveBeenCalledWith("s1");
+        });
 
-            for (let i = 0; i < MIN_FRAMES; i++) coord.onFrame(makeFrame("s1", i));
+        it("closes transcription and releases eval router on deregister", () => {
+            const transcription = makeMockTranscription();
+            const coord = new Coordinator(makeConfig(), transcription);
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+            coord.deregisterSession("s1");
+            expect(transcription.closeSession).toHaveBeenCalledWith("s1");
+        });
+
+        it("frames received for an unregistered session are ignored", () => {
+            const coord = new Coordinator(makeConfig(), makeMockTranscription());
+            expect(() => coord.onFrame(makeFrame("unknown", 1))).not.toThrow();
+        });
+    });
+
+    // ── Frame and audio buffering ─────────────────────────────────────────────
+
+    describe("frame and audio buffering", () => {
+        it("does not dispatch to evaluation before flushSession is called", async () => {
+            const coord = new Coordinator(makeConfig(), makeMockTranscription());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+
+            for (let i = 0; i < 30; i++) coord.onFrame(makeFrame("s1", i));
 
             expect(fetch).not.toHaveBeenCalled();
         });
 
-        it("dispatches a window when the timer fires and frame count meets threshold", async () => {
-            const result = makeBehaviourResult("s1", "s1:1", 0.2);
-            mockFetchSuccess(result);
+        it("forwards audio chunks to the transcription client", () => {
+            const transcription = makeMockTranscription();
+            const coord = new Coordinator(makeConfig(), transcription);
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
 
-            const coord  = new Coordinator(makeConfig());
-            const sendFn = vi.fn();
-            coord.registerSession("s1", makeClip("clip_01"), sendFn);
+            const chunk = makeChunk("s1", 1);
+            coord.onAudio(chunk);
 
-            for (let i = 0; i < MIN_FRAMES; i++) coord.onFrame(makeFrame("s1", i));
+            expect(transcription.sendAudio).toHaveBeenCalledWith(chunk);
+        });
+    });
 
-            await vi.advanceTimersByTimeAsync(WINDOW_MS);
+    // ── Flush (clip-scoped dispatch) ──────────────────────────────────────────
+
+    describe("flushSession", () => {
+        it("finalises transcription before dispatching to evaluation", async () => {
+            const callOrder: string[] = [];
+            const transcription = makeMockTranscription();
+            (transcription.finaliseSession as ReturnType<typeof vi.fn>)
+                .mockImplementation(async () => { callOrder.push("finalise"); });
+
+            mockFetchSuccess(makeBehaviourResult("s1", "s1:1", 0.2));
+            vi.stubGlobal("fetch", vi.fn().mockImplementation(async () => {
+                callOrder.push("evaluate");
+                return { ok: true, json: () => Promise.resolve(makeBehaviourResult("s1", "s1:1", 0.2)) };
+            }));
+
+            const coord = new Coordinator(makeConfig(), transcription);
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+            for (let i = 0; i < 5; i++) coord.onFrame(makeFrame("s1", i));
+
+            await coord.flushSession("s1");
+
+            expect(callOrder.indexOf("finalise")).toBeLessThan(callOrder.indexOf("evaluate"));
+        });
+
+        it("dispatches one AnalysisWindow to evaluation on flush", async () => {
+            mockFetchSuccess(makeBehaviourResult("s1", "s1:1", 0.2));
+
+            const coord = new Coordinator(makeConfig(), makeMockTranscription());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+            for (let i = 0; i < 5; i++) coord.onFrame(makeFrame("s1", i));
+
+            await coord.flushSession("s1");
 
             expect(fetch).toHaveBeenCalledOnce();
         });
 
-        it("discards a window when frame count is below threshold", async () => {
-            const coord  = new Coordinator(makeConfig());
-            const sendFn = vi.fn();
-            coord.registerSession("s1", makeClip("clip_01"), sendFn);
+        it("does nothing when the frame buffer is empty", async () => {
+            const coord = new Coordinator(makeConfig(), makeMockTranscription());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
 
-            for (let i = 0; i < MIN_FRAMES - 1; i++) coord.onFrame(makeFrame("s1", i));
-
-            await vi.advanceTimersByTimeAsync(WINDOW_MS);
+            await coord.flushSession("s1");
 
             expect(fetch).not.toHaveBeenCalled();
         });
 
+        it("includes the accumulated transcript in the dispatched window", async () => {
+            mockFetchSuccess(makeBehaviourResult("s1", "s1:1", 0.0));
+
+            const coord = new Coordinator(makeConfig(), makeMockTranscription());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+
+            coord.onTranscript("s1", "Goed", true);
+            coord.onTranscript("s1", "gedaan", true);
+
+            for (let i = 0; i < 5; i++) coord.onFrame(makeFrame("s1", i));
+            await coord.flushSession("s1");
+
+            const body = JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body);
+            expect(body.transcript).toBe("Goed gedaan");
+        });
+
+        it("includes all accumulated MFCCs in the dispatched window", async () => {
+            mockFetchSuccess(makeBehaviourResult("s1", "s1:1", 0.0));
+
+            const coord = new Coordinator(makeConfig(), makeMockTranscription());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+
+            coord.onAudio(makeChunk("s1", 1));
+            coord.onAudio(makeChunk("s1", 2));
+            for (let i = 0; i < 5; i++) coord.onFrame(makeFrame("s1", i));
+
+            await coord.flushSession("s1");
+
+            const body = JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body);
+            expect(body.mfccs).toHaveLength(2);
+        });
+
         it("includes correct session_id and ClipMetadata in dispatched window", async () => {
-            const clip   = makeClip("clip_01");
-            const result = makeBehaviourResult("s1", "s1:1", 0.0);
-            mockFetchSuccess(result);
+            mockFetchSuccess(makeBehaviourResult("s1", "s1:1", 0.0));
+            const clip = makeClip("clip_01");
 
-            const coord  = new Coordinator(makeConfig());
+            const coord = new Coordinator(makeConfig(), makeMockTranscription());
             coord.registerSession("s1", clip, vi.fn());
+            for (let i = 0; i < 5; i++) coord.onFrame(makeFrame("s1", i));
 
-            for (let i = 0; i < MIN_FRAMES; i++) coord.onFrame(makeFrame("s1", i));
-
-            await vi.advanceTimersByTimeAsync(WINDOW_MS);
+            await coord.flushSession("s1");
 
             const body = JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body);
             expect(body.session_id).toBe("s1");
             expect(body.clip_metadata.clip_id).toBe("clip_01");
         });
 
-        it("WindowID sequence increments with each dispatched window", async () => {
+        it("clears the frame buffer after flushing", async () => {
+            mockFetchSuccess(makeBehaviourResult("s1", "s1:1", 0.0));
+
+            const coord = new Coordinator(makeConfig(), makeMockTranscription());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+
+            for (let i = 0; i < 5; i++) coord.onFrame(makeFrame("s1", i));
+            await coord.flushSession("s1");
+            await coord.flushSession("s1"); // second flush — buffer empty, no dispatch
+
+            expect(fetch).toHaveBeenCalledOnce();
+        });
+
+        it("stores the BehaviourResult as lastResult after a successful evaluation", async () => {
+            const result = makeBehaviourResult("s1", "s1:1", 0.4);
+            mockFetchSuccess(result);
+
+            const coord = new Coordinator(makeConfig(), makeMockTranscription());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+            for (let i = 0; i < 5; i++) coord.onFrame(makeFrame("s1", i));
+
+            await coord.flushSession("s1");
+
+            expect(coord.getLastResult("s1")).toEqual(result);
+        });
+
+        it("does not throw when the evaluation request fails", async () => {
+            mockFetchFailure();
+
+            const coord = new Coordinator(makeConfig(), makeMockTranscription());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+            for (let i = 0; i < 5; i++) coord.onFrame(makeFrame("s1", i));
+
+            await expect(coord.flushSession("s1")).resolves.not.toThrow();
+        });
+
+        it("WindowID sequence increments across clips", async () => {
             const result1 = makeBehaviourResult("s1", "s1:1", 0.1);
             const result2 = makeBehaviourResult("s1", "s1:2", 0.2);
             vi.stubGlobal("fetch", vi.fn()
@@ -168,295 +292,184 @@ describe("Coordinator", () => {
                 .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(result2) }),
             );
 
-            const coord  = new Coordinator(makeConfig());
-            const sendFn = vi.fn();
-            coord.registerSession("s1", makeClip("clip_01"), sendFn);
+            const coord = new Coordinator(makeConfig(), makeMockTranscription());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
 
-            for (let i = 0; i < MIN_FRAMES; i++) coord.onFrame(makeFrame("s1", i));
-            await vi.advanceTimersByTimeAsync(WINDOW_MS);
+            for (let i = 0; i < 5; i++) coord.onFrame(makeFrame("s1", i));
+            await coord.flushSession("s1");
 
-            for (let i = MIN_FRAMES; i < MIN_FRAMES * 2; i++) coord.onFrame(makeFrame("s1", i));
-            await vi.advanceTimersByTimeAsync(WINDOW_MS);
+            for (let i = 0; i < 5; i++) coord.onFrame(makeFrame("s1", i));
+            await coord.flushSession("s1");
 
-            const calls = (fetch as ReturnType<typeof vi.fn>).mock.calls;
-            const body1 = JSON.parse(calls[0][1].body);
-            const body2 = JSON.parse(calls[1][1].body);
+            const body1 = JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body);
+            const body2 = JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[1][1].body);
             expect(body1.window_id).toBe("s1:1");
             expect(body2.window_id).toBe("s1:2");
         });
-
-        it("buffer is cleared after each dispatched window", async () => {
-            const result = makeBehaviourResult("s1", "s1:1", 0.0);
-            mockFetchSuccess(result);
-
-            const coord  = new Coordinator(makeConfig());
-            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
-
-            for (let i = 0; i < MIN_FRAMES; i++) coord.onFrame(makeFrame("s1", i));
-            await vi.advanceTimersByTimeAsync(WINDOW_MS);
-
-            // Only enough frames for a second window if buffer was NOT cleared
-            for (let i = 0; i < MIN_FRAMES - 1; i++) coord.onFrame(makeFrame("s1", i));
-            await vi.advanceTimersByTimeAsync(WINDOW_MS);
-
-            expect(fetch).toHaveBeenCalledOnce();
-        });
-
-        it("audio MFCCs are included in the dispatched window", async () => {
-            const result = makeBehaviourResult("s1", "s1:1", 0.0);
-            mockFetchSuccess(result);
-
-            const coord  = new Coordinator(makeConfig());
-            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
-
-            for (let i = 0; i < MIN_FRAMES; i++) coord.onFrame(makeFrame("s1", i));
-            coord.onAudio(makeChunk("s1", 1));
-
-            await vi.advanceTimersByTimeAsync(WINDOW_MS);
-
-            const body = JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body);
-            expect(body.mfccs).toHaveLength(1);
-        });
     });
 
-    // ── Flush ─────────────────────────────────────────────────────────────────
+    // ── Transcript accumulation ───────────────────────────────────────────────
 
-    describe("flushSession", () => {
-        it("dispatches a partial window immediately regardless of frame threshold", async () => {
-            const result = makeBehaviourResult("s1", "s1:1", 0.0);
-            mockFetchSuccess(result);
-
-            const coord  = new Coordinator(makeConfig());
+    describe("transcript accumulation", () => {
+        it("accumulates final transcript segments separated by spaces", () => {
+            const coord = new Coordinator(makeConfig(), makeMockTranscription());
             coord.registerSession("s1", makeClip("clip_01"), vi.fn());
 
-            for (let i = 0; i < MIN_FRAMES - 1; i++) coord.onFrame(makeFrame("s1", i));
+            coord.onTranscript("s1", "Hallo", true);
+            coord.onTranscript("s1", "wereld", true);
 
-            await coord.flushSession("s1");
-
-            expect(fetch).toHaveBeenCalledOnce();
+            expect(coord.getLastTranscript("s1")).toBe("Hallo wereld");
         });
 
-        it("does nothing when the buffer is empty", async () => {
-            const coord = new Coordinator(makeConfig());
+        it("also accumulates partial transcript segments", () => {
+            const coord = new Coordinator(makeConfig(), makeMockTranscription());
             coord.registerSession("s1", makeClip("clip_01"), vi.fn());
 
-            await coord.flushSession("s1");
+            coord.onTranscript("s1", "Hal", false);
+            coord.onTranscript("s1", "lo", true);
 
-            expect(fetch).not.toHaveBeenCalled();
+            expect(coord.getLastTranscript("s1")).toBe("Hal lo");
         });
 
-        it("clears the buffer after flushing", async () => {
-            const result = makeBehaviourResult("s1", "s1:1", 0.0);
-            mockFetchSuccess(result);
-
-            const coord  = new Coordinator(makeConfig());
-            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
-
-            for (let i = 0; i < MIN_FRAMES - 1; i++) coord.onFrame(makeFrame("s1", i));
-            await coord.flushSession("s1");
-            await coord.flushSession("s1");
-
-            expect(fetch).toHaveBeenCalledOnce();
-        });
-    });
-
-    // ── Evaluation communication ──────────────────────────────────────────────
-
-    describe("evaluation communication", () => {
-        it("sends a SessionUpdate to the client after a successful evaluation", async () => {
-            const result = makeBehaviourResult("s1", "s1:1", 0.4);
-            mockFetchSuccess(result);
-
-            const coord  = new Coordinator(makeConfig());
+        it("sends a SessionUpdate only on final transcript segments", () => {
             const sendFn = vi.fn();
+            const coord  = new Coordinator(makeConfig(), makeMockTranscription());
             coord.registerSession("s1", makeClip("clip_01"), sendFn);
 
-            for (let i = 0; i < MIN_FRAMES; i++) coord.onFrame(makeFrame("s1", i));
-            await vi.advanceTimersByTimeAsync(WINDOW_MS);
-
-            expect(sendFn).toHaveBeenCalledOnce();
-            const msg: SessionUpdate = sendFn.mock.calls[0][0];
-            expect(msg.type).toBe("session_update");
-            expect(msg.session_id).toBe("s1");
-            expect(msg.escalation_score).toBe(0.4);
-        });
-
-        it("does not throw when the evaluation request fails", async () => {
-            mockFetchFailure();
-
-            const coord  = new Coordinator(makeConfig());
-            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
-
-            for (let i = 0; i < MIN_FRAMES; i++) coord.onFrame(makeFrame("s1", i));
-
-            await expect(vi.advanceTimersByTimeAsync(WINDOW_MS)).resolves.not.toThrow();
-        });
-
-        it("does not send a SessionUpdate when the evaluation request fails", async () => {
-            mockFetchFailure();
-
-            const coord  = new Coordinator(makeConfig());
-            const sendFn = vi.fn();
-            coord.registerSession("s1", makeClip("clip_01"), sendFn);
-
-            for (let i = 0; i < MIN_FRAMES; i++) coord.onFrame(makeFrame("s1", i));
-            await vi.advanceTimersByTimeAsync(WINDOW_MS);
-
+            coord.onTranscript("s1", "partial", false);
             expect(sendFn).not.toHaveBeenCalled();
+
+            coord.onTranscript("s1", "final", true);
+            expect(sendFn).toHaveBeenCalledOnce();
+        });
+
+        it("SessionUpdate contains the full accumulated transcript so far", () => {
+            const sendFn = vi.fn();
+            const coord  = new Coordinator(makeConfig(), makeMockTranscription());
+            coord.registerSession("s1", makeClip("clip_01"), sendFn);
+
+            coord.onTranscript("s1", "eerste", true);
+            coord.onTranscript("s1", "tweede", true);
+
+            const lastMsg = sendFn.mock.calls[1][0];
+            expect(lastMsg.type).toBe("session_update");
+            expect(lastMsg.transcript).toBe("eerste tweede");
+        });
+
+        it("getLastTranscript returns null before any transcript arrives", () => {
+            const coord = new Coordinator(makeConfig(), makeMockTranscription());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+            expect(coord.getLastTranscript("s1")).toBeNull();
+        });
+
+        it("ignores transcript for unknown session", () => {
+            const coord = new Coordinator(makeConfig(), makeMockTranscription());
+            expect(() => coord.onTranscript("unknown", "text", true)).not.toThrow();
+        });
+    });
+
+    // ── Reset ─────────────────────────────────────────────────────────────────
+
+    describe("resetSession", () => {
+        it("clears accumulated frames", async () => {
+            vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
+
+            const coord = new Coordinator(makeConfig(), makeMockTranscription());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+
+            for (let i = 0; i < 5; i++) coord.onFrame(makeFrame("s1", i));
+            await coord.resetSession("s1");
+
+            const callCountAfterReset = (fetch as ReturnType<typeof vi.fn>).mock.calls.length;
+
+            await coord.flushSession("s1"); // nothing to flush — frames were cleared
+
+            // No additional fetch calls beyond the reset POST itself
+            expect((fetch as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callCountAfterReset);
+        });
+
+        it("clears the accumulated transcript", async () => {
+            const coord = new Coordinator(makeConfig(), makeMockTranscription());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+
+            coord.onTranscript("s1", "some text", true);
+            await coord.resetSession("s1");
+
+            expect(coord.getLastTranscript("s1")).toBeNull();
+        });
+
+        it("calls resetSession on the transcription client", async () => {
+            const transcription = makeMockTranscription();
+            const coord = new Coordinator(makeConfig(), transcription);
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+
+            await coord.resetSession("s1");
+
+            expect(transcription.resetSession).toHaveBeenCalledWith(
+                "s1",
+                expect.any(String),
+            );
+        });
+
+        it("calls the evaluation reset endpoint", async () => {
+            vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
+
+            const coord = new Coordinator(makeConfig(), makeMockTranscription());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+
+            await coord.resetSession("s1");
+
+            const url = (fetch as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+            expect(url).toContain("/evaluate/reset/s1");
+        });
+
+        it("reopens the transcription session after reset", async () => {
+            const transcription = makeMockTranscription();
+            const coord = new Coordinator(makeConfig(), transcription);
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+
+            await coord.resetSession("s1");
+
+            // openSession called once on register, once after reset
+            expect(transcription.openSession).toHaveBeenCalledTimes(2);
         });
     });
 
     // ── Clip management ───────────────────────────────────────────────────────
 
     describe("clip management", () => {
-        it("setClip updates the ClipMetadata used in subsequent windows", async () => {
-            const result = makeBehaviourResult("s1", "s1:1", 0.0);
-            mockFetchSuccess(result);
+        it("setClip updates the ClipMetadata used in subsequent flushes", async () => {
+            mockFetchSuccess(makeBehaviourResult("s1", "s1:1", 0.0));
 
-            const coord = new Coordinator(makeConfig());
+            const coord = new Coordinator(makeConfig(), makeMockTranscription());
             coord.registerSession("s1", makeClip("clip_01"), vi.fn());
             coord.setClip("s1", makeClip("clip_02"));
 
-            for (let i = 0; i < MIN_FRAMES; i++) coord.onFrame(makeFrame("s1", i));
-            await vi.advanceTimersByTimeAsync(WINDOW_MS);
+            for (let i = 0; i < 5; i++) coord.onFrame(makeFrame("s1", i));
+            await coord.flushSession("s1");
 
             const body = JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body);
             expect(body.clip_metadata.clip_id).toBe("clip_02");
         });
-
-        it("getClipAverageScore returns the mean of accumulated scores", async () => {
-            vi.stubGlobal("fetch", vi.fn()
-                .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(makeBehaviourResult("s1", "s1:1", 0.2)) })
-                .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(makeBehaviourResult("s1", "s1:2", 0.6)) }),
-            );
-
-            const coord  = new Coordinator(makeConfig());
-            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
-
-            for (let i = 0; i < MIN_FRAMES; i++) coord.onFrame(makeFrame("s1", i));
-            await vi.advanceTimersByTimeAsync(WINDOW_MS);
-
-            for (let i = MIN_FRAMES; i < MIN_FRAMES * 2; i++) coord.onFrame(makeFrame("s1", i));
-            await vi.advanceTimersByTimeAsync(WINDOW_MS);
-
-            expect(coord.getClipAverageScore("s1")).toBeCloseTo(0.4);
-        });
-
-        it("getClipAverageScore returns null when no scores have been collected", () => {
-            const coord = new Coordinator(makeConfig());
-            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
-            expect(coord.getClipAverageScore("s1")).toBeNull();
-        });
-
-        it("resetSession clears the score accumulator", async () => {
-            const result = makeBehaviourResult("s1", "s1:1", 0.8);
-            mockFetchSuccess(result);
-
-            const coord  = new Coordinator(makeConfig());
-            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
-
-            for (let i = 0; i < MIN_FRAMES; i++) coord.onFrame(makeFrame("s1", i));
-            await vi.advanceTimersByTimeAsync(WINDOW_MS);
-
-            await coord.resetSession("s1");
-
-            expect(coord.getClipAverageScore("s1")).toBeNull();
-        });
-
-        it("resetSession clears the audio buffer", async () => {
-            const result = makeBehaviourResult("s1", "s1:1", 0.0);
-            // First call is the reset POST, second is the evaluate POST
-            vi.stubGlobal("fetch", vi.fn()
-                .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({}) })
-                .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(result) }),
-            );
-
-            const coord  = new Coordinator(makeConfig());
-            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
-
-            coord.onAudio(makeChunk("s1", 1));
-            await coord.resetSession("s1");
-
-            for (let i = 0; i < MIN_FRAMES; i++) coord.onFrame(makeFrame("s1", i));
-            await vi.advanceTimersByTimeAsync(WINDOW_MS);
-
-            // Second call [1] is the evaluate POST
-            const body = JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[1][1].body);
-            expect(body.mfccs).toHaveLength(0);
-        });
     });
 
-    describe("last result and transcript", () => {
-        it("getLastResult returns null before any window is dispatched", () => {
-            const coord = new Coordinator(makeConfig());
+    // ── Last result ───────────────────────────────────────────────────────────
+
+    describe("last result", () => {
+        it("returns null before any flush", () => {
+            const coord = new Coordinator(makeConfig(), makeMockTranscription());
             coord.registerSession("s1", makeClip("clip_01"), vi.fn());
             expect(coord.getLastResult("s1")).toBeNull();
         });
 
-        it("getLastResult returns the most recent BehaviourResult after a dispatch", async () => {
-            const result = makeBehaviourResult("s1", "s1:1", 0.3);
-            mockFetchSuccess(result);
-
-            const coord = new Coordinator(makeConfig());
-            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
-
-            for (let i = 0; i < MIN_FRAMES; i++) coord.onFrame(makeFrame("s1", i));
-            await vi.advanceTimersByTimeAsync(WINDOW_MS);
-
-            expect(coord.getLastResult("s1")).toEqual(result);
-        });
-
-        it("getLastTranscript returns null before any transcript is set", () => {
-            const coord = new Coordinator(makeConfig());
-            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
-            expect(coord.getLastTranscript("s1")).toBeNull();
-        });
-
-        it("getLastResult returns null for an unknown session", () => {
-            const coord = new Coordinator(makeConfig());
+        it("returns null for an unknown session", () => {
+            const coord = new Coordinator(makeConfig(), makeMockTranscription());
             expect(coord.getLastResult("unknown")).toBeNull();
         });
 
-        it("getLastTranscript returns null for an unknown session", () => {
-            const coord = new Coordinator(makeConfig());
+        it("returns null for an unknown session transcript", () => {
+            const coord = new Coordinator(makeConfig(), makeMockTranscription());
             expect(coord.getLastTranscript("unknown")).toBeNull();
-        });
-    });
-
-
-    // ── SendFn lifecycle ──────────────────────────────────────────────────────
-
-    describe("SendFn lifecycle", () => {
-        it("does not send messages after deregisterSession is called", async () => {
-            const result = makeBehaviourResult("s1", "s1:1", 0.2);
-            mockFetchSuccess(result);
-
-            const coord  = new Coordinator(makeConfig());
-            const sendFn = vi.fn();
-            coord.registerSession("s1", makeClip("clip_01"), sendFn);
-
-            for (let i = 0; i < MIN_FRAMES; i++) coord.onFrame(makeFrame("s1", i));
-            coord.deregisterSession("s1");
-
-            await vi.advanceTimersByTimeAsync(WINDOW_MS);
-
-            expect(sendFn).not.toHaveBeenCalled();
-        });
-
-        it("stops the window timer when deregisterSession is called", async () => {
-            const coord  = new Coordinator(makeConfig());
-            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
-            coord.deregisterSession("s1");
-
-            for (let i = 0; i < MIN_FRAMES; i++) coord.onFrame(makeFrame("s1", i));
-            await vi.advanceTimersByTimeAsync(WINDOW_MS);
-
-            expect(fetch).not.toHaveBeenCalled();
-        });
-
-        it("frames received for an unregistered session are ignored", () => {
-            const coord = new Coordinator(makeConfig());
-            expect(() => coord.onFrame(makeFrame("unknown", 1))).not.toThrow();
         });
     });
 });

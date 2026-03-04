@@ -25,9 +25,9 @@ function enumEnv<T extends string>(key: string, allowed: T[], fallback: T): T {
     return val as T;
 }
 
-function secretEnv(key: string, knownBadValue : string = "CHANGE_ME"): string {
+function secretEnv(key: string, knownBadValue: string = "CHANGE_ME"): string {
     const value = requireEnv(key);
-    if (value === knownBadValue ) {
+    if (value === knownBadValue) {
         console.warn(`[WARN] ${key} is set to the default placeholder value. ` +
             "Generate a secure key with: openssl rand -hex 32");
     }
@@ -35,38 +35,40 @@ function secretEnv(key: string, knownBadValue : string = "CHANGE_ME"): string {
 }
 
 function parseStringList(key: string): string[] {
-    const multi = process.env[key];
-    if (multi) return multi.split(",").map(u => u.trim()).filter(Boolean);
+    const val = process.env[key];
+    if (val) return val.split(",").map(u => u.trim()).filter(Boolean);
     return [requireEnv(key)];
 }
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 export interface AppConfig {
-    port:           number;
-    evaluationUrls: string[];
-    feedbackUrl:    string;
-    scenariosDir:   string;
-    internalApiKey:   string;
-    coordinator:    CoordinatorConfig;
-    sessionManager: SessionManagerConfig;
+    port:              number;
+    evaluationUrls:    string[];
+    transcriptionUrls: string[];
+    feedbackUrl:       string;
+    scenariosDir:      string;
+    internalApiKey:    string;
+    coordinator:       CoordinatorConfig;
+    sessionManager:    SessionManagerConfig;
 }
 
 export function loadConfig(): AppConfig {
-    const internalApiKey = secretEnv("INTERNAL_API_KEY", "CHANGE_ME");
-    const evaluationUrls = parseStringList("EVALUATION_URL");
+    const internalApiKey    = secretEnv("INTERNAL_API_KEY", "CHANGE_ME");
+    const evaluationUrls    = parseStringList("EVALUATION_URL");
+    const transcriptionUrls = parseStringList("TRANSCRIPTION_URL");
 
     return {
-        port:          intEnv("PORT", 3000),
+        port:              intEnv("PORT", 3000),
         evaluationUrls,
-        feedbackUrl:   requireEnv("FEEDBACK_URL"),
-        scenariosDir:  requireEnv("SCENARIOS_DIR"),
+        transcriptionUrls,
+        feedbackUrl:       requireEnv("FEEDBACK_URL"),
+        scenariosDir:      requireEnv("SCENARIOS_DIR"),
         internalApiKey,
         coordinator: {
             evaluationUrls,
+            transcriptionUrls,
             internalApiKey,
-            minFramesPerWindow: intEnv("MIN_FRAMES_PER_WINDOW", 10),
-            windowMs:           intEnv("WINDOW_MS", 2_000),
         },
         sessionManager: {
             maxSessions:      intEnv("MAX_SESSIONS",       32),

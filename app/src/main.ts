@@ -4,16 +4,22 @@ import { loadConfig } from "./config.js";
 import { SessionManager } from "./session-manager.js";
 import { Coordinator } from "./coordinator.js";
 import { FileScenarioLoader } from "./scenario-loader.js";
+import { FeedbackClient } from "./feedback-client.js";
+import { ClipController } from "./clip-controller.js";
+import { TranscriptionClient } from "./transcription-client.js";
 import type { CreateSessionRequest, ClientMessage } from "@ar-training/shared";
-import {FeedbackClient} from "./feedback-client.js";
-import {ClipController} from "./clip-controller.js";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
-const config     = loadConfig();
-const app        = Fastify({ logger: true });
-const sessions   = new SessionManager(config.sessionManager);
-const coord      = new Coordinator(config.coordinator);
+const config       = loadConfig();
+const app          = Fastify({ logger: true });
+const sessions     = new SessionManager(config.sessionManager);
+const transcription = new TranscriptionClient(
+    config.transcriptionUrls,
+    config.internalApiKey,
+    (sessionId, text, isFinal) => coord.onTranscript(sessionId, text, isFinal),
+);
+const coord      = new Coordinator(config.coordinator, transcription);
 const scenarios  = new FileScenarioLoader(config.scenariosDir);
 const feedback   = new FeedbackClient(config.feedbackUrl, config.internalApiKey);
 const controller = new ClipController(sessions, coord, scenarios, feedback);
@@ -22,48 +28,54 @@ await app.register(websocketPlugin);
 
 // ─── Health ───────────────────────────────────────────────────────────────────
 
-
 app.get("/health", async (_req, reply) => {
-    const evalResults = await Promise.allSettled(
-        config.evaluationUrls.map(url =>
-            fetch(`${url}/evaluate/health`).then(r => r.ok)
-        )
-    );
+    const [evalResults, transcriptionResults] = await Promise.all([
+        Promise.allSettled(
+            config.evaluationUrls.map(url =>
+                fetch(`${url}/evaluate/health`).then(r => r.ok)
+            )
+        ),
+        Promise.allSettled(
+            config.transcriptionUrls.map(url =>
+                fetch(`${url}/transcription/health`).then(r => r.ok)
+            )
+        ),
+    ]);
 
-    const evalInstances: Record<string, "ok" | "unreachable"> = {};
-    let evalOkCount = 0;
-
-    for (let i = 0; i < evalResults.length; i++) {
-        const url    = config.evaluationUrls[i];
-        const result = evalResults[i];
-        if (result.status === "fulfilled" && result.value) {
-            evalInstances[url] = "ok";
-            evalOkCount++;
-        } else {
-            evalInstances[url] = "unreachable";
+    function buildInstanceStatus(urls: string[], results: PromiseSettledResult<boolean>[]) {
+        const instances: Record<string, "ok" | "unreachable"> = {};
+        let okCount = 0;
+        for (let i = 0; i < results.length; i++) {
+            const ok = results[i].status === "fulfilled" && (results[i] as PromiseFulfilledResult<boolean>).value;
+            instances[urls[i]] = ok ? "ok" : "unreachable";
+            if (ok) okCount++;
         }
+        const status = okCount === urls.length ? "ok"
+            : okCount === 0           ? "critical"
+                :                           "degraded";
+        return { status, instances, okCount };
     }
 
-    const evalTotal  = config.evaluationUrls.length;
-    const evalStatus = evalOkCount === evalTotal ? "ok"
-            : evalOkCount === 0         ? "critical"
-            :                             "degraded";
+    const eval_ = buildInstanceStatus(config.evaluationUrls,    evalResults);
+    const trans  = buildInstanceStatus(config.transcriptionUrls, transcriptionResults);
 
     const feedOk     = await fetch(`${config.feedbackUrl}/feedback/health`)
         .then(r => r.ok).catch(() => false);
     const feedStatus = feedOk ? "ok" : "unreachable";
 
-    const overallStatus = evalStatus === "critical"                              ? "critical"
-        : evalStatus === "degraded" || feedStatus === "unreachable" ? "degraded"
-            : "ok";
+    const overallStatus =
+        eval_.status === "critical" || trans.status === "critical" ? "critical"
+            : eval_.status === "degraded" || trans.status === "degraded" || feedStatus === "unreachable" ? "degraded"
+                : "ok";
 
     return reply
         .code(overallStatus === "critical" ? 503 : 200)
         .send({
             status: overallStatus,
             services: {
-                evaluation: { status: evalStatus, instances: evalInstances },
-                feedback:   { status: feedStatus },
+                evaluation:    { status: eval_.status,  instances: eval_.instances },
+                transcription: { status: trans.status,  instances: trans.instances },
+                feedback:      { status: feedStatus },
             },
         });
 });
@@ -119,17 +131,10 @@ app.post<{ Params: { session_id: string } }>("/session/:session_id/end", async (
     sessions.endSession(session_id);
 
     if (feedbackReq) {
-        // sendFn is no longer available here since the WS is still open —
-        // this path is for explicit /end calls outside of the normal clip flow.
-        // For now we fire-and-forget; the WS handler will forward messages.
         app.log.warn({ session_id }, "session/end called outside clip flow — feedback not streamed to client");
     }
 
-    return reply.code(200).send({
-        session_id,
-        state:   "completed",
-        message: "Session ended.",
-    });
+    return reply.code(200).send({ session_id, state: "completed", message: "Session ended." });
 });
 
 app.get<{ Params: { session_id: string } }>("/session/:session_id/queue", async (req, reply) => {

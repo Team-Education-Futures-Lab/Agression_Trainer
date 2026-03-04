@@ -18,7 +18,7 @@ stateDiagram-v2
     CONNECTING --> ACTIVE  : WebSocket /ws/{session_id} opened
     CONNECTING --> DROPPED : connection timeout (no WS within 30s)
 
-    ACTIVE --> PAUSED    : clip ends, awaiting next branch decision
+    ACTIVE --> PAUSED    : clip ends, awaiting evaluation and branch decision
     PAUSED --> ACTIVE    : next clip starts playing
     PAUSED --> COMPLETED : null next_clip (terminal clip reached)
     ACTIVE --> DROPPED   : WebSocket disconnected unexpectedly
@@ -40,7 +40,7 @@ Session has been created and a slot is reserved. Waiting for the client to open 
 
 **App container responsibilities:**
 - Reserve capacity slot
-- Initialise `SessionContext` with `window_sequence = 0` and empty `conversation_history`
+- Initialise `SessionContext` with empty `conversation_history`
 - Start connection timeout timer
 
 ---
@@ -56,36 +56,36 @@ At-capacity session is held in a waiting room. The client receives periodic `Ses
 ---
 
 ### `ACTIVE`
-WebSocket is open. Frames and audio chunks are flowing. The Coordinator is assembling `AnalysisWindows` and dispatching them to the Evaluation container. `SessionUpdate` messages with `escalation_score` are being sent to the client.
+WebSocket is open. Frames and audio chunks are flowing. The Coordinator is buffering data for the current clip while simultaneously streaming audio to the Transcription container. `SessionUpdate` messages containing the accumulated transcript are sent to the client whenever a finalised transcript segment arrives.
 
 **App container responsibilities:**
 - Forward `VideoFrame` and `AudioChunk` messages to the Coordinator
-- Forward `BehaviourResult` and `Transcript` messages from Evaluation back through the session
-- Send `SessionUpdate` to the client on every result
-- Track `window_sequence` — increment after each dispatched window
+- Forward `AudioChunk` messages to the Transcription container via `TranscriptionClient`
+- Accumulate partial and final transcript segments into the clip transcript
+- Send `SessionUpdate` to the client on each finalised transcript segment
 
-**Evaluation container responsibilities:**
+**Transcription container responsibilities:**
 - Maintain per-session audio buffer and VAD state
-- Run Whisper transcription and multimodal classifier in parallel
+- Run Whisper transcription continuously, emitting partial and final transcript segments
 
 ---
 
 ### `PAUSED`
-A clip has finished playing. The client has received the final `escalation_score` for the clip and is determining which branch to take. During this state the Coordinator calls `flush_session()` to dispatch any partially-assembled window, and `reset_session()` is called on the Transcription pool to clear the audio buffer before the next clip.
-
-This state is brief — it exists to ensure the audio buffer is clean before the next clip starts and to give the Coordinator time to commit the `ConversationTurn`.
+A clip has finished playing. The App container finalises the transcript, dispatches the complete clip window to Evaluation, and waits for the result. This state is brief — it exists to ensure all data is committed cleanly before the next clip begins.
 
 **App container responsibilities:**
-- Call `flush_session()` on the Coordinator
-- Call `reset_session()` on the Evaluation container
-- Append the completed `ConversationTurn` to the session via `SessionManager.append_turn()`
-- Determine `next_clip` from `ClipMetadata.branch_conditions` using the clip's average `escalation_score`
-- Send next clip instruction to client
+- Send `POST /transcription/finalise/{session_id}` to flush any in-flight audio
+- Dispatch one `AnalysisWindow` to the Evaluation container covering the full clip response
+- Read the `escalation_score` from the returned `BehaviourResult`
+- Determine `next_clip` from `ClipMetadata.branch_conditions` using that score
+- Append the completed `ConversationTurn` to the session via `SessionManager.appendTurn()`
+- Send `POST /transcription/reset/{session_id}` and `POST /evaluate/reset/{session_id}` to clear buffers
+- Send `ClipReady` to the client with the resolved `next_clip_id` and `clip_score`
 
 ---
 
 ### `COMPLETED`
-A terminal clip (`next_clip: null`) has been reached and all turns have been committed. The App container compiles the full `FeedbackRequest` from `conversation_history` and sends it to the Feedback container. Feedback is delivered to the client over the still-open WebSocket as a `session_complete` message (with streaming tokens if using SSE).
+A terminal clip (`next_clip: null`) has been reached and all turns have been committed. The App container compiles the full `FeedbackRequest` from `conversation_history` and sends it to the Feedback container. Feedback is delivered to the client over the still-open WebSocket as `FeedbackToken` messages followed by a final `SessionComplete`.
 
 **App container responsibilities:**
 - Compile `FeedbackRequest` from `SessionContext.conversation_history`
@@ -120,14 +120,14 @@ Returned synchronously from `POST /session/create` when at capacity and `Capacit
 
 ---
 
-## Clip Average Score Calculation
+## Clip Score Calculation
 
-The `escalation_score` used for branching at the end of each clip is the **mean** of all `BehaviourResult.escalation_score` values collected during that clip (i.e. across all windows while the clip was playing).
+The `escalation_score` used for branching at the end of each clip is the `escalation_score` from the single `BehaviourResult` returned by the Evaluation container for that clip.
 
-This smooths out momentary spikes and gives a more representative picture of the student's overall response to the clip.
+The Evaluation container receives a complete `AnalysisWindow` covering the student's entire response — all frames, all MFCCs, and the full transcript — and produces one result that reflects the student's overall behaviour across the whole response.
 
 ```
-clip_score = mean(window_scores collected between clip_start and clip_end)
+clip_score = BehaviourResult.escalation_score
 ```
 
 The first matching `branch_condition` where `min_score ≤ clip_score < max_score` determines `next_clip`.
@@ -141,5 +141,4 @@ The first matching `branch_condition` where `min_score ≤ clip_score < max_scor
 | WebSocket must open after create | Within `session_timeout_s` (default 30s)                   |
 | Reconnect after drop             | Within `recovery_window_s` (default 30s)                   |
 | Queue position update interval   | Every 5–10s (client-side polling of `/session/{id}/queue`) |
-| Analysis window duration         | ~2s of captured frames + 0.5s overlap                      |
 | Flush on clip end                | Immediately when client signals clip complete              |

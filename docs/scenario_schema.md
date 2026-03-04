@@ -2,7 +2,7 @@
 
 Scenario metadata is stored as a single JSON file per scenario in the `scenarios/` directory. Each file describes all clips in that scenario, their content, and the branching logic that connects them.
 
-The file is loaded once at App container startup and passed into the Coordinator. It is also referenced by the Evaluation container (via the `AnalysisWindow`) and the Feedback container (via `ConversationTurn`).
+The file is loaded once at App container startup by `FileScenarioLoader`. Clip metadata is also forwarded to the Evaluation container as part of each `AnalysisWindow` and to the Feedback container as part of each `ConversationTurn`.
 
 ---
 
@@ -15,7 +15,7 @@ scenarios/
 │   ├── clip_01_intro.mp4
 │   ├── clip_02_escalated.mp4
 │   ├── clip_02_calm.mp4
-│   └── clip_03_end_good.mp4
+│   ├── clip_03_end_good.mp4
 │   └── clip_03_end_bad.mp4
 ├── scenario_02/
 │   └── ...
@@ -58,7 +58,7 @@ scenarios/
 - Conditions are evaluated in order. The first matching condition wins.
 - Together, conditions should cover the full range from `-1.0` to `1.0` with no gaps.
 - A `next_clip` of `null` marks a terminal clip — the session ends and feedback is generated.
-- The `escalation_score` used for branching is the **average** across all windows captured during the clip, not just the final window.
+- The `escalation_score` used for branching is the score from the single `BehaviourResult` returned by the Evaluation container for that clip. The Evaluation container receives the student's complete response — all frames, MFCCs, and full transcript — and produces one result.
 
 ### Notes on `notable_features`
 
@@ -84,8 +84,8 @@ These are free-text strings used as context by the classifier and the LLM. Use c
 ```json
 {
   "scenario_id": "scenario_01",
-  "title": "Frustrated Student",
-  "description": "A student is upset about a failing grade and confronts the teacher. Practice maintaining a calm, constructive tone under pressure.",
+  "title": "Boze student",
+  "description": "Een student is boos over een onvoldoende en confronteert de docent. Oefen met het behouden van een kalme, constructieve toon onder druk.",
   "language": "nl",
   "entry_clip": "clip_01_intro",
 

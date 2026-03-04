@@ -1,33 +1,32 @@
-// ─── EvaluationRouter ─────────────────────────────────────────────────────────
+// ─── ServiceRouter ────────────────────────────────────────────────────────────
 //
-// Selects which Evaluation instance to use for a given session and keeps that
-// mapping stable for the session's lifetime (session pinning).
+// Generic session-pinned router for any multi-instance backend service.
 //
-// Pinning guarantees that all REST calls and the audio WebSocket for a session
-// always reach the same Evaluation instance, so the per-session Whisper VAD
-// buffer stays coherent across requests.
+// Guarantees that all calls for a given session always reach the same instance,
+// which is required for any service that maintains per-session state (e.g. a
+// Transcription container with per-session VAD buffers).
 //
-// Selection strategy: the session ID is hashed to an index into the instance
-// list. The mapping is stored on first access and released when the session
-// ends. This avoids round-robin state while still distributing sessions evenly
-// across instances.
+// Selection strategy: the session ID is hashed to a stable index into the
+// instance list on first access. The mapping is stored until releaseSession()
+// is called. This avoids round-robin state while distributing sessions evenly.
 //
 // When only one URL is configured, all sessions resolve to that URL with no
 // hashing overhead.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export class EvaluationRouter {
+export class ServiceRouter {
     private readonly instances: string[];
     private readonly pinned: Map<string, string> = new Map();
 
     constructor(instances: string[]) {
         if (instances.length === 0) {
-            throw new Error("EvaluationRouter requires at least one instance URL");
+            throw new Error("ServiceRouter requires at least one instance URL");
         }
         this.instances = instances.map(u => u.replace(/\/+$/, ""));
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
+
 
     /**
      * Returns the base HTTP URL for a session.
@@ -38,9 +37,9 @@ export class EvaluationRouter {
     }
 
     /**
-     * Returns the WebSocket URL for a session's audio stream.
-     * Derives from the same pinned instance as getUrl() so REST calls and the
-     * audio WebSocket always reach the same container.
+     * Returns the WebSocket URL for a session.
+     * Derives from the same pinned instance as getUrl() so HTTP and WebSocket
+     * calls always reach the same container.
      */
     getWsUrl(sessionId: string): string {
         return this.resolve(sessionId)
@@ -73,14 +72,13 @@ export class EvaluationRouter {
     }
 
     /**
-     * Deterministic hash of a session ID string to a non-negative integer.
+     * Deterministic hash of a string to a non-negative integer.
      * Uses FNV-1a (32-bit) — fast, no dependencies, good distribution for UUIDs.
      */
-    private hash(sessionId: string): number {
+    private hash(value: string): number {
         let h = 0x811c9dc5;
-        for (let i = 0; i < sessionId.length; i++) {
-            h ^= sessionId.charCodeAt(i);
-            // Unsigned 32-bit multiply: keep result in 32-bit range.
+        for (let i = 0; i < value.length; i++) {
+            h ^= value.charCodeAt(i);
             h = (h * 0x01000193) >>> 0;
         }
         return h;

@@ -1,8 +1,14 @@
-import type {FeedbackClient} from "./feedback-client.js";
-import type {ScenarioLoader} from "./scenario-loader.js";
-import type {Coordinator, SendFn} from "./coordinator.js";
-import type {SessionManager} from "./session-manager.js";
-import type {BehaviourResult, BranchCondition, ClipEnded, ClipReady, ConversationTurn} from "@ar-training/shared";
+import type { FeedbackClient } from "./feedback-client.js";
+import type { ScenarioLoader } from "./scenario-loader.js";
+import type { Coordinator, SendFn } from "./coordinator.js";
+import type { SessionManager } from "./session-manager.js";
+import type {
+    BehaviourResult,
+    BranchCondition,
+    ClipEnded,
+    ClipReady,
+    ConversationTurn,
+} from "@ar-training/shared";
 
 // ─── ClipController ───────────────────────────────────────────────────────────
 //
@@ -10,18 +16,15 @@ import type {BehaviourResult, BranchCondition, ClipEnded, ClipReady, Conversatio
 // and the next beginning (or the session completing).
 //
 // Sequence:
-//   1. Pause session — prevents new analysis windows mid-transition
-//   2. Flush any partial window from the ending clip
-//   3. Compute the clip's average escalation score
+//   1. Pause session — prevents stray frames being buffered mid-transition
+//   2. Flush: finalise transcript, dispatch single AnalysisWindow to Evaluation
+//   3. Read clip score from the single BehaviourResult returned by Evaluation
 //   4. Resolve next clip from branch conditions
 //   5. Append a ConversationTurn to session history
-//   6. Reset the evaluation audio buffer
+//   6. Reset evaluation audio buffer and transcription VAD state
 //   7. Notify the client (ClipReady)
 //   8a. If terminal: trigger feedback and end the session
 //   8b. If not terminal: advance coordinator and session to the next clip
-//
-// Dependencies are injected so this class is fully unit-testable without
-// standing up HTTP services.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export class ClipController {
@@ -45,19 +48,19 @@ export class ClipController {
     // ── Public API ────────────────────────────────────────────────────────────
 
     async handleClipEnded(msg: ClipEnded, sendFn: SendFn): Promise<void> {
-        const {session_id, clip_id} = msg;
+        const { session_id, clip_id } = msg;
         const ctx = this.sessions.getSession(session_id);
         if (!ctx || ctx.state !== "ACTIVE") return;
 
-
-        // 1. Pause — prevents new windows being dispatched mid-transition.
+        // 1. Pause — prevents stray frames being buffered mid-transition.
         this.sessions.markPaused(session_id);
 
-        // 2. Flush any partial window accumulated during the clip.
+        // 2. Flush — finalises transcript and dispatches the full clip window.
         await this.coord.flushSession(session_id);
 
-        // 3. Compute the clip's average escalation score.
-        const clipScore = this.coord.getClipAverageScore(session_id) ?? 0;
+        // 3. Clip score comes from the single BehaviourResult for this clip.
+        const result   = this.coord.getLastResult(session_id);
+        const clipScore = result?.escalation_score ?? 0;
 
         // 4. Resolve the next clip from branch conditions.
         const currentClip = this.scenarios.getClip(ctx.scenario_id, clip_id);
@@ -70,13 +73,13 @@ export class ClipController {
             const turn: ConversationTurn = {
                 turn_id:            ctx.turn_count + 1,
                 clip:               currentClip,
-                student_response:   this.coord.getLastResult(session_id) ?? this.fallbackResult(session_id),
+                student_response:   result ?? this.fallbackResult(session_id),
                 student_transcript: this.coord.getLastTranscript(session_id) ?? "",
             };
             this.sessions.appendTurn(session_id, turn);
         }
 
-        // 6. Reset the evaluation audio buffer for the next clip.
+        // 6. Reset buffers for the next clip.
         await this.coord.resetSession(session_id);
 
         // 7. Notify the client.
@@ -96,7 +99,6 @@ export class ClipController {
         }
     }
 
-
     // ── Internal ──────────────────────────────────────────────────────────────
 
     private resolveNextClip(conditions: BranchCondition[], score: number): string | null {
@@ -112,7 +114,6 @@ export class ClipController {
     private async complete(sessionId: string, sendFn: SendFn): Promise<void> {
         const feedbackReq = this.sessions.buildFeedbackRequest(sessionId);
         this.sessions.endSession(sessionId);
-
         if (feedbackReq) {
             await this.feedback.stream(sessionId, feedbackReq, sendFn);
         }
