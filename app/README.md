@@ -22,15 +22,15 @@ No ML models are loaded here — all processing is delegated to the Evaluation, 
 
 **`SessionManager`** — owns session state. Tracks every session from creation through completion or expiry, enforces capacity limits, manages the waiting queue, and preserves session state across dropped connections within the recovery window.
 
-**`Coordinator`** — owns the data pipeline for each active session. Buffers incoming frames, MFCCs, and transcript segments for the full clip duration. On flush, finalises the transcript via `TranscriptionClient` and dispatches one `AnalysisWindow` to the Evaluation container covering the student's complete response to the clip.
+**`Coordinator`** — coordinates the data pipeline for each active session. Creates one `ClipSession` per clip, routes incoming frames and audio into it, calls `flush()` on `ClipEnded`, awaits the resolved `AnalysisWindow`, and dispatches it to the Evaluation container.
 
-**`TranscriptionClient`** — manages one persistent WebSocket connection per session to the Transcription container. Forwards `AudioChunk` messages for continuous Whisper transcription and receives partial and final `Transcript` messages back. Uses `ServiceRouter` for session pinning so VAD buffers stay coherent across requests.
+**`ClipSession`** — owns the full lifecycle of one clip's relationship with the Transcription service. Opens a WebSocket to the Transcription container on construction, forwards audio chunks, accumulates frames, MFCCs, and transcript segments, and resolves as a thenable with a complete `AnalysisWindow` once the Transcription service emits a final transcript segment. One `ClipSession` is created per clip.
 
 **`ClipController`** — owns the clip transition sequence. On receiving a `ClipEnded` message it flushes the coordinator (finalising transcript and dispatching to Evaluation), reads the clip score from the single `BehaviourResult`, resolves the next clip from branch conditions, appends a `ConversationTurn` to session history, resets both buffers, and either advances to the next clip or triggers feedback and ends the session.
 
 **`FeedbackClient`** — sends a `FeedbackRequest` to the Feedback container and streams SSE tokens back to the client via a `SendFn`. The only class that knows about the Feedback container's HTTP API.
 
-**`ServiceRouter`** — generic session-pinned router for any multi-instance backend service. Uses FNV-1a hashing so the same session ID always resolves to the same instance. Used by both `Coordinator` (for Evaluation) and `TranscriptionClient` (for Transcription).
+**`ServiceRouter`** — generic session-pinned router for any multi-instance backend service. Uses FNV-1a hashing so the same session ID always resolves to the same instance. Used by `Coordinator` for both Evaluation and Transcription URL resolution.
 
 **`FileScenarioLoader`** — reads all scenario subdirectories at startup, parses and validates each `metadata.json`, and throws at construction time if any scenario is misconfigured. Implements `ScenarioLoader` — swap with any other implementation without touching the rest of the codebase.
 
@@ -120,16 +120,17 @@ npm run dev
 
 Tests live in `tests/` and are written with Vitest. Run the full suite with `npm test`.
 
-| File                            | Coverage                                                                                         |
-|---------------------------------|--------------------------------------------------------------------------------------------------|
-| `tests/session-manager.test.ts` | Session lifecycle, capacity, queue, state transitions, conversation history                      |
-| `tests/coordinator.test.ts`     | Clip-scoped dispatch, transcript accumulation, reset behaviour, transcription client integration |
-| `tests/clip-controller.test.ts` | Clip transition sequence, branch resolution, turn construction, terminal and non-terminal paths  |
-| `tests/feedback-client.test.ts` | SSE token streaming, request shape, failure handling                                             |
-| `tests/service-router.test.ts`  | Session pinning, instance distribution, WebSocket URL conversion                                 |
-| `tests/scenario-loader.test.ts` | Scenario loading, metadata validation, error cases                                               |
+| File                            | Coverage                                                                                        |
+|---------------------------------|-------------------------------------------------------------------------------------------------|
+| `tests/session-manager.test.ts` | Session lifecycle, capacity, queue, state transitions, conversation history                     |
+| `tests/clip-session.test.ts`    | WebSocket lifecycle, audio queuing, transcript accumulation, thenable resolution, flush/timeout |
+| `tests/coordinator.test.ts`     | Clip-scoped dispatch, transcript accumulation, reset behaviour, sequence tracking               |
+| `tests/clip-controller.test.ts` | Clip transition sequence, branch resolution, turn construction, terminal and non-terminal paths |
+| `tests/feedback-client.test.ts` | SSE token streaming, request shape, failure handling                                            |
+| `tests/service-router.test.ts`  | Session pinning, instance distribution, WebSocket URL conversion                                |
+| `tests/scenario-loader.test.ts` | Scenario loading, metadata validation, error cases                                              |
 
-Time-dependent tests use `vi.useFakeTimers()` so recovery windows and session timeouts can be tested without real delays. Outbound HTTP calls are stubbed with `vi.stubGlobal("fetch", vi.fn())`.
+Time-dependent tests use `vi.useFakeTimers()` so recovery windows and session timeouts can be tested without real delays. Outbound HTTP calls are stubbed with `vi.stubGlobal("fetch", vi.fn())`. WebSocket connections in `ClipSession` tests are driven via an injected mock factory.
 
 ---
 

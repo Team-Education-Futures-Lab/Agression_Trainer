@@ -1,55 +1,76 @@
 # Stub Implementations
 
-The AI components — `BehaviourAnalyserInterface` and `FeedbackGeneratorInterface` — require trained models that do not yet exist. Stub implementations allow the full pipeline to be developed and tested end-to-end before real models are available.
+Several components require trained models or external services that may not be available during development. Stub implementations allow the full pipeline to be developed and tested end-to-end before real models or services are in place.
 
-Stubs are not fallback behavior. They exist only for development and integration testing. They should never be deployed in a real session.
+Stubs are not fallback behaviour. They exist only for development and integration testing. They should never be deployed in a real session.
+
+---
+
+## Overview
+
+| Container     | Interface                  | Env variable           | Default  |
+|---------------|----------------------------|------------------------|----------|
+| Transcription | `TranscriptionPoolInterface` | `TRANSCRIPTION_POOL` | `stub`   |
+| Evaluation    | `BehaviourAnalyserInterface` | `BEHAVIOUR_ANALYSER` | `stub`   |
+| Feedback      | `FeedbackGeneratorInterface` | `FEEDBACK_GENERATOR` | `stub`   |
 
 ---
 
 ## Switching Between Stub and Real Implementations
 
-Each container selects its implementation based on an environment variable. Set these in `.env`:
-
-```bash
-# Evaluation container
-BEHAVIOUR_ANALYSER=stub        # 'stub' | 'production'
-
-# Feedback container  
-FEEDBACK_GENERATOR=stub        # 'stub' | 'production'
-```
-
-The container's entrypoint instantiates the correct class based on this variable:
+Each container selects its implementation based on an environment variable. The container's factory function instantiates the correct class:
 
 ```python
-import os
-from interfaces import BehaviourAnalyserInterface
+# Transcription container (transcription/src/main.py)
+match cfg.pool_impl:
+    case "stub":
+        from stubs.stub_transcription_pool import StubTranscriptionPool
+        return StubTranscriptionPool()
+    case "production":
+        from whisper_pool import WhisperPool
+        return WhisperPool(cfg)
 
-def get_behaviour_analyser() -> BehaviourAnalyserInterface:
-    match os.environ.get("BEHAVIOUR_ANALYSER", "stub"):
-        case "stub":
-            from stubs.behaviour_analyser import StubBehaviourAnalyser
-            return StubBehaviourAnalyser()
-        case "production":
-            from models.behaviour_analyser import ProductionBehaviourAnalyser
-            return ProductionBehaviourAnalyser()
-        case other:
-            raise ValueError(f"Unknown BEHAVIOUR_ANALYSER: {other}")
+# Evaluation container (evaluation/src/main.py)
+match os.environ.get("BEHAVIOUR_ANALYSER", "stub"):
+    case "stub":
+        from stubs.behaviour_analyser import StubBehaviourAnalyser
+        return StubBehaviourAnalyser()
+    case "production":
+        from models.behaviour_analyser import ProductionBehaviourAnalyser
+        return ProductionBehaviourAnalyser()
 ```
 
 This pattern means no other code needs to change when swapping implementations.
 
 ---
 
-## `StubBehaviourAnalyser`
+## `StubTranscriptionPool`
 
-Returns a deterministic but plausible `BehaviourResult` based on the clip context rather than actual analysis. This allows the branching logic to be tested without a real model.
+Returns a fixed Dutch placeholder string without running Whisper. Allows the full audio pipeline to be exercised — WebSocket connections, PCM buffering, rolling windows, finalisation — without requiring a downloaded Whisper model.
 
 ### Behaviour
 
-- If the clip's `notable_features` include `raised_voice` or `aggressive_posture`, return a mildly positive `escalation_score` (0.3–0.6) to simulate a student struggling to de-escalate.
-- Otherwise return a mildly negative score (-0.2–0.1) to simulate reasonable de-escalation.
-- `confidence` is always `1.0` (stub is always "certain").
-- `dominant_emotion` cycles through a fixed list to give varied but predictable output.
+- `transcribe()` always returns the text `"[stub] dit is een teststranscriptie."` with `confidence: 1.0`, regardless of the PCM content.
+- Reports `worker_count: 1`, `available_workers: 1`, `device: "cpu"`.
+
+### When to use
+
+Set `TRANSCRIPTION_POOL=stub` (the default) during development and in CI. The stub is fast and requires no model download, making it suitable for end-to-end pipeline tests.
+
+> **Note:** Unlike the Evaluation and Feedback stubs, the Transcription container has a real production implementation (`WhisperPool`) already available. Switch to `TRANSCRIPTION_POOL=production` whenever you need actual transcription quality.
+
+---
+
+## `StubBehaviourAnalyser`
+
+Returns a deterministic but plausible `BehaviourResult` based on the clip context rather than actual analysis. Allows the branching logic and full session flow to be tested without a trained classifier.
+
+### Behaviour
+
+- If the clip's `notable_features` include `raised_voice`, `aggressive_posture`, or `pointing_gesture`, returns a mildly positive `escalation_score` (0.4) to simulate a student struggling to de-escalate.
+- Otherwise returns a mildly negative score (-0.2) to simulate reasonable de-escalation.
+- `confidence` is always `1.0`.
+- `dominant_emotion` cycles through `["calm", "anxious", "frustrated", "neutral"]` for varied but predictable output.
 - `signal_summary` values are hardcoded to mid-range floats.
 
 ### Implementation
@@ -143,18 +164,18 @@ class StubFeedbackGenerator(FeedbackGeneratorInterface):
 
 ## Testing the Full Pipeline with Stubs
 
-With both stubs active, a complete session should flow as follows:
+With all stubs active, a complete session flows as follows:
 
 1. `POST /session/create` → `SessionContext` with `state: active`
 2. Open WebSocket → send `VideoFrame` and `AudioChunk` messages
-3. Receive `SessionUpdate` messages carrying the live accumulated transcript as Whisper processes audio
+3. Receive `SessionUpdate` messages carrying the live accumulated transcript as the Transcription container processes audio
 4. Send `ClipEnded` when the clip finishes playing
 5. Receive `ClipReady` with the resolved `next_clip_id` and `clip_score` from `StubBehaviourAnalyser`
 6. If `next_clip_id` is non-null: load the next clip and repeat from step 2
 7. If `next_clip_id` is null: the scenario is complete — wait for the debrief
 8. Receive `FeedbackToken` stream then `SessionComplete` from `StubFeedbackGenerator`
 
-If this flow completes without errors, the full inter-container pipeline is working correctly and real model implementations can be dropped in independently.
+If this flow completes without errors, the full inter-container pipeline is working correctly and real implementations can be dropped in independently.
 
 > **Note:** `POST /session/{id}/end` exists as an explicit termination route but is not part of the normal clip flow. Feedback is triggered automatically when a terminal clip is reached via `ClipEnded`. The `/end` route handles abnormal termination only.
 
@@ -163,7 +184,7 @@ If this flow completes without errors, the full inter-container pipeline is work
 ## What Stubs Do Not Test
 
 - Accuracy or quality of escalation scoring
-- Whisper transcription — the Transcription container always uses a real Whisper instance, even during stub testing. It is infrastructure, not a model
+- Whisper transcription quality — switch to `TRANSCRIPTION_POOL=production` to test real transcription
 - Ollama availability or prompt formatting
 - Edge cases in `BranchCondition` evaluation with real score distributions
 

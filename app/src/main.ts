@@ -6,7 +6,6 @@ import { Coordinator } from "./coordinator.js";
 import { FileScenarioLoader } from "./scenario-loader.js";
 import { FeedbackClient } from "./feedback-client.js";
 import { ClipController } from "./clip-controller.js";
-import { TranscriptionClient } from "./transcription-client.js";
 import type { CreateSessionRequest, ClientMessage } from "@ar-training/shared";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
@@ -14,12 +13,7 @@ import type { CreateSessionRequest, ClientMessage } from "@ar-training/shared";
 const config       = loadConfig();
 const app          = Fastify({ logger: true });
 const sessions     = new SessionManager(config.sessionManager);
-const transcription = new TranscriptionClient(
-    config.transcriptionUrls,
-    config.internalApiKey,
-    (sessionId, text, isFinal) => coord.onTranscript(sessionId, text, isFinal),
-);
-const coord      = new Coordinator(config.coordinator, transcription);
+const coord = new Coordinator(config.coordinator);
 const scenarios  = new FileScenarioLoader(config.scenariosDir);
 const feedback   = new FeedbackClient(config.feedbackUrl, config.internalApiKey);
 const controller = new ClipController(sessions, coord, scenarios, feedback);

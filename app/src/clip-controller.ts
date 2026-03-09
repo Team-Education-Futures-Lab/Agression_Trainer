@@ -79,8 +79,13 @@ export class ClipController {
             this.sessions.appendTurn(session_id, turn);
         }
 
-        // 6. Reset buffers for the next clip.
-        await this.coord.resetSession(session_id);
+        // 6. Reset buffers and open a fresh ClipSession for the next clip.
+        //    nextClipId may be null (terminal) — in that case we still reset
+        //    evaluation buffers but do not need a ClipSession for transcription.
+        const nextClipMeta = nextClipId
+            ? this.scenarios.getClip(ctx.scenario_id, nextClipId) ?? null
+            : null;
+        await this.coord.resetSession(session_id, nextClipMeta);
 
         // 7. Notify the client.
         const reply: ClipReady = {
@@ -122,7 +127,6 @@ export class ClipController {
     private advance(sessionId: string, scenarioId: string, nextClipId: string): void {
         const nextClip = this.scenarios.getClip(scenarioId, nextClipId);
         if (nextClip) {
-            this.coord.setClip(sessionId, nextClip);
             this.sessions.setCurrentClip(sessionId, nextClipId);
         }
         this.sessions.markActive(sessionId);

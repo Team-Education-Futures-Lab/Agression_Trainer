@@ -18,8 +18,15 @@ export interface Landmark {
     visibility: number;
 }
 
-/** Unique identifier for an analysis window. Format: `"{session_id}:{sequence}"` */
+/** Unique identifier for a clip's analysis window. One window is produced per clip. Format: `"{session_id}:{clip_sequence}"` */
 export type WindowID = string;
+
+/**
+ * A matrix of Mel-frequency cepstral coefficients.
+ * Rows are time frames, columns are the 13 MFCC coefficients (Meyda default).
+ * Shape: [n_frames][13]
+ */
+export type MfccMatrix = number[][];
 
 // ─── Client → Server (WebSocket) ─────────────────────────────────────────────
 
@@ -64,16 +71,16 @@ export interface AudioChunk {
     /** Always 16000 Hz — required by Whisper. */
     sample_rate: number;
     /** `[n_frames][13]` MFCCs pre-computed client-side via Meyda.js. */
-    mfccs: number[][];
+    mfccs: MfccMatrix;
 }
 
 /**
  * Sent by the client when a scenario clip finishes playing.
  *
  * The App container uses this to:
- *   1. Flush any partial analysis window for the clip
- *   2. Compute the clip's average escalation_score
- *   3. Resolve the next clip from branch_conditions
+ *   1. Signal the ClipSession to flush and finalise the transcript
+ *   2. Await the resolved AnalysisWindow and dispatch it to Evaluation
+ *   3. Resolve the next clip from branch_conditions using the returned escalation_score
  *   4. Append a ConversationTurn to the session history
  *   5. Transition ACTIVE → PAUSED → ACTIVE (or COMPLETED if terminal)
  *
@@ -203,8 +210,8 @@ export interface QueueStatusResponse {
 // ─── Scenario / Clip ──────────────────────────────────────────────────────────
 
 /**
- * Determines which clip plays next based on the mean `escalation_score`
- * across all windows captured during the current clip.
+ * Determines which clip plays next based on the `escalation_score` from the
+ * single BehaviourResult produced for the current clip.
  *
  * Conditions are evaluated in order — the first match wins.
  * Together they must cover the full range from -1.0 to 1.0 with no gaps.
@@ -241,18 +248,19 @@ export interface ClipMetadata {
 // ─── Evaluation — cross-container requests ───────────────────────────────────
 
 /**
- * A ~2 second window of captured data sent to the Evaluation container for analysis.
- * Assembled by the Coordinator from incoming VideoFrames and AudioChunks.
+ * A clip-scoped window of captured data covering the student's complete response
+ * to one clip. Assembled by ClipSession and dispatched once per clip to the
+ * Evaluation container when the Transcription service emits its final segment.
  *
- * Wire format: POST /evaluate/analyze
+ * Wire format: POST /evaluate/analyse
  */
 export interface AnalysisWindow {
     window_id:     WindowID;
     session_id:    string;
     frames:        VideoFrame[];
-    /** Flattened MFCCs from all AudioChunks in the window. [n_frames][13] */
-    mfccs:         number[][];
-    /** Transcript from Whisper for this window, empty string if not yet available. */
+    /** Flattened MFCCs from all AudioChunks accumulated during the clip. [n_frames][13] */
+    mfccs:         MfccMatrix;
+    /** Complete transcript of the student's response for this clip. */
     transcript:    string;
     clip_metadata: ClipMetadata;
 }
@@ -280,7 +288,7 @@ export interface SignalSummary {
 }
 
 /**
- * The result of analyzing a single ~2s analysis window.
+ * The result of analyzing a clip's complete AnalysisWindow.
  * Produced by the Evaluation container, consumed by the App container
  * (for immediate client branching) and the Feedback container (for debrief).
  */

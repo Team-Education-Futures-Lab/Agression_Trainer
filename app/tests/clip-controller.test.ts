@@ -65,7 +65,6 @@ function makeMockCoord(overrides: Partial<Coordinator> = {}): Coordinator {
         resetSession:      vi.fn().mockResolvedValue(undefined),
         getLastResult:     vi.fn().mockReturnValue(null),
         getLastTranscript: vi.fn().mockReturnValue(null),
-        setClip:           vi.fn(),
         ...overrides,
     } as unknown as Coordinator;
 }
@@ -190,7 +189,7 @@ describe("ClipController", () => {
     // ── Non-terminal clip ─────────────────────────────────────────────────────
 
     describe("non-terminal clip", () => {
-        it("advances the coordinator to the next clip", async () => {
+        it("passes the next clip metadata to resetSession", async () => {
             const nextClip = makeClip("clip_02");
             const scenarios = {
                 getClip:      vi.fn()
@@ -203,7 +202,7 @@ describe("ClipController", () => {
 
             await ctrl.handleClipEnded(makeClipEndedMsg("s1", "clip_01"), vi.fn());
 
-            expect(coord.setClip).toHaveBeenCalledWith("s1", nextClip);
+            expect(coord.resetSession).toHaveBeenCalledWith("s1", nextClip);
         });
 
         it("transitions the session back to ACTIVE", async () => {

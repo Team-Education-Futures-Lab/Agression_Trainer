@@ -46,16 +46,15 @@ flowchart LR
 ```
 
 ---
-
 ## Data Flow
 
 Each session follows this sequence:
 
 1. **Capture** — The browser extracts face/hand landmarks (MediaPipe.js) and audio features (Meyda.js) from the webcam/microphone. Raw PCM, pre-computed MFCCs, and landmark frames are sent to the App container over WebSocket.
 
-2. **Accumulate** — The Coordinator buffers all incoming frames, MFCCs, and transcript segments for the full duration of the clip. Audio is simultaneously forwarded to the Transcription container over a persistent WebSocket, which streams partial and final transcript segments back as the student speaks.
+2. **Accumulate** — The Coordinator creates a `ClipSession` for each clip. Incoming frames are buffered inside it; audio chunks are forwarded immediately to the Transcription container over the `ClipSession`'s WebSocket connection. The Transcription container streams partial and final transcript segments back through the same connection, which the `ClipSession` accumulates.
 
-3. **Evaluate** — When the client sends `ClipEnded`, the App container finalises the transcript, then dispatches a single `AnalysisWindow` to the Evaluation container covering the student's complete response to the clip — all frames, all MFCCs, and the full transcript.
+3. **Evaluate** — When the client sends `ClipEnded`, the Coordinator calls `flush()` on the `ClipSession`, signalling the Transcription container to emit its final transcript segment. Once that segment arrives, the `ClipSession` resolves with a complete `AnalysisWindow` — all frames, all MFCCs, and the full transcript — which the Coordinator dispatches to the Evaluation container.
 
 4. **Branch** — The Evaluation container returns one `BehaviourResult` with an `escalation_score`. The App container uses this score to resolve the next clip from the scenario's branch conditions and sends a `ClipReady` message to the client.
 

@@ -16,8 +16,28 @@ services:
       dockerfile: app/Dockerfile
     env_file: app/.env
     environment:
-      EVALUATION_URL: http://evaluation:8001
-      FEEDBACK_URL:   http://feedback:8002
+      EVALUATION_URL:    http://evaluation:8001
+      FEEDBACK_URL:      http://feedback:8002
+      TRANSCRIPTION_URL: http://transcription:8003
     ports:
       - "3001:3000"
+    depends_on:
+      transcription:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Transcription ────────────────────────────────────────────────────────────
+  transcription:
+    build:
+      context: .
+      dockerfile: transcription/Dockerfile
+    env_file: transcription/.env
+    expose:
+      - "8003"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/transcription/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     restart: unless-stopped

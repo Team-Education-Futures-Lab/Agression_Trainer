@@ -32,7 +32,7 @@ No local Python or Node installation is required for deployment. Everything runs
 git clone <repo-url>
 cd ar-training
 
-# 2. Copy the example environment file
+# 2. Copy the example environment file and fill in INTERNAL_API_KEY
 cp .env.example .env
 
 # 3. Pull the Ollama model (only needed once — persisted in a Docker volume)
@@ -48,43 +48,62 @@ The app will be available at `http://localhost:3000` (client) and `http://localh
 
 ## Running with Stubs (Recommended for Development)
 
-During development, you almost certainly want stub AI implementations so you don't need a trained classifier or a running Ollama instance. Set the following in `app/.env`:
+During development, use stub AI implementations so you don't need a trained classifier or a running Ollama instance. Set the following in `app/.env`:
 
 ```bash
 BEHAVIOUR_ANALYSER=stub
 FEEDBACK_GENERATOR=stub
 ```
 
+And in `transcription/.env`:
+
+```bash
+TRANSCRIPTION_POOL=stub
+```
+
 Then start only the containers you need:
 
 ```bash
-# Omit the Ollama sidecar — stubs don't need it
+# Omit Ollama — stubs don't need it
 docker compose up app client transcription evaluation feedback
 ```
 
-The Transcription container should always run with a real Whisper instance — it is infrastructure, not a model. See `stub_guide.md` for details on stub behaviour.
+The Transcription container has a real Whisper implementation (`TRANSCRIPTION_POOL=production`) available whenever you need actual transcription quality — it is not gated on a separate model file. See `stub_guide.md` for details on all stub behaviours.
 
 ---
 
 ## Environment Variables
 
-The App container reads its configuration from `app/.env`. The most commonly changed variables during development:
+### App container (`app/.env`)
 
 | Variable             | Default                     | Description                                                                                                                        |
 |----------------------|-----------------------------|------------------------------------------------------------------------------------------------------------------------------------|
 | `INTERNAL_API_KEY`   | _(required)_                | Shared secret for all App→AI service requests. Generate once with `openssl rand -hex 32` and set the same value in all containers. |
 | `EVALUATION_URL`     | `http://evaluation:8001`    | Evaluation instance URL(s). Comma-separated list enables multi-instance load distribution with session pinning.                    |
 | `TRANSCRIPTION_URL`  | `http://transcription:8003` | Transcription instance URL(s). Comma-separated list supported for multi-instance setups.                                           |
-| `FEEDBACK_URL`       | `http://feedback:8002`      | Feedback service URL                                                                                                               |
+| `FEEDBACK_URL`       | `http://feedback:8002`      | Feedback service URL.                                                                                                              |
 | `SCENARIOS_DIR`      | _(required)_                | Path to the scenarios directory, mounted from the repo root at runtime.                                                            |
 | `BEHAVIOUR_ANALYSER` | `stub`                      | `stub` or `production`                                                                                                             |
 | `FEEDBACK_GENERATOR` | `stub`                      | `stub` or `production`                                                                                                             |
-| `WHISPER_MODEL`      | `base`                      | `tiny`, `base`, `small`, `medium`, `large-v3`                                                                                      |
-| `WHISPER_LANGUAGE`   | `nl`                        | ISO 639-1 language code                                                                                                            |
-| `WHISPER_WORKERS`    | `4`                         | Whisper instances in the pool                                                                                                      |
-| `DEVICE`             | `cpu`                       | `cpu` or `cuda`                                                                                                                    |
-| `FEEDBACK_MODEL`     | `llama3.2`                  | Ollama model name                                                                                                                  |
-| `OLLAMA_HOST`        | `http://ollama:11434`       | Override to use external Ollama                                                                                                    |
+| `MAX_SESSIONS`       | `32`                        | Maximum concurrent active sessions.                                                                                                |
+| `MAX_QUEUE_SIZE`     | `10`                        | Maximum sessions held in the waiting queue.                                                                                        |
+| `CAPACITY_POLICY`    | `QUEUE`                     | `QUEUE` or `REJECT` when at capacity.                                                                                              |
+| `SESSION_TIMEOUT_MS` | `30000`                     | ms to wait for WebSocket connection before dropping a session.                                                                     |
+| `RECOVERY_WINDOW_MS` | `30000`                     | ms a dropped session can be resumed before expiring.                                                                               |
+| `FEEDBACK_MODEL`     | `llama3.2`                  | Ollama model name used by the Feedback container.                                                                                  |
+| `OLLAMA_HOST`        | `http://ollama:11434`       | Override to use an external Ollama instance.                                                                                       |
+
+### Transcription container (`transcription/.env`)
+
+| Variable             | Default   | Description                                                                                   |
+|----------------------|-----------|-----------------------------------------------------------------------------------------------|
+| `INTERNAL_API_KEY`   | _(required)_ | Must match the value in `app/.env`.                                                        |
+| `TRANSCRIPTION_POOL` | `stub`    | `stub` — canned responses, no Whisper; `production` — real WhisperPool.                      |
+| `WHISPER_MODEL`      | `base`    | faster-whisper model size: `tiny`, `base`, `small`, `medium`, `large-v3`.                    |
+| `WHISPER_LANGUAGE`   | `nl`      | ISO 639-1 language code passed to Whisper.                                                    |
+| `WHISPER_WORKERS`    | `4`       | Number of `WhisperModel` instances in the pool — controls transcription parallelism.          |
+| `DEVICE`             | `cpu`     | `cpu` or `cuda`. CUDA requires the NVIDIA Container Toolkit.                                  |
+| `PORT`               | `8003`    | Internal listen port.                                                                         |
 
 ---
 
@@ -98,6 +117,7 @@ ar-training/
 │   │                             Handles WebSocket connections, session lifecycle,
 │   │                             and routes data between client and AI services.
 │   ├── src/
+│   ├── tests/
 │   ├── package.json
 │   ├── tsconfig.json
 │   ├── Dockerfile
@@ -107,10 +127,14 @@ ar-training/
 │
 ├── transcription/              ← Transcription container (Python)
 │   │                             Runs faster-whisper with VAD for continuous
-│   │                             per-session audio transcription.
+│   │                             per-clip audio transcription.
 │   ├── src/
+│   │   └── stubs/              ← StubTranscriptionPool
+│   ├── tests/
 │   ├── requirements.txt
+│   ├── pytest.ini
 │   ├── Dockerfile
+│   ├── .env                    ← Local env (not committed — copy from .env.example)
 │   ├── README.md
 │   └── .gitignore
 │
@@ -215,7 +239,7 @@ The Python `transcription/` and `evaluation/` containers define their own datacl
 
 **Recommended: WebStorm** opened at the repo root. WebStorm discovers all `package.json` files automatically and provides full IntelliSense across all TypeScript services including cross-service resolution of the `shared/` package. Mark `scenarios/`, `models/`, and `docs/` as excluded directories (Settings → Directories) to prevent WebStorm from indexing video files and keep search fast.
 
-For Python, WebStorm provides basic syntax support when you configure a Python interpreter pointing at the relevant service's `.venv`. If you find yourself spending significant time in a Python container, open it separately in **PyCharm** with that service directory as the project root for full Python IntelliSense.
+For Python containers, open each service directory separately in **PyCharm** with a Python interpreter pointing at the service's `.venv` for full IntelliSense and test runner integration. WebStorm provides basic Python syntax support but PyCharm is recommended for any significant Python work.
 
 **Alternative: VS Code** at the repo root with the Pylance, ESLint, and Docker extensions handles all languages in one window.
 
@@ -237,9 +261,14 @@ docker compose up --scale evaluation=3
 # View logs for a specific container
 docker compose logs -f transcription
 
-# Run tests inside a container
+# Run TypeScript tests (App container)
 docker compose run --rm app npm test
-docker compose run --rm evaluation python -m pytest
+
+# Run Python tests (Transcription container)
+docker compose run --rm transcription python -m pytest
+
+# Run Python tests locally (from transcription/ with venv active)
+pytest -v
 
 # Stop everything
 docker compose down
@@ -268,7 +297,7 @@ Each AI component has a corresponding interface in its container's `src/interfac
 2. Subclass the relevant interface
 3. Implement all abstract methods
 4. Register the new implementation in the container's factory function (see `stub_guide.md` for the pattern)
-5. Set the corresponding environment variable in `app/.env`
+5. Set the corresponding environment variable in the container's `.env`
 
 The rest of the system requires no changes.
 
@@ -281,7 +310,6 @@ The rest of the system requires no changes.
 - Interfaces for all data transfer objects — defined once in `shared/types.ts` and imported by all TypeScript services and the client
 - Abstract classes / interfaces for all swappable components
 - No business logic in entrypoints (`main.ts`, `App.tsx`) — delegate to implementations
-- Capture and session concerns must remain separated — `CaptureSession` never references session IDs or transport
 
 **Python (Transcription, Evaluation)**
 - Python 3.11+
