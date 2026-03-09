@@ -9,7 +9,14 @@ from __future__ import annotations
 import os
 import warnings
 from dataclasses import dataclass
+from pathlib import Path
 
+from dotenv import load_dotenv
+
+# Load .env from the transcription/ directory (one level up from src/).
+# Has no effect when variables are already set in the environment (e.g. Docker),
+# so this is safe to leave in for all environments.
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 

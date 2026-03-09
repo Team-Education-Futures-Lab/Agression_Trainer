@@ -2,15 +2,23 @@ import { useEffect, useRef, useState } from "react";
 import type { CaptureSession } from "../../capture";
 import type { AudioChunk } from "@ar-training/shared";
 
-// Auth is disabled on the Transcription container in dev mode.
-// When auth is re-enabled, pass the token as a query param:
-//   ws://host:8003/ws/{id}?token=<INTERNAL_API_KEY>
-// (Browser WebSocket does not support custom headers — query param is the
-//  correct solution for browser-initiated connections. Server-side connections
-//  from the App container continue to use Authorization: Bearer as normal.)
+// Browser WebSocket cannot send custom headers, so the token is passed as a
+// query parameter instead. The Transcription container's ws_verify_token()
+// accepts either Authorization: Bearer <key> (server-to-server) or
+// ?token=<key> (browser clients).
+//
+// Set VITE_TRANSCRIPTION_TOKEN in client/.env to enable auth.
+// Leave it unset (or set INTERNAL_API_KEY= in transcription/.env) for
+// fully open dev mode.
 
-const TRANSCRIPTION_WS = import.meta.env.VITE_TRANSCRIPTION_WS_URL ?? "ws://localhost:8003";
-const SESSION_ID        = "demo-session-001";
+const TRANSCRIPTION_WS    = import.meta.env.VITE_TRANSCRIPTION_WS_URL ?? "ws://localhost:8003";
+const TRANSCRIPTION_TOKEN = import.meta.env.VITE_TRANSCRIPTION_TOKEN  ?? "CHANGE_ME";
+const SESSION_ID          = "demo-session-001";
+
+function wsUrl(sessionId: string): string {
+    const base = `${TRANSCRIPTION_WS}/ws/${sessionId}`;
+    return TRANSCRIPTION_TOKEN ? `${base}?token=${encodeURIComponent(TRANSCRIPTION_TOKEN)}` : base;
+}
 
 interface TranscriptMessage {
     type:       "transcript";
@@ -22,9 +30,9 @@ interface TranscriptMessage {
 }
 
 interface UseTranscriptionSocketResult {
-    transcript:  string;
-    connected:   boolean;
-    sessionId:   string;
+    transcript: string;
+    connected:  boolean;
+    sessionId:  string;
 }
 
 /**
@@ -47,13 +55,10 @@ export function useTranscriptionSocket(
     const chunkIdRef   = useRef(0);
     const startedAtRef = useRef(performance.now());
 
-    // Reset transcript between clips
-    const resetTranscript = () => setTranscript("");
-
     useEffect(() => {
         if (!active || !capture) return;
 
-        const ws = new WebSocket(`${TRANSCRIPTION_WS}/ws/${SESSION_ID}`);
+        const ws = new WebSocket(wsUrl(SESSION_ID));
         wsRef.current    = ws;
         abortRef.current = new AbortController();
 
@@ -77,7 +82,6 @@ export function useTranscriptionSocket(
             }
         };
 
-        // Pump audio chunks into the transcription socket
         const abort = abortRef.current;
         async function pumpAudio() {
             if (!capture) return;
@@ -105,7 +109,7 @@ export function useTranscriptionSocket(
             ws.close();
             wsRef.current = null;
             setConnected(false);
-            resetTranscript();
+            setTranscript("");
         };
     }, [active, capture]);
 

@@ -1,11 +1,12 @@
-import { useEffect as useEff, useState as useSt } from "react";
+import { useEffect, useState } from "react";
+import type { CSSProperties } from "react";
 
 interface EvalProps { onDone: () => void; }
 
 export function EvaluatingScreen({ onDone }: EvalProps) {
-    const [progress, setProgress] = useSt(0);
+    const [progress, setProgress] = useState(0);
 
-    useEff(() => {
+    useEffect(() => {
         const start = performance.now();
         const duration = 2800;
         let raf: number;
@@ -47,8 +48,8 @@ export function EvaluatingScreen({ onDone }: EvalProps) {
                     <div style={{ ...ev.barFill, width: `${pct}%` }} />
                 </div>
                 <div style={ev.pills}>
-                    <Pill label="Stemanalyse" done={progress > 0.3} />
-                    <Pill label="Gezichtsherkenning" done={progress > 0.6} />
+                    <Pill label="Stemanalyse"          done={progress > 0.3} />
+                    <Pill label="Gezichtsherkenning"   done={progress > 0.6} />
                     <Pill label="Gedragsclassificatie" done={progress > 0.9} />
                 </div>
             </div>
@@ -65,14 +66,14 @@ function Pill({ label, done }: { label: string; done: boolean }) {
     );
 }
 
-const ev: Record<string, React.CSSProperties> = {
+const ev: Record<string, CSSProperties> = {
     root:        { minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#0d1117" },
     card:        { maxWidth: 420, width: "100%", background: "#161b22", border: "1px solid #30363d", borderRadius: 16, padding: "48px 40px", display: "flex", flexDirection: "column", alignItems: "center", gap: 20 },
-    spinnerWrap: { position: "relative", width: 72, height: 72 } as React.CSSProperties,
-    pct:         { position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, fontWeight: 700, color: "#e6edf3" } as React.CSSProperties,
-    heading:     { fontSize: 20, fontWeight: 700, color: "#e6edf3", textAlign: "center" } as React.CSSProperties,
-    sub:         { fontSize: 13, color: "#8b949e", textAlign: "center", lineHeight: 1.6 } as React.CSSProperties,
+    spinnerWrap: { position: "relative", width: 72, height: 72 },
+    pct:         { position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, fontWeight: 700, color: "#e6edf3" },
+    heading:     { fontSize: 20, fontWeight: 700, color: "#e6edf3", textAlign: "center" },
+    sub:         { fontSize: 13, color: "#8b949e", textAlign: "center", lineHeight: 1.6 },
     barTrack:    { width: "100%", height: 4, background: "#21262d", borderRadius: 4, overflow: "hidden" },
     barFill:     { height: "100%", background: "#1f6feb", borderRadius: 4, transition: "width 0.05s linear" },
-    pills:       { display: "flex", flexDirection: "column", gap: 8, alignSelf: "flex-start", width: "100%" } as React.CSSProperties,
+    pills:       { display: "flex", flexDirection: "column", gap: 8, alignSelf: "flex-start", width: "100%" },
 };
