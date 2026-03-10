@@ -56,14 +56,26 @@ export class ClipSession {
     private readonly promise:     Promise<AnalysisWindow>;
     private resolve!:             (window: AnalysisWindow) => void;
 
+    private readonly sessionId:        string;
+    private readonly clip:             ClipMetadata;
+    private readonly transcriptionUrl: string;
+    private readonly authHeader:       string;
+    private readonly sequence:         number = 1;
+
     constructor(
-        private readonly sessionId:        string,
-        private readonly clip:             ClipMetadata,
-        private readonly transcriptionUrl: string,
-        private readonly authHeader:       string,
-        wsFactory:                         WsFactory,
-        private readonly sequence:         number = 1,
+        sessionId:        string,
+        clip:             ClipMetadata,
+        transcriptionUrl: string,
+        authHeader:       string,
+        wsFactory:        WsFactory,
+        sequence:         number = 1,
     ) {
+        this.sessionId = sessionId;
+        this.clip = clip;
+        this.transcriptionUrl = transcriptionUrl;
+        this.authHeader = authHeader;
+        this.sequence = sequence;
+
         this.promise = new Promise(res => { this.resolve = res; });
 
         const wsUrl = transcriptionUrl

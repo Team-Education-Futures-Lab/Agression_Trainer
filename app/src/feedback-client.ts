@@ -1,7 +1,7 @@
 import type {FeedbackRequest, FeedbackToken, SessionComplete} from "@ar-training/shared";
 import type {SendFn} from "./coordinator.js";
 import {TextDecoder} from "node:util";
-import {createParser, EventSourceMessage} from "eventsource-parser";
+import {createParser,  type EventSourceMessage} from "eventsource-parser";
 
 // ─── FeedbackClient ───────────────────────────────────────────────────────────
 //

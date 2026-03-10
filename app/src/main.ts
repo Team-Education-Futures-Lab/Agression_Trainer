@@ -1,5 +1,5 @@
 import Fastify from "fastify";
-import * as websocketPlugin from "@fastify/websocket";
+import websocketPlugin from "@fastify/websocket";
 import { loadConfig } from "./config.js";
 import { SessionManager } from "./session-manager.js";
 import { Coordinator } from "./coordinator.js";

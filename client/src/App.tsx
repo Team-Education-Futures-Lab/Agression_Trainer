@@ -3,7 +3,7 @@ import { CaptureSession } from "./capture";
 import { WebSocketTransport } from "./transport";
 import { SessionHandler } from "./sessionHandler";
 import type { SessionHandlerState } from "./sessionHandler";
-import type { ServerMessage, SessionUpdate } from "@ar-training/shared";
+import type { ServerMessage } from "@ar-training/shared";
 import type { RawVideoFrame, RawAudioChunk } from "./types";
 import DebugOverlay from "./DebugOverlay";
 
@@ -111,9 +111,6 @@ export default function App() {
 
     const isActive     = sessionState === "active";
     const isConnecting = sessionState === "connecting" || sessionState === "queued";
-    const escalation   = lastMessage?.type === "session_update"
-        ? (lastMessage as SessionUpdate).escalation_score
-        : null;
 
     // ── Render ─────────────────────────────────────────────────────────────────
 
@@ -193,7 +190,6 @@ export default function App() {
                     <Section title="SESSION" color="#10b981">
                         <div style={s.grid}>
                             <Badge label="SESSION ID"    value={sessionId ? sessionId.slice(0, 8) + "…" : "—"} mono />
-                            <Badge label="ESCALATION"    value={escalation != null ? escalation.toFixed(3) : "—"} color={scoreColor(escalation)} />
                             <Badge label="FRAMES SENT"   value={frameCount.toLocaleString()} />
                             <Badge label="CHUNKS SENT"   value={chunkCount.toLocaleString()} />
                         </div>
@@ -277,13 +273,6 @@ function stateColor(s: SessionHandlerState): string {
         active: "#10b981", completed: "#10b981", dropped: "#ef4444", error: "#ef4444",
     };
     return map[s];
-}
-
-function scoreColor(s: number | null): string {
-    if (s == null) return "#94a3b8";
-    if (s < -0.3)  return "#10b981";
-    if (s >  0.3)  return "#ef4444";
-    return "#f59e0b";
 }
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
