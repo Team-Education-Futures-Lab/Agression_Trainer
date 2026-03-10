@@ -1,6 +1,10 @@
 import type { CSSProperties } from "react";
 
-export function QueueScreen() {
+interface Props {
+    position: number;
+}
+
+export function QueueScreen({ position }: Props) {
     return (
         <div style={qs.root}>
             <div style={qs.card}>
@@ -19,7 +23,7 @@ export function QueueScreen() {
                 <p style={qs.sub}>Er zijn momenteel veel actieve sessies. Je bent in de wachtrij geplaatst.</p>
                 <div style={qs.posCard}>
                     <span style={qs.posLabel}>Jouw positie</span>
-                    <span style={qs.posNum}>3</span>
+                    <span style={qs.posNum}>{position}</span>
                 </div>
                 <p style={qs.hint}>De pagina wordt automatisch bijgewerkt zodra je aan de beurt bent.</p>
             </div>
@@ -27,9 +31,11 @@ export function QueueScreen() {
     );
 }
 
-// Pulled out of the style record — called directly in JSX
 function dotStyle(i: number): CSSProperties {
-    return { width: 12, height: 12, borderRadius: "50%", background: "#1f6feb", animation: `qbounce 1.2s ease-in-out ${i * 0.2}s infinite` };
+    return {
+        width: 12, height: 12, borderRadius: "50%", background: "#1f6feb",
+        animation: `qbounce 1.2s ease-in-out ${i * 0.2}s infinite`,
+    };
 }
 
 const qs: Record<string, CSSProperties> = {

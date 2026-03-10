@@ -1,19 +1,17 @@
-import type { VideoFrame, AudioChunk, ServerMessage } from "@ar-training/shared";
+import type { VideoFrame, AudioChunk, ClientMessage, ServerMessage } from "@ar-training/shared";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type TransportState = "disconnected" | "connecting" | "connected" | "error";
 
 // ─── Interface ────────────────────────────────────────────────────────────────
-// All transport communication goes through this interface.
-// Swap WebSocketTransport for a WebRTC or gRPC implementation
-// without changing anything else in the system.
 
 export interface TransportInterface {
     connect(sessionId: string): Promise<void>;
     disconnect(): void;
     sendFrame(frame: VideoFrame): void;
     sendAudio(chunk: AudioChunk): void;
+    sendMessage(msg: ClientMessage): void;
     onMessage(cb: (msg: ServerMessage) => void): void;
     onStateChange(cb: (state: TransportState) => void): void;
 }
@@ -68,8 +66,6 @@ export class WebSocketTransport implements TransportInterface {
 
     disconnect(): void {
         if (!this.ws) return;
-        // Null onclose before closing to distinguish intentional disconnects
-        // from unexpected drops — both would otherwise look like "disconnected"
         this.ws.onclose = null;
         this.ws.close();
         this.ws = null;
@@ -84,6 +80,10 @@ export class WebSocketTransport implements TransportInterface {
         this.send(chunk);
     }
 
+    sendMessage(msg: ClientMessage): void {
+        this.send(msg);
+    }
+
     onMessage(cb: (msg: ServerMessage) => void): void {
         this.messageHandler = cb;
     }
@@ -92,11 +92,11 @@ export class WebSocketTransport implements TransportInterface {
         this.stateHandler = cb;
     }
 
-    private send(payload: VideoFrame | AudioChunk): void {
+    private send(payload: VideoFrame | AudioChunk | ClientMessage): void {
         if (this.ws?.readyState === WebSocket.OPEN) {
             this.ws.send(JSON.stringify(payload));
         } else {
-            console.warn("[transport] Dropped message — socket not open:", payload.type);
+            console.warn("[transport] Dropped message — socket not open:", (payload as { type: string }).type);
         }
     }
 

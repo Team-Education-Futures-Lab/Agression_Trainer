@@ -1,14 +1,19 @@
 import type { CSSProperties } from "react";
 
-interface DebriefProps { onRestart: () => void; }
+interface Props {
+    advice:     string;
+    severity:   "low" | "medium" | "high";
+    highlights: string[];
+    onRestart:  () => void;
+}
 
-export function DebriefScreen({ onRestart }: DebriefProps) {
+export function DebriefScreen({ advice, severity, highlights, onRestart }: Props) {
     return (
         <div style={db.root}>
             <div style={db.card}>
                 <div style={db.topRow}>
                     <span style={db.logo}>AR Training</span>
-                    <SeverityBadge severity="medium" />
+                    <SeverityBadge severity={severity} />
                 </div>
 
                 <h1 style={db.heading}>Sessie afgerond</h1>
@@ -16,41 +21,26 @@ export function DebriefScreen({ onRestart }: DebriefProps) {
 
                 <div style={db.section}>
                     <h2 style={db.sectionTitle}>Advies</h2>
-                    <p style={db.advice}>
-                        Je toonde over het algemeen een constructieve houding. In de eerste situatie
-                        reageerde je snel en kalm, wat goed werkte om de spanning te verlagen.
-                        In de tweede situatie had je iets meer ruimte kunnen nemen voordat je antwoordde —
-                        een korte stilte kan krachtig zijn. Let verder op je stemvolume: soms klonk je
-                        iets te gedecideerd, wat de student verder op de kast kan jagen. Probeer bij een
-                        volgende oefening bewust langzamer te praten en meer open vragen te stellen.
-                    </p>
+                    <p style={db.advice}>{advice}</p>
                 </div>
 
-                <div style={db.section}>
-                    <h2 style={db.sectionTitle}>Opvallende momenten</h2>
-                    <ul style={db.highlights}>
-                        <li style={db.highlight}>
-                            <span style={db.hlIcon}>↑</span>
-                            Beurt 1: stemspanning nam toe toen de student zijn stem verhief
-                        </li>
-                        <li style={db.highlight}>
-                            <span style={db.hlIcon}>✓</span>
-                            Beurt 1: open handhouding gedetecteerd — positief signaal
-                        </li>
-                        <li style={db.highlight}>
-                            <span style={db.hlIcon}>↑</span>
-                            Beurt 2: spreektempo lag 18% hoger dan de rustnorm
-                        </li>
-                        <li style={db.highlight}>
-                            <span style={db.hlIcon}>✓</span>
-                            Beurt 2: blikstabiliteit goed — je bleef de situatie aankijken
-                        </li>
-                    </ul>
-                </div>
+                {highlights.length > 0 && (
+                    <div style={db.section}>
+                        <h2 style={db.sectionTitle}>Opvallende momenten</h2>
+                        <ul style={db.highlights}>
+                            {highlights.map((hl, i) => (
+                                <li key={i} style={db.highlight}>
+                                    <span style={db.hlIcon}>↑</span>
+                                    {hl}
+                                </li>
+                            ))}
+                        </ul>
+                    </div>
+                )}
 
                 <div style={db.btnRow}>
                     <button style={db.secondaryBtn} onClick={onRestart}>Opnieuw proberen</button>
-                    <button style={db.primaryBtn} onClick={onRestart}>Sessie beëindigen</button>
+                    <button style={db.primaryBtn}   onClick={onRestart}>Sessie beëindigen</button>
                 </div>
             </div>
         </div>

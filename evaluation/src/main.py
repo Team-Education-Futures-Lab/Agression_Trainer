@@ -14,8 +14,7 @@ from dataclasses import asdict
 
 import uvicorn
 from fastapi import Depends, FastAPI
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from auth import make_verify_token
 from config import EvaluationConfig, load_config
