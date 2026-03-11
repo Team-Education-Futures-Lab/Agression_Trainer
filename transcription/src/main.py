@@ -78,6 +78,7 @@ def create_app() -> FastAPI:
         logger.info("WS connected: session=%s", session_id)
 
         try:
+            # TODO: How do we exit this loop? what if the websocket connection get's dropped without notification?
             while True:
                 raw = await websocket.receive_text()
                 try:

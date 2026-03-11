@@ -1,6 +1,3 @@
-
-// ─── Config ───────────────────────────────────────────────────────────────────
-
 import {
     FaceLandmarker,
     FilesetResolver,
@@ -10,6 +7,8 @@ import {
 } from "@mediapipe/tasks-vision";
 import Meyda from "meyda";
 import type {RawAudioChunk, RawVideoFrame} from "./types.ts";
+
+// ─── Config ───────────────────────────────────────────────────────────────────
 
 const SAMPLE_RATE       = 16000;
 const AUDIO_CHUNK_MS    = 2000;

@@ -1,5 +1,6 @@
 import Fastify from "fastify";
 import websocketPlugin from "@fastify/websocket";
+import cors from "@fastify/cors";
 import { loadConfig } from "./config.js";
 import { SessionManager } from "./session-manager.js";
 import { Coordinator } from "./coordinator.js";
@@ -19,6 +20,7 @@ const feedback   = new FeedbackClient(config.feedbackUrl, config.internalApiKey)
 const controller = new ClipController(sessions, coord, scenarios, feedback);
 
 await app.register(websocketPlugin);
+await app.register(cors, {origin: true});
 
 // ─── Health ───────────────────────────────────────────────────────────────────
 

@@ -34,28 +34,3 @@ def make_verify_token(expected: str):
             )
 
     return verify_token
-
-async def ws_verify_token(websocket: WebSocket, expected: str) -> bool:
-    """
-    Validates auth on a WebSocket handshake.
-
-    Accepts credentials via either:
-      - Authorization: Bearer <key>  header
-      - ?token=<key>                 query param
-
-    When expected is an empty string, all connections are accepted — dev/demo mode.
-
-    Returns True if valid. Closes the connection with 1008 (policy violation)
-    and returns False if invalid.
-    """
-    if not expected:
-        return True
-
-    auth        = websocket.headers.get("authorization")
-    token_param = websocket.query_params.get("token")
-
-    if auth == f"Bearer {expected}" or token_param == expected:
-        return True
-
-    await websocket.close(code=1008, reason="Unauthorized")
-    return False
