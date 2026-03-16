@@ -61,7 +61,7 @@ export class Coordinator {
 
     registerSession(sessionId: string, clip: ClipMetadata, sendFn: SendFn): void {
         const sequence    = 1;
-        const clipSession = this.makeClipSession(sessionId, clip, sequence);
+        const clipSession = this.makeClipSession(sessionId, clip, sequence, sendFn);
         this.sessions.set(sessionId, {
             clipSession,
             sendFn,
@@ -132,7 +132,7 @@ export class Coordinator {
         // nextClip is null for terminal clips — no transcription needed for the
         // next clip since deregisterSession will be called shortly after.
         if (nextClip !== null) {
-            state.clipSession = this.makeClipSession(sessionId, nextClip, state.sequence);
+            state.clipSession = this.makeClipSession(sessionId, nextClip, state.sequence, state.sendFn);
         }
 
         await Promise.allSettled([
@@ -162,6 +162,7 @@ export class Coordinator {
         sessionId: string,
         clip:      ClipMetadata,
         sequence:  number,
+        sendFn:    SendFn,
     ): ClipSession {
         return new ClipSession(
             sessionId,
@@ -170,6 +171,12 @@ export class Coordinator {
             this.authHeader,
             this.wsFactory,
             sequence,
+            (sid, transcript) => sendFn({
+                type:           "session_update",
+                session_id:     sid,
+                transcript,
+                queue_position: null,
+            }),
         );
     }
 

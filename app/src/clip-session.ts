@@ -24,6 +24,12 @@ export type WsFactory = (
 
 export const defaultWsFactory: WsFactory = (url, opts) => new WebSocket(url, opts);
 
+/**
+ * Called whenever a transcript segment arrives from the Transcription service.
+ * Receives the session ID and the full accumulated transcript for the clip so far.
+ */
+export type TranscriptUpdateCallback = (sessionId: string, transcript: string) => void;
+
 // ─── ClipSession ──────────────────────────────────────────────────────────────
 //
 // Owns the full lifecycle of one clip's relationship with the Transcription
@@ -56,25 +62,28 @@ export class ClipSession {
     private readonly promise:     Promise<AnalysisWindow>;
     private resolve!:             (window: AnalysisWindow) => void;
 
-    private readonly sessionId:        string;
-    private readonly clip:             ClipMetadata;
-    private readonly transcriptionUrl: string;
-    private readonly authHeader:       string;
-    private readonly sequence:         number = 1;
+    private readonly sessionId:          string;
+    private readonly clip:               ClipMetadata;
+    private readonly transcriptionUrl:   string;
+    private readonly authHeader:         string;
+    private readonly sequence:           number = 1;
+    private readonly onTranscriptUpdate: TranscriptUpdateCallback | undefined;
 
     constructor(
-        sessionId:        string,
-        clip:             ClipMetadata,
-        transcriptionUrl: string,
-        authHeader:       string,
-        wsFactory:        WsFactory,
-        sequence:         number = 1,
+        sessionId:           string,
+        clip:                ClipMetadata,
+        transcriptionUrl:    string,
+        authHeader:          string,
+        wsFactory:           WsFactory,
+        sequence:            number = 1,
+        onTranscriptUpdate?: TranscriptUpdateCallback,
     ) {
-        this.sessionId = sessionId;
-        this.clip = clip;
-        this.transcriptionUrl = transcriptionUrl;
-        this.authHeader = authHeader;
-        this.sequence = sequence;
+        this.sessionId          = sessionId;
+        this.clip               = clip;
+        this.transcriptionUrl   = transcriptionUrl;
+        this.authHeader         = authHeader;
+        this.sequence           = sequence;
+        this.onTranscriptUpdate = onTranscriptUpdate;
 
         this.promise = new Promise(res => { this.resolve = res; });
 
@@ -105,6 +114,8 @@ export class ClipSession {
                         ? `${this.transcript} ${msg.text}`
                         : msg.text;
                 }
+
+                this.onTranscriptUpdate?.(this.sessionId, this.transcript);
 
                 if (msg.is_final) {
                     this.finalReceived = true;
