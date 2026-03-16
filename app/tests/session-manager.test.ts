@@ -271,6 +271,16 @@ describe("SessionManager", () => {
             expect(sm.getSession(result.context.session_id)!.state).toBe("DROPPED");
             vi.useRealTimers();
         });
+
+        it("resuming an ACTIVE session returns status 'not_found'", async () => {
+            const sm = new SessionManager(makeConfig());
+            const result = sm.createSession("user_1", "scenario_01", "nl");
+            if (result.status !== "active") return;
+
+            sm.markActive(result.context.session_id);
+            const resumed = sm.resumeSession(result.context.session_id);
+            expect(resumed.status).toBe("not_found");
+        });
     });
 
     // ── Session data ──────────────────────────────────────────────────────────

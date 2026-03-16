@@ -53,7 +53,7 @@ export class SessionManager {
 
     resumeSession(sessionId: string): ResumeSessionResult {
         const ctx = this.sessions.get(sessionId);
-        if (!ctx || ctx.state === "EXPIRED" || ctx.state === "COMPLETED") {
+        if (!ctx || ctx.state !== "DROPPED") {
             return { status: "not_found" };
         }
 

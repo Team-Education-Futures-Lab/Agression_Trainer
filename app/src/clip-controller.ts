@@ -119,6 +119,7 @@ export class ClipController {
     private async complete(sessionId: string, sendFn: SendFn): Promise<void> {
         const feedbackReq = this.sessions.buildFeedbackRequest(sessionId);
         this.sessions.endSession(sessionId);
+        this.coord.deregisterSession(sessionId);
         if (feedbackReq) {
             await this.feedback.stream(sessionId, feedbackReq, sendFn);
         }

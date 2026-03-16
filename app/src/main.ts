@@ -1,5 +1,7 @@
 import Fastify from "fastify";
+// noinspection TypeScriptCheckImport
 import websocketPlugin from "@fastify/websocket";
+// noinspection TypeScriptCheckImport
 import cors from "@fastify/cors";
 import { loadConfig } from "./config.js";
 import { SessionManager } from "./session-manager.js";
@@ -11,13 +13,13 @@ import type { CreateSessionRequest, ClientMessage } from "@ar-training/shared";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
-const config       = loadConfig();
-const app          = Fastify({ logger: true });
-const sessions     = new SessionManager(config.sessionManager);
-const coord = new Coordinator(config.coordinator);
-const scenarios  = new FileScenarioLoader(config.scenariosDir);
-const feedback   = new FeedbackClient(config.feedbackUrl, config.internalApiKey);
-const controller = new ClipController(sessions, coord, scenarios, feedback);
+const config        = loadConfig();
+const app           = Fastify({ logger: true });
+const sessions      = new SessionManager(config.sessionManager);
+const coord         = new Coordinator(config.coordinator);
+const scenarios     = new FileScenarioLoader(config.scenariosDir);
+const feedback      = new FeedbackClient(config.feedbackUrl, config.internalApiKey);
+const controller    = new ClipController(sessions, coord, scenarios, feedback);
 
 await app.register(websocketPlugin);
 await app.register(cors, {origin: true});
@@ -46,9 +48,9 @@ app.get("/health", async (_req, reply) => {
             instances[urls[i]] = ok ? "ok" : "unreachable";
             if (ok) okCount++;
         }
-        const status = okCount === urls.length ? "ok"
-            : okCount === 0           ? "critical"
-                :                           "degraded";
+        const status =  okCount === urls.length ?   "ok"
+                :       okCount === 0           ?   "critical"
+                :                                   "degraded";
         return { status, instances, okCount };
     }
 
@@ -61,7 +63,7 @@ app.get("/health", async (_req, reply) => {
 
     const overallStatus =
         eval_.status === "critical" || trans.status === "critical" ? "critical"
-            : eval_.status === "degraded" || trans.status === "degraded" || feedStatus === "unreachable" ? "degraded"
+                : eval_.status === "degraded" || trans.status === "degraded" || feedStatus === "unreachable" ? "degraded"
                 : "ok";
 
     return reply
@@ -202,8 +204,16 @@ app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
     });
 
     socket.on("close", () => {
-        coord.deregisterSession(session_id);
-        sessions.markDropped(session_id);
+        const ctx = sessions.getSession(session_id);
+        // Only treat as a drop if the session is still actively running.
+        // COMPLETED sessions close cleanly after SessionComplete is sent —
+        // that's not a drop, and calling markDropped would corrupt the state
+        // machine and double-release the capacity slot.
+        if (ctx && (ctx.state === "ACTIVE" || ctx.state === "PAUSED")) {
+            coord.deregisterSession(session_id);
+            sessions.markDropped(session_id);
+        }
+        // COMPLETED, CONNECTING, DROPPED, EXPIRED — do nothing.
     });
 });
 
