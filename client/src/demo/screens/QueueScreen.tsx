@@ -1,51 +1,83 @@
-import type { CSSProperties } from "react";
+import { useEffect, useState } from "react";
 
-interface Props {
-    position: number;
+interface QueueScreenProps {
+    queuePos: number | null;
 }
 
-export function QueueScreen({ position }: Props) {
+export function QueueScreen({ queuePos }: QueueScreenProps) {
+    // Animate the three dots
+    const [dots, setDots] = useState(".");
+    useEffect(() => {
+        const id = setInterval(() => {
+            setDots(d => d.length >= 3 ? "." : d + ".");
+        }, 500);
+        return () => clearInterval(id);
+    }, []);
+
     return (
-        <div style={qs.root}>
-            <div style={qs.card}>
-                <div style={qs.dotsRow}>
-                    {[0, 1, 2].map(i => (
-                        <div key={i} style={dotStyle(i)} />
-                    ))}
-                    <style>{`
-                        @keyframes qbounce {
-                            0%,100% { transform: translateY(0); opacity:.4; }
-                            50%      { transform: translateY(-8px); opacity:1; }
-                        }
-                    `}</style>
+        <div style={s.root}>
+            <div style={s.card}>
+                <div style={s.spinner}>
+                    <div style={s.ring} />
                 </div>
-                <h2 style={qs.heading}>Even geduld…</h2>
-                <p style={qs.sub}>Er zijn momenteel veel actieve sessies. Je bent in de wachtrij geplaatst.</p>
-                <div style={qs.posCard}>
-                    <span style={qs.posLabel}>Jouw positie</span>
-                    <span style={qs.posNum}>{position}</span>
-                </div>
-                <p style={qs.hint}>De pagina wordt automatisch bijgewerkt zodra je aan de beurt bent.</p>
+                <h2 style={s.title}>Wachten op een plekje{dots}</h2>
+                <p style={s.subtitle}>
+                    {queuePos !== null
+                        ? `Je staat op positie ${queuePos} in de wachtrij.`
+                        : "Je positie wordt opgehaald…"}
+                </p>
+                <p style={s.hint}>Dit duurt meestal maar even. Sluit dit venster niet.</p>
             </div>
         </div>
     );
 }
 
-function dotStyle(i: number): CSSProperties {
-    return {
-        width: 12, height: 12, borderRadius: "50%", background: "#1f6feb",
-        animation: `qbounce 1.2s ease-in-out ${i * 0.2}s infinite`,
-    };
-}
+const RING_SIZE = 56;
 
-const qs: Record<string, CSSProperties> = {
-    root:     { minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#0d1117" },
-    card:     { maxWidth: 400, width: "100%", background: "#161b22", border: "1px solid #30363d", borderRadius: 16, padding: "48px 40px", display: "flex", flexDirection: "column", alignItems: "center", gap: 20, textAlign: "center" },
-    dotsRow:  { display: "flex", gap: 10 },
-    heading:  { fontSize: 22, fontWeight: 700, color: "#e6edf3" },
-    sub:      { fontSize: 14, color: "#8b949e", lineHeight: 1.6 },
-    posCard:  { background: "#0d1117", border: "1px solid #30363d", borderRadius: 12, padding: "20px 40px", display: "flex", flexDirection: "column", alignItems: "center", gap: 4 },
-    posLabel: { fontSize: 11, color: "#484f58", letterSpacing: 2, textTransform: "uppercase" },
-    posNum:   { fontSize: 48, fontWeight: 700, color: "#388bfd" },
-    hint:     { fontSize: 12, color: "#484f58" },
-};
+const s = {
+    root: {
+        minHeight:      "100vh",
+        display:        "flex",
+        alignItems:     "center",
+        justifyContent: "center",
+        background:     "#0f172a",
+    },
+    card: {
+        textAlign:    "center" as const,
+        padding:      "48px 40px",
+        background:   "#1e293b",
+        borderRadius: "12px",
+        maxWidth:     "360px",
+        width:        "100%",
+        boxShadow:    "0 8px 32px rgba(0,0,0,0.4)",
+    },
+    spinner: {
+        display:        "flex",
+        justifyContent: "center",
+        marginBottom:   "24px",
+    },
+    ring: {
+        width:       `${RING_SIZE}px`,
+        height:      `${RING_SIZE}px`,
+        borderRadius: "50%",
+        border:      "4px solid #334155",
+        borderTopColor: "#6366f1",
+        animation:   "spin 0.9s linear infinite",
+    },
+    title: {
+        margin:     "0 0 10px",
+        fontSize:   "20px",
+        fontWeight: "600" as const,
+        color:      "#f1f5f9",
+    },
+    subtitle: {
+        margin:   "0 0 12px",
+        fontSize: "15px",
+        color:    "#94a3b8",
+    },
+    hint: {
+        margin:   0,
+        fontSize: "12px",
+        color:    "#475569",
+    },
+} as const;

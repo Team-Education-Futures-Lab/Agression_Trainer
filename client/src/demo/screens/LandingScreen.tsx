@@ -1,42 +1,89 @@
-import type { CSSProperties } from "react";
+interface LandingScreenProps {
+    ready:     boolean;
+    onConnect: () => Promise<void>;
+}
 
-interface Props { onStart: () => void; }
+export function LandingScreen({ ready, onConnect }: LandingScreenProps) {
+    const handleStart = async () => {
+        await onConnect();
+    };
 
-export function LandingScreen({ onStart }: Props) {
     return (
-        <div style={ls.root}>
-            <div style={ls.card}>
-                <div style={ls.badge}>🇳🇱 NL</div>
-                <div style={ls.logo}>AR Training</div>
-                <h1 style={ls.heading}>De-escalatietraining</h1>
-                <p style={ls.body}>
-                    In deze oefening reageer je op realistische klaslokaalscenario's.
-                    Je ziet een videofragment van een lastige situatie. Reageer daarna
-                    hardop, alsof je de persoon in het echt aanspreekt. Het systeem
-                    analyseert je reactie en geeft aan het einde persoonlijke feedback.
+        <div style={s.root}>
+            <div style={s.card}>
+                <h1 style={s.title}>De-escalatietraining</h1>
+                <p style={s.description}>
+                    Je krijgt een videoscenario te zien van een uitdagende situatie in de klas.
+                    Reageer zoals je dat in het echt zou doen — je reactie wordt geanalyseerd
+                    en aan het einde ontvang je persoonlijke feedback.
                 </p>
-                <ul style={ls.steps}>
-                    <li style={ls.step}><span style={ls.num}>1</span> Bekijk het videofragment aandachtig</li>
-                    <li style={ls.step}><span style={ls.num}>2</span> Reageer hardop op de situatie</li>
-                    <li style={ls.step}><span style={ls.num}>3</span> Druk op <em>Klaar</em> als je klaar bent</li>
-                </ul>
-                <p style={ls.hint}>Zorg dat je microfoon en camera zijn ingeschakeld.</p>
-                <button style={ls.btn} onClick={onStart}>Training starten →</button>
+                <p style={s.hint}>
+                    Zorg dat je camera en microfoon beschikbaar zijn voordat je begint.
+                </p>
+                <button
+                    style={{ ...s.btn, ...(!ready ? s.btnDisabled : {}) }}
+                    disabled={!ready}
+                    onClick={() => void handleStart()}
+                >
+                    {ready ? "Begin sessie" : "Modellen laden…"}
+                </button>
             </div>
         </div>
     );
 }
 
-const ls: Record<string, CSSProperties> = {
-    root:    { minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#0d1117", padding: 24 },
-    card:    { maxWidth: 560, width: "100%", background: "#161b22", border: "1px solid #30363d", borderRadius: 16, padding: "48px 40px", display: "flex", flexDirection: "column", gap: 20 },
-    badge:   { fontSize: 13, color: "#8b949e", letterSpacing: 1 },
-    logo:    { fontSize: 12, fontWeight: 700, letterSpacing: 3, color: "#388bfd", textTransform: "uppercase" },
-    heading: { fontSize: 28, fontWeight: 700, color: "#e6edf3", lineHeight: 1.2 },
-    body:    { fontSize: 15, color: "#8b949e", lineHeight: 1.7 },
-    steps:   { listStyle: "none", display: "flex", flexDirection: "column", gap: 12 },
-    step:    { display: "flex", alignItems: "center", gap: 12, fontSize: 14, color: "#c9d1d9" },
-    num:     { width: 24, height: 24, borderRadius: "50%", background: "#1f6feb", color: "#fff", fontSize: 12, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 } as CSSProperties,
-    hint:    { fontSize: 13, color: "#484f58", borderTop: "1px solid #21262d", paddingTop: 16 },
-    btn:     { marginTop: 4, padding: "14px 0", background: "#1f6feb", color: "#fff", border: "none", borderRadius: 10, fontSize: 16, fontWeight: 700, cursor: "pointer", letterSpacing: 0.5 },
-};
+const s = {
+    root: {
+        minHeight:      "100vh",
+        display:        "flex",
+        alignItems:     "center",
+        justifyContent: "center",
+        background:     "#0f172a",
+        padding:        "24px",
+    },
+    card: {
+        maxWidth:     "480px",
+        width:        "100%",
+        background:   "#1e293b",
+        borderRadius: "12px",
+        padding:      "40px 36px",
+        boxShadow:    "0 8px 32px rgba(0,0,0,0.4)",
+    },
+    title: {
+        margin:     "0 0 16px",
+        fontSize:   "24px",
+        fontWeight: "700" as const,
+        color:      "#f1f5f9",
+        lineHeight: 1.2,
+    },
+    description: {
+        margin:     "0 0 16px",
+        fontSize:   "15px",
+        color:      "#94a3b8",
+        lineHeight: 1.6,
+    },
+    hint: {
+        margin:       "0 0 32px",
+        fontSize:     "13px",
+        color:        "#475569",
+        lineHeight:   1.5,
+        borderLeft:   "3px solid #334155",
+        paddingLeft:  "12px",
+    },
+    btn: {
+        width:        "100%",
+        padding:      "14px",
+        fontSize:     "16px",
+        fontWeight:   "600" as const,
+        background:   "#6366f1",
+        color:        "#fff",
+        border:       "none",
+        borderRadius: "8px",
+        cursor:       "pointer",
+    },
+    btnDisabled: {
+        background: "#334155",
+        color:      "#64748b",
+        cursor:     "not-allowed",
+    },
+} as const;

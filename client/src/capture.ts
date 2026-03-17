@@ -1,118 +1,69 @@
+// =============================================================================
+// CaptureSession
+//
+// Owns the webcam and microphone. Runs MediaPipe FaceLandmarker and
+// HandLandmarker on every animation frame, and accumulates microphone audio
+// via an AudioWorklet. Exposes two async-iterable streams:
+//
+//   frames()  — one RawVideoFrame per animation frame
+//   audio()   — one RawAudioChunk per ~2-second audio buffer
+//
+// Lifecycle: call init() once at startup (loads MediaPipe models), then
+// start(videoEl) / stop() as needed. init() is safe to call before the user
+// has granted camera/mic permissions.
+// =============================================================================
+
 import {
     FaceLandmarker,
-    FilesetResolver,
     HandLandmarker,
-    type Landmark,
-    type NormalizedLandmark
+    FilesetResolver,
+    type NormalizedLandmark,
 } from "@mediapipe/tasks-vision";
 import Meyda from "meyda";
-import type {RawAudioChunk, RawVideoFrame} from "./types.ts";
+import { BroadcastChannel } from "./types.ts";
+import type { RawVideoFrame, RawAudioChunk } from "./types.ts";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-const SAMPLE_RATE       = 16000;
-const AUDIO_CHUNK_MS    = 2000;
-const AUDIO_CHUNK_SAMPLES = SAMPLE_RATE * (AUDIO_CHUNK_MS / 1000);
-const MFCC_COEFFICIENTS = 13;
-const MEYDA_BUFFER_SIZE = 512;  // must be a power of 2
+const TARGET_SAMPLE_RATE    = 16000;
+const MFCC_COEFFICIENTS     = 13;
+const MEYDA_BUFFER_SIZE     = 512;   // must be a power of 2
 
-// ─── Broadcast channel ────────────────────────────────────────────────────────
-// A simple generic broadcast channel that allows multiple async iterators
-// to consume the same stream of values independently.
-
-class BroadcastChannel<T> {
-    private subscribers = new Set<(value: T | null) => void>();
-
-    /**
-     * Push a value to all active subscribers.
-     * @param value The data to broadcast
-     */
-    push(value: T): void {
-        for (const sub of this.subscribers) {
-            sub(value)
-        }
-    }
-
-    /**
-     * Signal all the subscribers that the stream has ended.
-     */
-    close(): void {
-        for (const sub of this.subscribers) {
-            sub(null);
-        }
-        this.subscribers.clear();
-    }
-
-    /**
-     * Returns an AsyncIterator that yields values as they are pushed.
-     * The iterator completes when close() is called.
-     */
-    [Symbol.asyncIterator](): AsyncIterator<T> {
-        const subscribers = this.subscribers;
-        const queue: T[] = [];
-        let resolve: ((result: IteratorResult<T>) => void) | null = null;
-        let done = false;
-
-        const subscriber = (value: T | null) => {
-            if (value === null) {
-                done = true;
-                resolve?.({value: undefined as unknown as T, done: true});
-                resolve = null;
-                return;
-            }
-            if (resolve) {
-                resolve({value, done: false});
-                resolve = null;
-                return;
-            } else {
-                queue.push(value);
-            }
-        }
-
-        this.subscribers.add(subscriber);
-
-        return {
-            next(): Promise<IteratorResult<T>> {
-                if (queue.length > 0) {
-                    return Promise.resolve({value: queue.shift()!, done: false});
-                }
-                if (done) {
-                    return Promise.resolve({value: undefined as unknown as T, done: true});
-                }
-                return new Promise(r => {resolve = r;});
-            },
-            return(): Promise<IteratorResult<T>> {
-                subscribers.delete(subscriber)
-                return Promise.resolve({value: undefined as unknown as T, done: true});
-            },
-        };
-    }
-}
+const MEDIAPIPE_WASM = "/mediapipe";
+const FACE_MODEL_URL =
+    "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
+const HAND_MODEL_URL =
+    "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function toAppLandmarks(src: NormalizedLandmark[] | undefined): Landmark[] {
+function toAppLandmarks(
+    src: NormalizedLandmark[] | undefined,
+): { x: number; y: number; z: number; visibility: number }[] {
     if (!src) return [];
-    return src.map(({x, y, z, visibility}) => ({x, y, z, visibility: visibility ?? 1}));
+    return src.map(({ x, y, z, visibility }) => ({
+        x, y, z, visibility: visibility ?? 1,
+    }));
 }
 
 function float32ToBase64S16le(input: Float32Array): string {
     const buf = new Int16Array(input.length);
     for (let i = 0; i < input.length; i++) {
-        const s = Math.max(-1, Math.min(1, input[i]))
+        const s = Math.max(-1, Math.min(1, input[i]!));
         buf[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
     }
     const bytes = new Uint8Array(buf.buffer);
     let bin = "";
     for (let i = 0; i < bytes.byteLength; i++) {
-        bin += String.fromCharCode(bytes[i]);
+        bin += String.fromCharCode(bytes[i]!);
     }
     return btoa(bin);
 }
 
+/** Linear interpolation resampling — better quality than nearest-neighbour for speech. */
 function resample(input: Float32Array, fromRate: number, toRate: number): Float32Array {
     if (fromRate === toRate) return input;
-    const ratio = fromRate / toRate;
+    const ratio  = fromRate / toRate;
     const output = new Float32Array(Math.round(input.length / ratio));
     for (let i = 0; i < output.length; i++) {
         const pos  = i * ratio;
@@ -126,151 +77,179 @@ function resample(input: Float32Array, fromRate: number, toRate: number): Float3
 // ─── CaptureSession ───────────────────────────────────────────────────────────
 
 export class CaptureSession {
-    // MediaPipe models — initialised once via init()
+    // MediaPipe models — loaded once by init()
     private faceLandmarker: FaceLandmarker | null = null;
     private handLandmarker: HandLandmarker | null = null;
 
-    // Media resources — alive only while capture is running
-    private stream:          MediaStream | null = null;
-    private animFrame:       number | null = null;
-    private audioCtx:        AudioContext | null = null;
-    private meydaAnalyser:   ReturnType<typeof Meyda.createMeydaAnalyzer> | null = null;
-    private scriptProcessor: ScriptProcessorNode | null = null;
+    // Media resources — alive only while running
+    private stream:       MediaStream | null = null;
+    private animFrame:    number | null = null;
+    private audioCtx:     AudioContext | null = null;
+    private workletNode:  AudioWorkletNode | null = null;
+    private sourceNode:   MediaStreamAudioSourceNode | null = null;
+    private meydaAnalyser: ReturnType<typeof Meyda.createMeydaAnalyzer> | null = null;
 
     // Counters — reset on each start()
-    private frameId  = 0;
-    private chunkId  = 0;
+    private frameId   = 0;
+    private chunkId   = 0;
     private startedAt = 0;
 
-    // Audio accumulation
+    // Audio accumulation — samples at the native AudioContext rate
     private pcmBuffer:      Float32Array[] = [];
-    private mfccBuffer:     number[][] = [];
-    private pcmSampleCount: number = 0;
-    private systemRate:     number = 44100;
+    private mfccBuffer:     number[][]     = [];
+    private pcmSampleCount  = 0;
+    private systemRate      = 44100;
 
-    // Broadcast channels — one per stream type
-    private frameChannel = new BroadcastChannel<RawVideoFrame>();
-    private audioChannel = new BroadcastChannel<RawAudioChunk>();
+    // Broadcast channels
+    private frameChannel = new BroadcastChannel<RawVideoFrame>(180);
+    private audioChannel = new BroadcastChannel<RawAudioChunk>(60);
 
     private running = false;
 
+    // ─── Public API ───────────────────────────────────────────────────────────
+
+    /**
+     * Load MediaPipe models. Safe to call before camera/mic permissions are
+     * granted. Call once at app startup and await before calling start().
+     */
     async init(): Promise<void> {
         if (this.faceLandmarker && this.handLandmarker) return;
-        const vision = await FilesetResolver.forVisionTasks("/mediapipe");
+        const vision = await FilesetResolver.forVisionTasks(MEDIAPIPE_WASM);
 
-        [this.faceLandmarker, this.handLandmarker] = await Promise.all([
-            FaceLandmarker.createFromOptions(vision, {
-                baseOptions: {
-                    modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
-                    delegate: "CPU",
-                },
-                runningMode: "VIDEO",
-                numFaces: 1,
-                outputFaceBlendshapes: false,
-            }),
-            HandLandmarker.createFromOptions(vision, {
-                baseOptions: {
-                    modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
-                    delegate: "CPU",
-                },
-                runningMode: "VIDEO",
-                numHands: 2,
-            }),
-        ]);
+        // Try GPU first; fall back to CPU if the delegate is unavailable.
+        let delegate: "GPU" | "CPU" = "GPU";
+        try {
+            [this.faceLandmarker, this.handLandmarker] = await Promise.all([
+                FaceLandmarker.createFromOptions(vision, {
+                    baseOptions: { modelAssetPath: FACE_MODEL_URL, delegate: "GPU" },
+                    runningMode: "VIDEO",
+                    numFaces: 1,
+                    outputFaceBlendshapes: false,
+                }),
+                HandLandmarker.createFromOptions(vision, {
+                    baseOptions: { modelAssetPath: HAND_MODEL_URL, delegate: "GPU" },
+                    runningMode: "VIDEO",
+                    numHands: 2,
+                }),
+            ]);
+        } catch {
+            delegate = "CPU";
+            console.info("[capture] GPU delegate unavailable, falling back to CPU");
+            [this.faceLandmarker, this.handLandmarker] = await Promise.all([
+                FaceLandmarker.createFromOptions(vision, {
+                    baseOptions: { modelAssetPath: FACE_MODEL_URL, delegate: "CPU" },
+                    runningMode: "VIDEO",
+                    numFaces: 1,
+                    outputFaceBlendshapes: false,
+                }),
+                HandLandmarker.createFromOptions(vision, {
+                    baseOptions: { modelAssetPath: HAND_MODEL_URL, delegate: "CPU" },
+                    runningMode: "VIDEO",
+                    numHands: 2,
+                }),
+            ]);
+        }
+        console.info(`[capture] MediaPipe delegate: ${delegate}`);
     }
 
-    async start(videoEL: HTMLVideoElement): Promise<void> {
+    /**
+     * Request camera and microphone, attach the feed to `videoEl`, and start
+     * the frame and audio loops. Throws if init() has not been called.
+     */
+    async start(videoEl: HTMLVideoElement): Promise<void> {
         if (!this.faceLandmarker || !this.handLandmarker) {
-            throw new Error("CaptureSession not initialized - call init() first");
+            throw new Error("CaptureSession not initialised — call init() first");
         }
         if (this.running) return;
 
         this.stream = await navigator.mediaDevices.getUserMedia({
-            video: {width: 640, height: 480, frameRate: 30},
-            audio: {channelCount: 1, echoCancellation: true},
-        })
+            video: { width: 640, height: 480, frameRate: 30 },
+            audio: { channelCount: 1, echoCancellation: true },
+        });
 
-        videoEL.srcObject = this.stream;
-        await videoEL.play();
+        videoEl.srcObject = this.stream;
+        await videoEl.play();
 
-        this.frameId = 0;
-        this.chunkId = 0;
+        this.frameId   = 0;
+        this.chunkId   = 0;
         this.startedAt = performance.now();
-        this.running = true;
+        this.running   = true;
 
-        this.startAudio();
-        this.videoLoop(videoEL);
+        await this._startAudio();
+        this._videoLoop(videoEl);
     }
 
+    /** Stop all capture, release resources, and close the broadcast channels. */
     stop(): void {
         if (!this.running) return;
+        this.running = false;
+
         if (this.animFrame !== null) {
             cancelAnimationFrame(this.animFrame);
             this.animFrame = null;
         }
 
         this.meydaAnalyser?.stop();
-        this.scriptProcessor?.disconnect();
-        this.audioCtx?.close();
+        this.workletNode?.disconnect();
+        this.sourceNode?.disconnect();
+        this.audioCtx?.close().catch(() => undefined);
         this.stream?.getTracks().forEach(t => t.stop());
 
-        this.meydaAnalyser   = null;
-        this.scriptProcessor = null;
-        this.audioCtx        = null;
-        this.stream          = null;
-        this.running         = false;
+        this.meydaAnalyser = null;
+        this.workletNode   = null;
+        this.sourceNode    = null;
+        this.audioCtx      = null;
+        this.stream        = null;
 
-        // Signal all consumers that the streams are done
+        this.pcmBuffer      = [];
+        this.mfccBuffer     = [];
+        this.pcmSampleCount = 0;
+
         this.frameChannel.close();
         this.audioChannel.close();
 
         // Fresh channels for the next start()
-        this.frameChannel = new BroadcastChannel<RawVideoFrame>();
-        this.audioChannel = new BroadcastChannel<RawAudioChunk>();
+        this.frameChannel = new BroadcastChannel<RawVideoFrame>(180);
+        this.audioChannel = new BroadcastChannel<RawAudioChunk>(60);
     }
 
-    getStream(): MediaStream | null {
-        return this.stream;
-    }
+    frames(): AsyncIterable<RawVideoFrame> { return this.frameChannel; }
+    audio():  AsyncIterable<RawAudioChunk> { return this.audioChannel; }
 
-    frames(): AsyncIterable<RawVideoFrame> {
-        return this.frameChannel;
-    }
+    getStream(): MediaStream | null { return this.stream; }
 
-    audio(): AsyncIterable<RawAudioChunk> {
-        return this.audioChannel;
-    }
+    // ─── Video loop ───────────────────────────────────────────────────────────
 
-    private videoLoop(videoEL: HTMLVideoElement) {
+    private _videoLoop(videoEl: HTMLVideoElement): void {
         const tick = () => {
             if (!this.running) return;
 
-            if (videoEL.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+            if (videoEl.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
                 const now = performance.now();
-                const ts = (now - this.startedAt) / 1000;
+                const ts  = (now - this.startedAt) / 1000;
 
                 try {
-                    const faceResult = this.faceLandmarker!.detectForVideo(videoEL, now);
-                    const handResult = this.handLandmarker!.detectForVideo(videoEL, now);
+                    const faceResult = this.faceLandmarker!.detectForVideo(videoEl, now);
+                    const handResult = this.handLandmarker!.detectForVideo(videoEl, now);
 
-                    let leftHand: Landmark[] = [];
-                    let rightHand: Landmark[] = [];
+                    let leftHand:  ReturnType<typeof toAppLandmarks> = [];
+                    let rightHand: ReturnType<typeof toAppLandmarks> = [];
 
                     handResult.handedness.forEach((h, i) => {
                         const lm = toAppLandmarks(handResult.landmarks[i]);
-                        if (h[0]?.categoryName === "Left") leftHand = lm;
-                        else rightHand = lm;
+                        if (h[0]?.categoryName === "Left")  leftHand  = lm;
+                        else                                rightHand = lm;
                     });
 
                     this.frameChannel.push({
-                        frame_id: this.frameId++,
-                        timestamp: ts,
+                        frame_id:       this.frameId++,
+                        timestamp:      ts,
                         face_landmarks: toAppLandmarks(faceResult.faceLandmarks[0]),
-                        left_hand: leftHand,
-                        right_hand: rightHand,
+                        left_hand:      leftHand,
+                        right_hand:     rightHand,
                     });
                 } catch (e) {
-                    console.error("[capture] Frame processing error:", e);
+                    console.error("[capture] frame error:", e);
                 }
             }
 
@@ -280,46 +259,64 @@ export class CaptureSession {
         this.animFrame = requestAnimationFrame(tick);
     }
 
-    private startAudio(): void {
+    // ─── Audio ────────────────────────────────────────────────────────────────
+
+    private async _startAudio(): Promise<void> {
         if (!this.stream) return;
 
-        this.audioCtx = new AudioContext();
+        this.audioCtx   = new AudioContext();
         this.systemRate = this.audioCtx.sampleRate;
-        const source = this.audioCtx.createMediaStreamSource(this.stream);
 
-        // noinspection JSUnusedGlobalSymbols
+        const audioTrack = this.stream.getAudioTracks()[0];
+        if (!audioTrack) return;
+
+        this.sourceNode = this.audioCtx.createMediaStreamSource(
+            new MediaStream([audioTrack]),
+        );
+
+        // ── Meyda: MFCC extraction in the main thread ─────────────────────
+        // Meyda's analyzer API hooks into the Web Audio graph and fires the
+        // callback every MEYDA_BUFFER_SIZE frames.
         this.meydaAnalyser = Meyda.createMeydaAnalyzer({
-            audioContext: this.audioCtx,
-            source,
-            bufferSize: MEYDA_BUFFER_SIZE,
-            featureExtractors: ["mfcc"],
-            callback: (features: {mfcc: number[] }) => {
+            audioContext:       this.audioCtx,
+            source:             this.sourceNode,
+            bufferSize:         MEYDA_BUFFER_SIZE,
+            featureExtractors:  ["mfcc"],
+            callback: (features: { mfcc: number[] }) => {
                 if (features.mfcc) {
                     this.mfccBuffer.push(features.mfcc.slice(0, MFCC_COEFFICIENTS));
                 }
             },
         });
 
-        this.scriptProcessor = this.audioCtx.createScriptProcessor(MEYDA_BUFFER_SIZE, 1, 1);
-        source.connect(this.scriptProcessor);
-        this.scriptProcessor.connect(this.audioCtx.destination);
+        // ── AudioWorklet: PCM accumulation ────────────────────────────────
+        // The worklet accumulates raw samples and posts them back to the main
+        // thread in blocks. We reassemble them here rather than in the worklet
+        // so that the chunk boundary aligns with our 2-second target.
+        await this.audioCtx.audioWorklet.addModule("/worklets/pcm-processor.js");
 
-        const chunkThreshold = AUDIO_CHUNK_SAMPLES * (this.systemRate / SAMPLE_RATE);
+        this.workletNode = new AudioWorkletNode(this.audioCtx, "pcm-processor");
+        this.sourceNode.connect(this.workletNode);
+        // No output connection — side-effect only.
 
-        this.scriptProcessor.onaudioprocess = (e) => {
-            const samples = e.inputBuffer.getChannelData(0).slice();
-            this.pcmBuffer.push(samples);
-            this.pcmSampleCount += samples.length;
+        this.workletNode.port.onmessage = (
+            ev: MessageEvent<{ samples: Float32Array; sampleRate: number }>,
+        ) => {
+            this.pcmBuffer.push(ev.data.samples);
+            this.pcmSampleCount += ev.data.samples.length;
 
-            if (this.pcmSampleCount >= chunkThreshold) {
-                this.flushAudioChunk();
+            // Threshold is 2 seconds worth of samples at the native rate.
+            const threshold = TARGET_SAMPLE_RATE * 2 * (this.systemRate / TARGET_SAMPLE_RATE);
+            if (this.pcmSampleCount >= threshold) {
+                this._flushAudioChunk();
             }
         };
 
         this.meydaAnalyser.start();
     }
 
-    private flushAudioChunk(): void {
+    private _flushAudioChunk(): void {
+        // Merge accumulated native-rate buffers into one Float32Array.
         const merged = new Float32Array(this.pcmSampleCount);
         let offset = 0;
         for (const buf of this.pcmBuffer) {
@@ -327,18 +324,18 @@ export class CaptureSession {
             offset += buf.length;
         }
 
-        const resampled = resample(merged, this.systemRate, SAMPLE_RATE);
+        const resampled = resample(merged, this.systemRate, TARGET_SAMPLE_RATE);
 
         this.audioChannel.push({
             chunk_id:    this.chunkId++,
             timestamp:   (performance.now() - this.startedAt) / 1000,
             pcm:         float32ToBase64S16le(resampled),
-            sample_rate: SAMPLE_RATE,
+            sample_rate: TARGET_SAMPLE_RATE,
             mfccs:       [...this.mfccBuffer],
         });
 
-        this.pcmBuffer = [];
-        this.mfccBuffer = [];
+        this.pcmBuffer      = [];
+        this.mfccBuffer     = [];
         this.pcmSampleCount = 0;
     }
 }

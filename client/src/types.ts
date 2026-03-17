@@ -1,47 +1,121 @@
-import type { Landmark } from "@ar-training/shared";
+// =============================================================================
+// AR Training — Client-internal types
+// These types are local to the client and never cross container boundaries.
+// Wire-format DTOs live in @ar-training/shared.
+// =============================================================================
 
-// =============================================================================
-// AR Training — Client-internal Types
-// These types are produced by the capture pipeline and never cross a container
-// boundary. See shared/types.ts for wire-format types.
-// =============================================================================
+import type { MfccMatrix } from "@ar-training/shared";
+
+// ─── Capture pipeline ─────────────────────────────────────────────────────────
 
 /**
- * One frame of landmark data extracted from the webcam by MediaPipe.js.
- * Produced continuously by CaptureSession regardless of session state.
- *
- * Does not contain a session_id — that is stamped by the SessionHandler
- * when producing the wire-format VideoFrame.
+ * Raw landmark data produced by MediaPipe on a single animation frame.
+ * Not yet stamped with a session_id — that happens in SessionHandler when
+ * a session is active.
  */
 export interface RawVideoFrame {
-    /** Monotonically increasing counter, reset to 0 when capture starts. */
+    /** Monotonically increasing, reset to 0 when CaptureSession starts. */
     frame_id: number;
-    /** Seconds elapsed since capture started. */
+    /** Seconds elapsed since CaptureSession.start() was called. */
     timestamp: number;
-    /** 478 MediaPipe face mesh landmarks in normalised image coordinates. */
-    face_landmarks: Landmark[];
-    /** 21 hand landmarks, or empty array if left hand is not detected. */
-    left_hand: Landmark[];
-    /** 21 hand landmarks, or empty array if right hand is not detected. */
-    right_hand: Landmark[];
+    face_landmarks: { x: number; y: number; z: number; visibility: number }[];
+    left_hand:      { x: number; y: number; z: number; visibility: number }[];
+    right_hand:     { x: number; y: number; z: number; visibility: number }[];
 }
 
 /**
- * One chunk of audio data from the microphone, covering approximately 2 seconds.
- * Produced continuously by CaptureSession regardless of session state.
- *
- * Does not contain a session_id — that is stamped by the SessionHandler
- * when producing the wire-format AudioChunk.
+ * Raw audio data produced by the capture pipeline for approximately 2 seconds
+ * of microphone input. Not yet stamped with a session_id.
  */
 export interface RawAudioChunk {
-    /** Monotonically increasing counter, reset to 0 when capture starts. */
+    /** Monotonically increasing, reset to 0 when CaptureSession starts. */
     chunk_id: number;
-    /** Seconds elapsed since capture started. */
+    /** Seconds elapsed since CaptureSession.start() was called. */
     timestamp: number;
-    /** Base64-encoded raw s16le PCM bytes, resampled to `sample_rate`. */
+    /** Base64-encoded s16le PCM, resampled to 16000 Hz. */
     pcm: string;
-    /** Always 16000 Hz — required by Whisper. */
-    sample_rate: number;
-    /** `[n_frames][13]` MFCCs pre-computed client-side via Meyda.js. */
-    mfccs: number[][];
+    /** Always 16000 — matches the wire format requirement. */
+    sample_rate: 16000;
+    /**
+     * MFCCs computed from the raw (pre-resampled) samples via Meyda.
+     * Shape: [n_frames][13]
+     */
+    mfccs: MfccMatrix;
+}
+
+// ─── BroadcastChannel ─────────────────────────────────────────────────────────
+
+/**
+ * A push channel that broadcasts items to multiple independent async-iterable
+ * subscribers. Each call to [Symbol.asyncIterator]() returns an independent
+ * iterator with its own bounded queue.
+ *
+ * If a subscriber's queue fills beyond `maxQueueDepth`, the oldest item is
+ * dropped to prevent slow consumers from accumulating unbounded memory.
+ */
+export class BroadcastChannel<T> {
+    private readonly subscribers = new Set<(value: T | null) => void>();
+    private readonly maxQueueDepth: number;
+
+    constructor(maxQueueDepth = 120) {
+        this.maxQueueDepth = maxQueueDepth;
+    }
+
+    /** Push an item to all current subscribers. */
+    push(value: T): void {
+        for (const sub of this.subscribers) sub(value);
+    }
+
+    /** Close the channel — signals done to all active iterators. */
+    close(): void {
+        for (const sub of this.subscribers) sub(null);
+        this.subscribers.clear();
+    }
+
+    /**
+     * Returns an AsyncIterator that yields items as they are pushed.
+     * The iterator ends when close() is called or return() is called by the
+     * consumer (e.g. a for-await-of break).
+     */
+    [Symbol.asyncIterator](): AsyncIterator<T> {
+        const subscribers   = this.subscribers;
+        const maxDepth      = this.maxQueueDepth;
+        const queue: T[]    = [];
+        let resolve: ((result: IteratorResult<T>) => void) | null = null;
+        let done = false;
+
+        const subscriber = (value: T | null) => {
+            if (value === null) {
+                done = true;
+                resolve?.({ value: undefined as unknown as T, done: true });
+                resolve = null;
+                return;
+            }
+            if (resolve) {
+                resolve({ value, done: false });
+                resolve = null;
+            } else {
+                if (queue.length >= maxDepth) queue.shift(); // drop oldest
+                queue.push(value);
+            }
+        };
+
+        subscribers.add(subscriber);
+
+        return {
+            next(): Promise<IteratorResult<T>> {
+                if (queue.length > 0) {
+                    return Promise.resolve({ value: queue.shift()!, done: false });
+                }
+                if (done) {
+                    return Promise.resolve({ value: undefined as unknown as T, done: true });
+                }
+                return new Promise(r => { resolve = r; });
+            },
+            return(): Promise<IteratorResult<T>> {
+                subscribers.delete(subscriber);
+                return Promise.resolve({ value: undefined as unknown as T, done: true });
+            },
+        };
+    }
 }

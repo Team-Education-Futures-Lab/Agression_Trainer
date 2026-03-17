@@ -1,106 +1,101 @@
-import type { VideoFrame, AudioChunk, ClientMessage, ServerMessage } from "@ar-training/shared";
+// =============================================================================
+// Transport
+//
+// TransportInterface abstracts the WebSocket connection so SessionHandler
+// never touches the WebSocket API directly. WebSocketTransport is the
+// production implementation.
+// =============================================================================
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-export type TransportState = "disconnected" | "connecting" | "connected" | "error";
+import type { ClientMessage, ServerMessage } from "@ar-training/shared";
 
 // ─── Interface ────────────────────────────────────────────────────────────────
 
 export interface TransportInterface {
-    connect(sessionId: string): Promise<void>;
-    disconnect(): void;
-    sendFrame(frame: VideoFrame): void;
-    sendAudio(chunk: AudioChunk): void;
-    sendMessage(msg: ClientMessage): void;
-    onMessage(cb: (msg: ServerMessage) => void): void;
-    onStateChange(cb: (state: TransportState) => void): void;
+    /** Send a client-to-server message. Throws if the connection is not open. */
+    send(msg: ClientMessage): void;
+
+    /** Close the connection intentionally (e.g. user disconnect). */
+    close(): void;
+
+    /** Called for every well-formed ServerMessage received. */
+    onMessage: ((msg: ServerMessage) => void) | null;
+
+    /**
+     * Called when the connection closes. `clean` is true when close() was
+     * called by this client, false for unexpected drops.
+     */
+    onClose: ((clean: boolean) => void) | null;
+
+    /** Called when a message cannot be parsed or a send fails. */
+    onError: ((err: Error) => void) | null;
 }
 
 // ─── WebSocketTransport ───────────────────────────────────────────────────────
 
 export class WebSocketTransport implements TransportInterface {
-    private readonly baseUrl: string;
-    private ws: WebSocket | null = null;
-    private messageHandler: ((msg: ServerMessage) => void) | null = null;
-    private stateHandler:   ((state: TransportState) => void) | null = null;
+    onMessage: ((msg: ServerMessage) => void) | null = null;
+    onClose:   ((clean: boolean) => void) | null     = null;
+    onError:   ((err: Error) => void) | null         = null;
 
-    constructor(baseUrl: string) {
-        this.baseUrl = baseUrl;
+    private ws: WebSocket;
+    private _clean = false;
+
+    constructor(url: string) {
+        this.ws = new WebSocket(url);
+
+        this.ws.onmessage = (ev: MessageEvent<string>) => {
+            let parsed: ServerMessage;
+            try {
+                parsed = JSON.parse(ev.data) as ServerMessage;
+            } catch (e) {
+                this.onError?.(new Error(`Failed to parse server message: ${String(e)}`));
+                return;
+            }
+            this.onMessage?.(parsed);
+        };
+
+        this.ws.onclose = () => {
+            this.onClose?.(this._clean);
+        };
+
+        this.ws.onerror = () => {
+            // The WebSocket API gives no useful detail in onerror — the close
+            // event that follows immediately will carry the actual reason.
+            this.onError?.(new Error("WebSocket error"));
+        };
     }
 
-    async connect(sessionId: string): Promise<void> {
-        if (this.ws) {
-            throw new Error("Transport already connected - call disconnect() first");
-        }
-
-        this.setState("connecting");
-
+    /**
+     * Returns a Promise that resolves once the WebSocket reaches OPEN state,
+     * or rejects if the connection fails before opening.
+     */
+    static connect(url: string): Promise<WebSocketTransport> {
         return new Promise((resolve, reject) => {
-            const url  = `${this.baseUrl}/ws/${sessionId}`;
-            this.ws    = new WebSocket(url);
-
-            this.ws.onopen = () => {
-                this.setState("connected");
-                resolve();
-            };
-
-            this.ws.onmessage = (e) => {
-                try {
-                    const msg: ServerMessage = JSON.parse(e.data);
-                    this.messageHandler?.(msg);
-                } catch {
-                    console.error("[transport] Failed to parse server message:", e.data);
-                }
-            };
-
-            this.ws.onerror = () => {
-                reject(new Error(`WebSocket error connecting to ${url}`));
-            };
-
-            this.ws.onclose = () => {
-                this.ws = null;
-                this.setState("disconnected");
+            const t = new WebSocketTransport(url);
+            if (t.ws.readyState === WebSocket.OPEN) {
+                resolve(t);
+                return;
+            }
+            t.ws.onopen = () => resolve(t);
+            // Override the instance onerror just for the connection phase.
+            // Once open, the instance handlers take over.
+            const origOnError = t.ws.onerror;
+            t.ws.onerror = (ev) => {
+                origOnError?.call(t.ws, ev);
+                reject(new Error("WebSocket connection failed"));
             };
         });
     }
 
-    disconnect(): void {
-        if (!this.ws) return;
-        this.ws.onclose = null;
-        this.ws.close();
-        this.ws = null;
-        this.setState("disconnected");
-    }
-
-    sendFrame(frame: VideoFrame): void {
-        this.send(frame);
-    }
-
-    sendAudio(chunk: AudioChunk): void {
-        this.send(chunk);
-    }
-
-    sendMessage(msg: ClientMessage): void {
-        this.send(msg);
-    }
-
-    onMessage(cb: (msg: ServerMessage) => void): void {
-        this.messageHandler = cb;
-    }
-
-    onStateChange(cb: (state: TransportState) => void): void {
-        this.stateHandler = cb;
-    }
-
-    private send(payload: VideoFrame | AudioChunk | ClientMessage): void {
-        if (this.ws?.readyState === WebSocket.OPEN) {
-            this.ws.send(JSON.stringify(payload));
-        } else {
-            console.warn("[transport] Dropped message — socket not open:", (payload as { type: string }).type);
+    send(msg: ClientMessage): void {
+        if (this.ws.readyState !== WebSocket.OPEN) {
+            throw new Error(`Cannot send — WebSocket state is ${this.ws.readyState}`);
         }
+        this.ws.send(JSON.stringify(msg));
     }
 
-    private setState(state: TransportState): void {
-        this.stateHandler?.(state);
+    close(): void {
+        this._clean = true;
+        this.ws.close();
     }
 }

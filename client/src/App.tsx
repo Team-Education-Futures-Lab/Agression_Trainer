@@ -1,301 +1,442 @@
+// =============================================================================
+// App — Debug harness
+//
+// Developer dashboard showing the live state of capture and session in real
+// time. Reviewed from an engineering correctness perspective, not UX.
+// =============================================================================
+
 import { useEffect, useRef, useState } from "react";
-import { CaptureSession } from "./capture";
-import { WebSocketTransport } from "./transport";
-import { SessionHandler } from "./sessionHandler";
-import type { SessionHandlerState } from "./sessionHandler";
 import type { ServerMessage } from "@ar-training/shared";
-import type { RawVideoFrame, RawAudioChunk } from "./types";
-import DebugOverlay from "./DebugOverlay";
+import { useCapture } from "./hooks/useCapture.ts";
+import { useSession } from "./hooks/useSession.ts";
+import { LandmarkOverlay } from "./components/LandmarkOverlay.tsx";
+import { MfccSpectrogram } from "./components/MfccSpectrogram.tsx";
 
-// ─── Config ───────────────────────────────────────────────────────────────────
+export function App() {
+    const { capture, ready, videoRef } = useCapture();
+    const {
+        handler, state, lastMessage,
+        sessionId, transcript, queuePos, clipScore,
+        connect, disconnect,
+    } = useSession(capture);
 
-const WS_BASE   = import.meta.env.VITE_APP_WS_URL   ?? "ws://localhost:8000";
-const HTTP_BASE = import.meta.env.VITE_APP_HTTP_URL  ?? "http://localhost:8000";
+    // ── Capture start/stop ────────────────────────────────────────────────────
+    const [capturing,   setCapturing]   = useState(false);
+    const [captureError, setCaptureError] = useState<string | null>(null);
 
-// ─── Singletons ───────────────────────────────────────────────────────────────
-// Created once for the lifetime of the page — not inside the component
-// so they survive React re-renders.
-
-const capture   = new CaptureSession();
-const transport = new WebSocketTransport(WS_BASE);
-const session   = new SessionHandler(transport, capture, {
-    httpBase:   HTTP_BASE,
-    userId:     "dev-user",
-    scenarioId: "scenario_01",
-    language:   "nl",
-});
-
-// ─── App ──────────────────────────────────────────────────────────────────────
-
-export default function App() {
-    const videoRef = useRef<HTMLVideoElement | null>(null);
-
-    // Initialisation
-    const [ready, setReady]   = useState(false);
-    const [error, setError]   = useState<string | null>(null);
-
-    // Session
-    const [sessionState, setSessionState] = useState<SessionHandlerState>("idle");
-    const [sessionId, setSessionId]       = useState<string | null>(null);
-    const [lastMessage, setLastMessage]   = useState<ServerMessage | null>(null);
-
-    const [showDebug, setShowDebug] = useState(false);
-
-    // Capture metrics — for debug display
-    const [frameCount, setFrameCount]   = useState(0);
-    const [chunkCount, setChunkCount]   = useState(0);
-    const [lastFrame, setLastFrame]     = useState<RawVideoFrame | null>(null);
-    const [lastChunk, setLastChunk]     = useState<RawAudioChunk | null>(null);
-
-    // ── Init MediaPipe + start capture on mount ────────────────────────────────
-
-    useEffect(() => {
+    const startCapture = async () => {
         if (!videoRef.current) return;
-        const videoEl = videoRef.current;
+        try {
+            await capture.start(videoRef.current);
+            setCapturing(true);
+            setCaptureError(null);
+        } catch (e) {
+            setCaptureError(String(e));
+        }
+    };
 
-        capture.init()
-            .then(() => capture.start(videoEl))
-            .then(() => {
-                setReady(true);
-                // Subscribe to capture streams for debug display only —
-                // SessionHandler handles forwarding to transport separately
-                consumeFrames();
-                consumeAudio();
-            })
-            .catch(e => setError(`Capture init failed: ${e.message}`));
+    const stopCapture = () => {
+        capture.stop();
+        setCapturing(false);
+    };
 
-        return () => capture.stop();
-    }, []);
+    // ── Counters ──────────────────────────────────────────────────────────────
+    const [frameCount, setFrameCount] = useState(0);
+    const [chunkCount, setChunkCount] = useState(0);
+    const [fps,        setFps]        = useState(0);
 
-    // ── Wire session state + messages ──────────────────────────────────────────
+    // Latest MFCC frame for the spectrogram
+    const [latestMfccs, setLatestMfccs] = useState<number[][]>([]);
 
     useEffect(() => {
-        session.onStateChange(state => {
-            setSessionState(state);
-            setSessionId(session.getSessionId());
-        });
-        session.onMessage(msg => setLastMessage(msg));
-    }, []);
+        if (!capturing) return;
+        let fc = 0, cc = 0;
+        let cancelled = false;
 
-    // ── Debug consumers ────────────────────────────────────────────────────────
-    // These run independently of the session — capture is always streaming.
+        void (async () => {
+            for await (const frame of capture.frames()) {
+                if (cancelled) break;
+                fc++;
+                setFrameCount(fc);
+                setFps(frame.frame_id > 0 ? Math.round(fc / frame.timestamp) : 0);
+            }
+        })();
 
-    async function consumeFrames() {
-        for await (const frame of capture.frames()) {
-            setLastFrame(frame);
-            setFrameCount(n => n + 1);
-        }
-    }
+        void (async () => {
+            for await (const chunk of capture.audio()) {
+                if (cancelled) break;
+                cc++;
+                setChunkCount(cc);
+                setLatestMfccs(chunk.mfccs);
+            }
+        })();
 
-    async function consumeAudio() {
-        for await (const chunk of capture.audio()) {
-            setLastChunk(chunk);
-            setChunkCount(n => n + 1);
-        }
-    }
+        return () => { cancelled = true; };
+    }, [capturing, capture]);
 
-    // ── Handlers ───────────────────────────────────────────────────────────────
+    // ── Overlay / video toggles ───────────────────────────────────────────────
+    const [showOverlay, setShowOverlay] = useState(true);
+    const [showVideo,   setShowVideo]   = useState(true);
 
-    const handleConnect = async () => {
-        setError(null);
-        try {
-            await session.connect();
-        } catch (e: unknown) {
-            setError(e instanceof Error ? e.message : String(e));
-        }
+    const handleShowVideo = (v: boolean) => {
+        setShowVideo(v);
+        if (videoRef.current) videoRef.current.style.opacity = v ? "1" : "0";
     };
 
-    const handleDisconnect = () => session.disconnect();
+    // ── ClipEnded control ─────────────────────────────────────────────────────
+    const [clipIdInput, setClipIdInput] = useState("");
 
-    // ── Derived state ──────────────────────────────────────────────────────────
+    // ── Latest RawVideoFrame for overlay ─────────────────────────────────────
+    const [latestFrame, setLatestFrame] = useState<{
+        face_landmarks: { x: number; y: number; z: number; visibility: number }[];
+        left_hand:      { x: number; y: number; z: number; visibility: number }[];
+        right_hand:     { x: number; y: number; z: number; visibility: number }[];
+    } | null>(null);
 
-    const isActive     = sessionState === "active";
-    const isConnecting = sessionState === "connecting" || sessionState === "queued";
+    useEffect(() => {
+        if (!capturing) return;
+        let cancelled = false;
+        void (async () => {
+            for await (const frame of capture.frames()) {
+                if (cancelled) break;
+                setLatestFrame(frame);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [capturing, capture]);
 
-    // ── Render ─────────────────────────────────────────────────────────────────
+    // ── Last server message display ───────────────────────────────────────────
+    const lastMsgRef = useRef<ServerMessage | null>(null);
+    lastMsgRef.current = lastMessage;
 
     return (
-        <div style={s.page}>
+        <div style={styles.root}>
+            <h2 style={styles.heading}>AR Training — Debug Harness</h2>
 
-            {/* Top bar */}
-            <div style={s.topBar}>
-                <span style={s.title}>AR Training</span>
-                <span style={s.divider}>|</span>
-                <span style={s.subtitle}>Development Harness</span>
-                <div style={{ flex: 1 }} />
-                <div style={s.stateDot(sessionState)} />
-                <span style={{ ...s.stateLabel, color: stateColor(sessionState) }}>
-          {sessionState.toUpperCase()}
-        </span>
-            </div>
-
-            <div style={s.body}>
-
-                {/* ── Left panel ── */}
-                <div style={s.leftPanel}>
-
-                    {/* Camera feeds */}
-                    <Section title="CAMERA" color="#6366f1">
-                        <div style={s.videoRow}>
-                            <div style={s.videoPanel}>
-                                <span style={s.panelLabel}>RAW</span>
-                                <video
-                                    ref={videoRef}
-                                    muted
-                                    playsInline
-                                    style={s.video}
-                                />
-                            </div>
-                            <div style={s.videoPanel}>
-                                <span style={s.panelLabel}>LANDMARKS</span>
-                                {/* DebugOverlay canvas goes here */}
-                                <div style={{ ...s.video, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                                    <span style={{ color: "#334155", fontSize: 11 }}>overlay coming soon</span>
-                                </div>
-                            </div>
-                        </div>
-                    </Section>
-
-                    {/* Controls */}
-                    <Section title="CONTROLS" color="#ec4899">
-                        <div style={s.controls}>
-                            <Btn
-                                label="Connect Session"
-                                color="#10b981"
-                                disabled={!ready || isActive || isConnecting}
-                                onClick={handleConnect}
+            {/* ── Top row: video + spectrogram ──────────────────────────── */}
+            <div style={styles.topRow}>
+                {/* Video panel */}
+                <div style={styles.videoPanel}>
+                    <div style={styles.videoWrap}>
+                        <video
+                            ref={videoRef}
+                            style={styles.video}
+                            muted
+                            playsInline
+                        />
+                        {showOverlay && capturing && latestFrame && (
+                            <LandmarkOverlay
+                                frame={latestFrame}
+                                width={640}
+                                height={480}
                             />
-                            <Btn
-                                label="Disconnect"
-                                color="#ef4444"
-                                disabled={!isActive && !isConnecting}
-                                onClick={handleDisconnect}
+                        )}
+                    </div>
+                    <div style={styles.videoControls}>
+                        <label style={styles.checkLabel}>
+                            <input
+                                type="checkbox"
+                                checked={showVideo}
+                                onChange={e => handleShowVideo(e.target.checked)}
                             />
-                            <Btn
-                                label={showDebug ? "Hide Debug" : "Show Debug"}
-                                color="#334155"
-                                disabled={false}
-                                onClick={() => setShowDebug(v => !v)}
+                            {" "}Video
+                        </label>
+                        <label style={styles.checkLabel}>
+                            <input
+                                type="checkbox"
+                                checked={showOverlay}
+                                onChange={e => setShowOverlay(e.target.checked)}
                             />
-                        </div>
-                        {error && <div style={s.errorBanner}>⚠ {error}</div>}
-                    </Section>
-
+                            {" "}Landmarks
+                        </label>
+                        <span style={styles.fpsTag}>
+                            {capturing ? `${fps} fps` : "—"}
+                        </span>
+                    </div>
                 </div>
 
-                {/* ── Right panel ── */}
-                <div style={s.rightPanel}>
-
-                    {/* Session stats */}
-                    <Section title="SESSION" color="#10b981">
-                        <div style={s.grid}>
-                            <Badge label="SESSION ID"    value={sessionId ? sessionId.slice(0, 8) + "…" : "—"} mono />
-                            <Badge label="FRAMES SENT"   value={frameCount.toLocaleString()} />
-                            <Badge label="CHUNKS SENT"   value={chunkCount.toLocaleString()} />
-                        </div>
-                    </Section>
-
-                    {/* Capture stats */}
-                    <Section title="CAPTURE" color="#0ea5e9">
-                        <div style={s.grid}>
-                            <Badge label="FACE LANDMARKS" value={lastFrame ? String(lastFrame.face_landmarks.length) : "—"} />
-                            <Badge label="LEFT HAND"      value={lastFrame ? (lastFrame.left_hand.length > 0 ? "detected" : "none") : "—"} />
-                            <Badge label="RIGHT HAND"     value={lastFrame ? (lastFrame.right_hand.length > 0 ? "detected" : "none") : "—"} />
-                            <Badge label="MFCC FRAMES"    value={lastChunk ? String(lastChunk.mfccs.length) : "—"} />
-                        </div>
-                    </Section>
-
-                    {/* Last server message */}
-                    <Section title="LAST SERVER MESSAGE" color="#f59e0b">
-            <pre style={s.pre}>
-              {lastMessage ? JSON.stringify(lastMessage, null, 2) : "—"}
-            </pre>
-                    </Section>
-
+                {/* MFCC spectrogram */}
+                <div style={styles.spectrogramPanel}>
+                    <div style={styles.panelLabel}>MFCC spectrogram</div>
+                    <MfccSpectrogram mfccs={latestMfccs} />
                 </div>
             </div>
 
-            {showDebug && (
-                <div style={{ padding: "0 20px 20px" }}>
-                    <DebugOverlay capture={capture} />
-                </div>
+            {/* ── Middle row: session status + counters ─────────────────── */}
+            <div style={styles.statusRow}>
+                <StatusBadge state={state} />
+                <Kv k="Session ID"    v={sessionId   ?? "—"} />
+                <Kv k="Queue pos"     v={queuePos !== null ? String(queuePos) : "—"} />
+                <Kv k="Clip score"    v={clipScore !== null ? clipScore.toFixed(3) : "—"} />
+                <Kv k="Frames sent"   v={String(frameCount)} />
+                <Kv k="Chunks sent"   v={String(chunkCount)} />
+            </div>
+
+            {/* ── Transcript ────────────────────────────────────────────── */}
+            <div style={styles.transcriptBox}>
+                <span style={styles.panelLabel}>Live transcript </span>
+                <span style={styles.transcriptText}>
+                    {transcript || <em style={{ opacity: 0.4 }}>waiting…</em>}
+                </span>
+            </div>
+
+            {/* ── Controls ──────────────────────────────────────────────── */}
+            <div style={styles.controls}>
+                {!capturing ? (
+                    <button
+                        style={styles.btn}
+                        onClick={() => void startCapture()}
+                        disabled={!ready}
+                    >
+                        {ready ? "Start capture" : "Loading models…"}
+                    </button>
+                ) : (
+                    <button style={styles.btn} onClick={stopCapture}>
+                        Stop capture
+                    </button>
+                )}
+
+                {state === "idle" ? (
+                    <button
+                        style={styles.btn}
+                        onClick={() => void connect()}
+                        disabled={!capturing}
+                    >
+                        Connect session
+                    </button>
+                ) : (
+                    <button style={{ ...styles.btn, ...styles.btnDanger }} onClick={disconnect}>
+                        Disconnect
+                    </button>
+                )}
+
+                <input
+                    style={styles.input}
+                    placeholder="clip_id"
+                    value={clipIdInput}
+                    onChange={e => setClipIdInput(e.target.value)}
+                />
+                <button
+                    style={styles.btn}
+                    disabled={state !== "active" || !clipIdInput.trim()}
+                    onClick={() => {
+                        handler.sendClipEnded(clipIdInput.trim());
+                    }}
+                >
+                    Send ClipEnded
+                </button>
+            </div>
+
+            {captureError && (
+                <div style={styles.errorBox}>Capture error: {captureError}</div>
             )}
-        </div>
-    );
-}
 
-// ─── Small components ─────────────────────────────────────────────────────────
-
-function Section({ title, color, children }: { title: string; color: string; children: React.ReactNode }) {
-    return (
-        <div style={{ marginBottom: 20 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-                <div style={{ width: 3, height: 12, background: color, borderRadius: 2 }} />
-                <span style={{ color: "#475569", fontSize: 10, letterSpacing: 2 }}>{title}</span>
+            {/* ── Last server message ───────────────────────────────────── */}
+            <div style={styles.msgPanel}>
+                <div style={styles.panelLabel}>Last server message</div>
+                <pre style={styles.pre}>
+                    {lastMessage
+                        ? JSON.stringify(lastMessage, null, 2)
+                        : "—"}
+                </pre>
             </div>
-            {children}
         </div>
     );
 }
 
-function Badge({ label, value, color = "#94a3b8", mono = false }: { label: string; value: string; color?: string; mono?: boolean }) {
-    return (
-        <div style={{ background: "#1e293b", borderRadius: 8, padding: "10px 14px" }}>
-            <div style={{ color: "#475569", fontSize: 10, letterSpacing: 1, marginBottom: 4 }}>{label}</div>
-            <div style={{ color, fontSize: 13, fontWeight: "bold", fontFamily: mono ? "monospace" : "inherit" }}>{value}</div>
-        </div>
-    );
-}
+// ─── Small sub-components ─────────────────────────────────────────────────────
 
-function Btn({ label, color, disabled, onClick }: { label: string; color: string; disabled: boolean; onClick: () => void }) {
-    return (
-        <button
-            onClick={onClick}
-            disabled={disabled}
-            style={{
-                flex: 1, padding: "8px 0", borderRadius: 8, border: "none",
-                background: disabled ? "#1e293b" : color,
-                color: disabled ? "#475569" : "#fff",
-                fontSize: 12, fontWeight: "bold", cursor: disabled ? "not-allowed" : "pointer",
-                fontFamily: "monospace",
-            }}
-        >
-            {label}
-        </button>
-    );
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function stateColor(s: SessionHandlerState): string {
-    const map: Record<SessionHandlerState, string> = {
-        idle: "#475569", connecting: "#f59e0b", queued: "#f59e0b",
-        active: "#10b981", completed: "#10b981", dropped: "#ef4444", error: "#ef4444",
+function StatusBadge({ state }: { state: string }) {
+    const colour: Record<string, string> = {
+        idle:       "#555",
+        connecting: "#e6a817",
+        queued:     "#e6a817",
+        active:     "#27ae60",
+        paused:     "#2980b9",
+        completed:  "#8e44ad",
+        dropped:    "#e74c3c",
+        error:      "#c0392b",
     };
-    return map[s];
+    return (
+        <span style={{
+            ...styles.badge,
+            background: colour[state] ?? "#555",
+        }}>
+            {state}
+        </span>
+    );
+}
+
+function Kv({ k, v }: { k: string; v: string }) {
+    return (
+        <span style={styles.kv}>
+            <span style={styles.kvKey}>{k}</span>
+            <span style={styles.kvVal}>{v}</span>
+        </span>
+    );
 }
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
-const s = {
-    page:       { fontFamily: "monospace", background: "#0f0f1a", minHeight: "100vh", color: "#e2e8f0", display: "flex", flexDirection: "column" } as React.CSSProperties,
-    topBar:     { background: "#0c1221", borderBottom: "1px solid #1e293b", padding: "10px 20px", display: "flex", alignItems: "center", gap: 12, flexShrink: 0 } as React.CSSProperties,
-    title:      { color: "#6366f1", fontWeight: "bold", fontSize: 14 } as React.CSSProperties,
-    divider:    { color: "#334155" } as React.CSSProperties,
-    subtitle:   { color: "#475569", fontSize: 11 } as React.CSSProperties,
-    stateLabel: { fontSize: 12 } as React.CSSProperties,
-    stateDot:   (state: SessionHandlerState): React.CSSProperties => ({
-        width: 8, height: 8, borderRadius: "50%", background: stateColor(state),
-    }),
-    body:       { display: "flex", flex: 1, overflow: "hidden" } as React.CSSProperties,
-    leftPanel:  { width: 500, borderRight: "1px solid #1e293b", padding: 20, flexShrink: 0, overflowY: "auto" } as React.CSSProperties,
-    rightPanel: { flex: 1, padding: 20, overflowY: "auto" } as React.CSSProperties,
-    videoRow:   { display: "flex", gap: 8 } as React.CSSProperties,
-    videoPanel: { flex: 1, display: "flex", flexDirection: "column", gap: 6 } as React.CSSProperties,
-    panelLabel: { color: "#334155", fontSize: 10 } as React.CSSProperties,
-    video:      { width: "100%", aspectRatio: "4/3", borderRadius: 8, background: "#0c1221", border: "1px solid #1e293b", display: "block" } as React.CSSProperties,
-    controls:   { display: "flex", gap: 8 } as React.CSSProperties,
-    errorBanner:{ background: "#450a0a", border: "1px solid #ef4444", borderRadius: 8, padding: 10, marginTop: 8, color: "#fca5a5", fontSize: 12 } as React.CSSProperties,
-    grid:       { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 } as React.CSSProperties,
-    pre:        { background: "#0c1221", border: "1px solid #1e293b", borderRadius: 8, padding: 12, fontSize: 11, color: "#94a3b8", overflow: "auto", margin: 0 } as React.CSSProperties,
+const styles = {
+    root: {
+        fontFamily:  "monospace",
+        background:  "#1a1a1a",
+        color:       "#e0e0e0",
+        minHeight:   "100vh",
+        padding:     "16px",
+        boxSizing:   "border-box" as const,
+    },
+    heading: {
+        margin:      "0 0 12px",
+        fontSize:    "14px",
+        fontWeight:  "bold" as const,
+        color:       "#aaa",
+        textTransform: "uppercase" as const,
+        letterSpacing: "0.08em",
+    },
+    topRow: {
+        display:     "flex",
+        gap:         "16px",
+        marginBottom: "12px",
+        flexWrap:    "wrap" as const,
+    },
+    videoPanel: {
+        display:     "flex",
+        flexDirection: "column" as const,
+        gap:         "6px",
+    },
+    videoWrap: {
+        position:    "relative" as const,
+        width:       "640px",
+        height:      "480px",
+        background:  "#000",
+        flexShrink:  0,
+    },
+    video: {
+        width:       "100%",
+        height:      "100%",
+        objectFit:   "cover" as const,
+        display:     "block",
+    },
+    videoControls: {
+        display:     "flex",
+        alignItems:  "center",
+        gap:         "12px",
+    },
+    checkLabel: {
+        fontSize:    "12px",
+        cursor:      "pointer",
+    },
+    fpsTag: {
+        fontSize:    "12px",
+        color:       "#aaa",
+    },
+    spectrogramPanel: {
+        display:     "flex",
+        flexDirection: "column" as const,
+        gap:         "6px",
+        flex:        1,
+        minWidth:    "200px",
+    },
+    statusRow: {
+        display:     "flex",
+        alignItems:  "center",
+        gap:         "12px",
+        marginBottom: "8px",
+        flexWrap:    "wrap" as const,
+    },
+    badge: {
+        display:     "inline-block",
+        padding:     "2px 10px",
+        borderRadius: "4px",
+        fontSize:    "12px",
+        fontWeight:  "bold" as const,
+        color:       "#fff",
+        textTransform: "uppercase" as const,
+        letterSpacing: "0.05em",
+    },
+    kv: {
+        fontSize:    "12px",
+        display:     "inline-flex",
+        gap:         "4px",
+    },
+    kvKey: {
+        color:       "#888",
+    },
+    kvVal: {
+        color:       "#e0e0e0",
+    },
+    transcriptBox: {
+        background:  "#252525",
+        border:      "1px solid #333",
+        borderRadius: "4px",
+        padding:     "8px 10px",
+        marginBottom: "10px",
+        fontSize:    "12px",
+        lineHeight:  "1.5",
+    },
+    transcriptText: {
+        whiteSpace:  "pre-wrap" as const,
+    },
+    controls: {
+        display:     "flex",
+        gap:         "8px",
+        alignItems:  "center",
+        flexWrap:    "wrap" as const,
+        marginBottom: "10px",
+    },
+    btn: {
+        padding:     "5px 12px",
+        fontSize:    "12px",
+        cursor:      "pointer",
+        background:  "#2c2c2c",
+        color:       "#e0e0e0",
+        border:      "1px solid #444",
+        borderRadius: "4px",
+    },
+    btnDanger: {
+        background:  "#4a1a1a",
+        borderColor: "#822",
+    },
+    input: {
+        padding:     "5px 8px",
+        fontSize:    "12px",
+        background:  "#2c2c2c",
+        color:       "#e0e0e0",
+        border:      "1px solid #444",
+        borderRadius: "4px",
+        width:       "140px",
+    },
+    errorBox: {
+        background:  "#4a1a1a",
+        border:      "1px solid #822",
+        borderRadius: "4px",
+        padding:     "6px 10px",
+        fontSize:    "12px",
+        color:       "#f88",
+        marginBottom: "10px",
+    },
+    msgPanel: {
+        background:  "#252525",
+        border:      "1px solid #333",
+        borderRadius: "4px",
+        padding:     "8px 10px",
+    },
+    panelLabel: {
+        fontSize:    "11px",
+        color:       "#666",
+        textTransform: "uppercase" as const,
+        letterSpacing: "0.06em",
+        marginBottom: "4px",
+        display:     "block",
+    },
+    pre: {
+        margin:      0,
+        fontSize:    "11px",
+        color:       "#b0c4de",
+        whiteSpace:  "pre-wrap" as const,
+        maxHeight:   "200px",
+        overflowY:   "auto" as const,
+    },
 } as const;

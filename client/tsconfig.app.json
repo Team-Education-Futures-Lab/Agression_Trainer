@@ -27,4 +27,5 @@
     "resolveJsonModule": true
   },
   "include": ["src"],
+  "exclude": ["src/worklets"]
 }
