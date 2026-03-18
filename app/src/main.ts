@@ -181,6 +181,13 @@ app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
     sessions.markActive(session_id);
     sessions.setCurrentClip(session_id, clip.clip_id);
 
+    sendFn({
+        type:         "clip_ready",
+        session_id,
+        next_clip_id: clip.clip_id,
+        clip_score:   0,
+    });
+
     socket.on("message", (raw: Buffer) => {
         let msg: ClientMessage;
         try {
