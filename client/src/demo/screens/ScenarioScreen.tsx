@@ -1,0 +1,113 @@
+// =============================================================================
+// ScenarioScreen
+//
+// Shown while state === "selecting". Displays all available scenarios with
+// title and description. Tapping one calls onSelect, which triggers
+// selectScenario() and starts the capture pipeline.
+// =============================================================================
+
+import type { ScenarioSummary } from "@ar-training/shared";
+
+interface ScenarioScreenProps {
+    scenarios: ScenarioSummary[];
+    onSelect:  (scenario: ScenarioSummary) => void;
+}
+
+export function ScenarioScreen({ scenarios, onSelect }: ScenarioScreenProps) {
+    return (
+        <div style={s.root}>
+            <div style={s.container}>
+                <h2 style={s.title}>Kies een scenario</h2>
+                <p style={s.subtitle}>
+                    Selecteer het scenario dat je wilt oefenen. Je kunt meerdere
+                    sessies doen om verschillende situaties te oefenen.
+                </p>
+
+                {scenarios.length === 0 ? (
+                    <p style={s.empty}>Scenario's worden geladen…</p>
+                ) : (
+                    <div style={s.list}>
+                        {scenarios.map(sc => (
+                            <button
+                                key={sc.scenario_id}
+                                style={s.card}
+                                onClick={() => onSelect(sc)}
+                            >
+                                <span style={s.cardTitle}>{sc.title}</span>
+                                <span style={s.cardDesc}>{sc.description}</span>
+                                <span style={s.cardCta}>Begin →</span>
+                            </button>
+                        ))}
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
+
+const s = {
+    root: {
+        minHeight:      "100vh",
+        display:        "flex",
+        alignItems:     "flex-start",
+        justifyContent: "center",
+        background:     "#0f172a",
+        padding:        "48px 24px",
+    },
+    container: {
+        maxWidth: "560px",
+        width:    "100%",
+    },
+    title: {
+        margin:     "0 0 10px",
+        fontSize:   "24px",
+        fontWeight: "700" as const,
+        color:      "#f1f5f9",
+    },
+    subtitle: {
+        margin:     "0 0 32px",
+        fontSize:   "15px",
+        color:      "#94a3b8",
+        lineHeight: 1.6,
+    },
+    empty: {
+        fontSize:  "14px",
+        color:     "#475569",
+        fontStyle: "italic",
+    },
+    list: {
+        display:       "flex",
+        flexDirection: "column" as const,
+        gap:           "12px",
+    },
+    card: {
+        display:       "flex",
+        flexDirection: "column" as const,
+        alignItems:    "flex-start" as const,
+        gap:           "6px",
+        width:         "100%",
+        padding:       "20px 22px",
+        background:    "#1e293b",
+        border:        "1px solid #334155",
+        borderRadius:  "10px",
+        cursor:        "pointer",
+        textAlign:     "left" as const,
+        transition:    "border-color 0.15s",
+    },
+    cardTitle: {
+        fontSize:   "16px",
+        fontWeight: "600" as const,
+        color:      "#f1f5f9",
+    },
+    cardDesc: {
+        fontSize:   "13px",
+        color:      "#94a3b8",
+        lineHeight: 1.5,
+    },
+    cardCta: {
+        marginTop:  "6px",
+        fontSize:   "13px",
+        fontWeight: "600" as const,
+        color:      "#6366f1",
+    },
+} as const;

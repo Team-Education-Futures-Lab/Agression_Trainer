@@ -9,14 +9,15 @@
 // State machine (client-side view):
 //
 //   idle
-//     → connecting   connect() called, POST /session/create succeeded
-//     → queued       server responded state=queued, polling starts
-//     → connecting   poll returned state=active, opening WebSocket
-//     → active       WebSocket open, frame/audio loops running
-//     → paused       sendClipEnded() called, loops stopped, awaiting ClipReady
-//     → active       ClipReady received with non-null next_clip_id
-//     → completed    ClipReady received with null next_clip_id
-//     → dropped      WebSocket closed unexpectedly
+//     → connecting   connect() called, POST /session/create in-flight
+//     → queued       server responded state=queued; WS opened, waiting session_ready
+//     → connecting   session_ready received
+//     → selecting    scenarios_list received; waiting for selectScenario()
+//     → active       selectScenario() called → request_clip sent → clip_data received
+//     → paused       sendClipEnded() called, loops stopped, awaiting clip_selected
+//     → active       clip_selected received with non-null clip_id
+//     → completed    clip_selected received with null clip_id
+//     → dropped      WebSocket closed unexpectedly while connecting/selecting/active/paused
 //     → error        unrecoverable (503, resume 404, etc.)
 //   any → idle       disconnect() called
 // =============================================================================
@@ -26,6 +27,7 @@ import type {
     ServerMessage,
     VideoFrame,
     AudioChunk,
+    ClipData,
 } from "@ar-training/shared";
 import type { CaptureSession } from "./capture.ts";
 import { WebSocketTransport } from "./transport.ts";
@@ -33,21 +35,19 @@ import type { TransportInterface } from "./transport.ts";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-const QUEUE_POLL_INTERVAL_MS = 5000;
-
 const HTTP_BASE = import.meta.env["VITE_APP_HTTP_URL"] as string | undefined
     ?? "http://localhost:3001";
-const WS_BASE   = import.meta.env["VITE_APP_WS_URL"] as string | undefined
+const WS_BASE = import.meta.env["VITE_APP_WS_URL"] as string | undefined
     ?? "ws://localhost:3001";
-const SCENARIO_ID = import.meta.env["VITE_SCENARIO_ID"] as string | undefined
-    ?? "scenario_01";
 
 // ─── Callbacks ────────────────────────────────────────────────────────────────
 
 export interface SessionHandlerCallbacks {
-    onStateChange: (state: SessionState) => void;
-    onMessage:     (msg: ServerMessage)  => void;
-    onError:       (err: Error)          => void;
+    onStateChange:        (state: SessionState) => void;
+    onMessage:            (msg: ServerMessage)  => void;
+    onError:              (err: Error)          => void;
+    /** Called only when clip_data arrives for an activating request_clip. */
+    onActivatingClipData: (msg: ClipData)       => void;
 }
 
 // ─── SessionHandler ───────────────────────────────────────────────────────────
@@ -58,13 +58,12 @@ export class SessionHandler {
 
     private _state: SessionState = "idle";
 
-    private sessionId:  string | null = null;
-    private transport:  TransportInterface | null = null;
-    private pollTimer:  ReturnType<typeof setInterval> | null = null;
+    private sessionId: string | null = null;
+    private transport: TransportInterface | null = null;
 
     // Per-clip counters — reset when a new clip begins
-    private frameId = 0;
-    private chunkId = 0;
+    private frameId       = 0;
+    private chunkId       = 0;
     private clipStartTime = 0;
 
     // Loop cancellation — set to true to stop the running loops
@@ -82,9 +81,10 @@ export class SessionHandler {
 
     /**
      * Create a session and open the WebSocket. If the server is at capacity
-     * the handler enters the queued state and polls until a slot is available.
+     * the handler enters the queued state and waits for session_ready over the
+     * WebSocket rather than polling.
      */
-    async connect(userId = "dev-user", scenarioId = SCENARIO_ID, language = "nl"): Promise<void> {
+    async connect(userId = "dev-user", language = "nl"): Promise<void> {
         if (this._state !== "idle") return;
 
         this._setState("connecting");
@@ -92,12 +92,13 @@ export class SessionHandler {
         let sessionId: string;
         let initialState: "active" | "queued";
         let queuePosition: number | undefined;
+        let wsPath: string;
 
         try {
             const res = await fetch(`${HTTP_BASE}/session/create`, {
                 method:  "POST",
                 headers: { "Content-Type": "application/json" },
-                body:    JSON.stringify({ user_id: userId, scenario_id: scenarioId, language }),
+                body:    JSON.stringify({ user_id: userId, language }),
             });
 
             if (res.status === 503) {
@@ -112,12 +113,14 @@ export class SessionHandler {
             }
 
             const body = await res.json() as {
-                session_id: string;
-                state: "active" | "queued";
+                session_id:     string;
+                state:          "active" | "queued";
+                ws_path:        string;
                 queue_position?: number;
             };
             sessionId     = body.session_id;
             initialState  = body.state;
+            wsPath        = body.ws_path;
             queuePosition = body.queue_position;
         } catch (e) {
             this._setState("error");
@@ -127,26 +130,54 @@ export class SessionHandler {
 
         this.sessionId = sessionId;
 
+        // Open the WebSocket immediately regardless of active/queued state.
+        // For queued sessions we wait for session_ready before proceeding.
         if (initialState === "queued") {
             this._setState("queued");
-            // Fire an initial onMessage so the UI has the queue position immediately.
+            // Emit an initial session_update so the UI has the queue position.
             this.callbacks.onMessage({
                 type:           "session_update",
                 session_id:     sessionId,
                 transcript:     "",
                 queue_position: queuePosition ?? null,
             });
-            this._startQueuePolling();
-            return;
         }
 
-        await this._openWebSocket();
+        await this._openWebSocket(wsPath);
+    }
+
+    /**
+     * Request scenarios from the server. Sent automatically after the
+     * WebSocket is open and the session is active (or promoted from queued).
+     * Exposed publicly so the debug harness can re-request at any time.
+     */
+    requestScenarios(): void {
+        if (!this.transport || !this.sessionId) return;
+        this.transport.send({ type: "get_scenarios", session_id: this.sessionId });
+    }
+
+    /**
+     * Select a scenario and activate its entry clip. Starts the capture loops.
+     * The session transitions from selecting → active once clip_data is received.
+     */
+    selectScenario(scenarioId: string, entryClipId: string): void {
+        if (this._state !== "selecting" || !this.transport || !this.sessionId) return;
+        this._requestClip(scenarioId, entryClipId, true);
+    }
+
+    /**
+     * Request clip data without activating it (preload only). Valid at any
+     * point after the WebSocket is open. Does not change session state.
+     */
+    preloadClip(scenarioId: string, clipId: string): void {
+        if (!this.transport || !this.sessionId) return;
+        this._requestClip(scenarioId, clipId, false);
     }
 
     /**
      * Signal that the current clip has finished playing. Stops the frame and
      * audio loops and sends a ClipEnded message. The handler enters paused
-     * state and waits for ClipReady.
+     * state and waits for clip_selected.
      */
     sendClipEnded(clipId: string): void {
         if (this._state !== "active" || !this.transport || !this.sessionId) return;
@@ -166,27 +197,23 @@ export class SessionHandler {
      * WebSocket, and returns to idle.
      */
     disconnect(): void {
-        this._stopQueuePolling();
         this.loopsCancelled = true;
 
         if (this.sessionId) {
-            // Fire-and-forget — we don't await this
             void fetch(`${HTTP_BASE}/session/${this.sessionId}/end`, { method: "POST" })
                 .catch(() => undefined);
         }
 
         this.transport?.close();
-        this.transport = null;
-        this.sessionId = null;
+        this.transport  = null;
+        this.sessionId  = null;
         this._setState("idle");
     }
 
     // ─── WebSocket ────────────────────────────────────────────────────────────
 
-    private async _openWebSocket(): Promise<void> {
-        this._setState("connecting");
-
-        const url = `${WS_BASE}/ws/${this.sessionId!}`;
+    private async _openWebSocket(wsPath: string): Promise<void> {
+        const url = `${WS_BASE}${wsPath}`;
         let transport: WebSocketTransport;
 
         try {
@@ -202,54 +229,106 @@ export class SessionHandler {
         transport.onError   = (err)   => { this.callbacks.onError(err); };
 
         this.transport = transport;
-        this._startClip();
+
+        // If we are already in the active state (non-queued session), request
+        // scenarios immediately. If queued, wait for session_ready.
+        if (this._state === "connecting") {
+            this._setState("connecting"); // already set, but be explicit
+            this.requestScenarios();
+        }
+        // state === "queued" → do nothing here; session_ready fires requestScenarios
     }
 
     private _handleServerMessage(msg: ServerMessage): void {
         this.callbacks.onMessage(msg);
 
         switch (msg.type) {
-            case "clip_ready":
-                if (msg.next_clip_id !== null) {
-                    // Reset per-clip counters and restart loops for the next clip.
+            case "session_ready":
+                // Queued session promoted — request scenarios and proceed.
+                this._setState("connecting");
+                this.requestScenarios();
+                break;
+
+            case "scenarios_list":
+                // Scenarios received — client can now pick one.
+                this._setState("selecting");
+                break;
+
+            case "clip_data":
+                // clip_data is forwarded via onMessage above.
+                // If this is an activating clip_data (activate=true path), start loops.
+                // We detect this by checking whether we are in the selecting or paused
+                // state; preload-only clip_data arrives while active/paused and should
+                // not start loops.
+                if (this._state === "selecting" || this._state === "connecting") {
                     this._startClip();
+                }
+                break;
+
+            case "clip_candidates":
+                // Forwarded to onMessage above. No state transition — evaluation is
+                // running in the background. Callers use this to preload candidates.
+                break;
+
+            case "clip_selected":
+                if (msg.clip_id !== null) {
+                    // Evaluation complete — request and activate the selected clip.
+                    // clip_data will arrive and _startClip() will be called from there.
+                    if (this.sessionId) {
+                        // We need the scenario_id; it was set when selectScenario() was
+                        // called and we can retrieve it from the last clip_data received.
+                        // We store it on the instance at selectScenario() time.
+                        this._requestClip(this._activeScenarioId!, msg.clip_id, true);
+                    }
                 } else {
-                    // Terminal clip — wait for FeedbackToken / SessionComplete.
+                    // Terminal clip — session is complete, waiting for feedback.
                     this._setState("completed");
                 }
                 break;
 
             case "session_complete":
-                // Feedback generation finished — close cleanly.
-                this.transport?.close();
-                this.transport = null;
-                this.sessionId = null;
-                this._setState("idle");
+                // Feedback done — leave in completed state; caller calls disconnect().
                 break;
 
             case "error":
+                // feedback_unavailable is not fatal — session is complete otherwise.
+                if (msg.code === "feedback_unavailable") break;
                 this.callbacks.onError(new Error(`[${msg.code}] ${msg.message}`));
                 break;
-
-            // session_update and feedback_token are forwarded to onMessage above
-            // and require no state transitions here.
         }
     }
 
     private _handleClose(clean: boolean): void {
-        if (clean) return; // intentional close — state already set by disconnect()
+        if (clean) return;
         if (this._state === "completed" || this._state === "idle") return;
         this.loopsCancelled = true;
         this._setState("dropped");
+    }
+
+    // ─── Clip helpers ─────────────────────────────────────────────────────────
+
+    /** Scenario ID for the active session — set by selectScenario(). */
+    private _activeScenarioId: string | null = null;
+
+    private _requestClip(scenarioId: string, clipId: string, activate: boolean): void {
+        if (!this.transport || !this.sessionId) return;
+        if (activate) this._activeScenarioId = scenarioId;
+        this.transport.send({
+            type:        "request_clip",
+            session_id:  this.sessionId,
+            scenario_id: scenarioId,
+            clip_id:     clipId,
+            activate,
+        });
     }
 
     // ─── Clip lifecycle ───────────────────────────────────────────────────────
 
     /** Reset per-clip state and start sending frames and audio. */
     private _startClip(): void {
-        this.frameId       = 0;
-        this.chunkId       = 0;
-        this.clipStartTime = performance.now();
+        this.frameId        = 0;
+        this.chunkId        = 0;
+        this.clipStartTime  = performance.now();
         this.loopsCancelled = false;
 
         this._setState("active");
@@ -313,57 +392,6 @@ export class SessionHandler {
                 }
             }
         })();
-    }
-
-    // ─── Queue polling ────────────────────────────────────────────────────────
-
-    private _startQueuePolling(): void {
-        this.pollTimer = setInterval(() => { void this._pollQueue(); }, QUEUE_POLL_INTERVAL_MS);
-    }
-
-    private _stopQueuePolling(): void {
-        if (this.pollTimer !== null) {
-            clearInterval(this.pollTimer);
-            this.pollTimer = null;
-        }
-    }
-
-    private async _pollQueue(): Promise<void> {
-        if (!this.sessionId) return;
-
-        try {
-            const res = await fetch(`${HTTP_BASE}/session/${this.sessionId}/queue`);
-            if (!res.ok) {
-                this._stopQueuePolling();
-                this._setState("error");
-                this.callbacks.onError(new Error(`Queue poll failed: ${res.status}`));
-                return;
-            }
-
-            const body = await res.json() as {
-                state: "queued" | "active";
-                queue_position: number | null;
-            };
-
-            if (body.state === "queued") {
-                // Still waiting — update the UI with the latest position.
-                this.callbacks.onMessage({
-                    type:           "session_update",
-                    session_id:     this.sessionId,
-                    transcript:     "",
-                    queue_position: body.queue_position,
-                });
-                return;
-            }
-
-            // Slot became available.
-            this._stopQueuePolling();
-            await this._openWebSocket();
-        } catch (e) {
-            this._stopQueuePolling();
-            this._setState("error");
-            this.callbacks.onError(new Error(`Queue poll error: ${String(e)}`));
-        }
     }
 
     // ─── State ────────────────────────────────────────────────────────────────

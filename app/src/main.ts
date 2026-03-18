@@ -22,7 +22,7 @@ const feedback      = new FeedbackClient(config.feedbackUrl, config.internalApiK
 const controller    = new ClipController(sessions, coord, scenarios, feedback);
 
 await app.register(websocketPlugin);
-await app.register(cors, {origin: true});
+await app.register(cors, { origin: true });
 
 // ─── Health ───────────────────────────────────────────────────────────────────
 
@@ -48,9 +48,9 @@ app.get("/health", async (_req, reply) => {
             instances[urls[i]] = ok ? "ok" : "unreachable";
             if (ok) okCount++;
         }
-        const status =  okCount === urls.length ?   "ok"
-                :       okCount === 0           ?   "critical"
-                :                                   "degraded";
+        const status = okCount === urls.length ? "ok"
+            : okCount === 0           ? "critical"
+                :                           "degraded";
         return { status, instances, okCount };
     }
 
@@ -63,7 +63,7 @@ app.get("/health", async (_req, reply) => {
 
     const overallStatus =
         eval_.status === "critical" || trans.status === "critical" ? "critical"
-                : eval_.status === "degraded" || trans.status === "degraded" || feedStatus === "unreachable" ? "degraded"
+            : eval_.status === "degraded" || trans.status === "degraded" || feedStatus === "unreachable" ? "degraded"
                 : "ok";
 
     return reply
@@ -81,8 +81,15 @@ app.get("/health", async (_req, reply) => {
 // ─── Session routes ───────────────────────────────────────────────────────────
 
 app.post<{ Body: CreateSessionRequest }>("/session/create", async (req, reply) => {
-    const { user_id, scenario_id, language } = req.body;
-    const result = sessions.createSession(user_id, scenario_id, language);
+    const { user_id, language } = req.body;
+
+    // Admin mode: check for a valid ADMIN_API_KEY in the Authorization header.
+    // Bearer token extraction — header is "Bearer <token>" or absent.
+    const authHeader = req.headers["authorization"] ?? "";
+    const token      = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
+    const isAdmin    = sessions.isAdminToken(token);
+
+    const result = sessions.createSession(user_id, language, isAdmin);
 
     if (result.status === "at_capacity") {
         return reply.code(503).send({ error: "at_capacity", message: "Server is at capacity." });
@@ -91,14 +98,14 @@ app.post<{ Body: CreateSessionRequest }>("/session/create", async (req, reply) =
         return reply.code(200).send({
             session_id:     result.context.session_id,
             state:          "queued",
+            ws_path:        `/ws/${result.context.session_id}`,
             queue_position: result.queue_position,
         });
     }
     return reply.code(200).send({
-        session_id:  result.context.session_id,
-        state:       "active",
-        scenario_id: result.context.scenario_id,
-        language:    result.context.language,
+        session_id: result.context.session_id,
+        state:      "active",
+        ws_path:    `/ws/${result.context.session_id}`,
     });
 });
 
@@ -114,6 +121,7 @@ app.post<{ Params: { session_id: string } }>("/session/:session_id/resume", asyn
         scenario_id:     ctx.scenario_id,
         current_clip_id: ctx.current_clip_id,
         turn_count:      ctx.turn_count,
+        ws_path:         `/ws/${ctx.session_id}`,
     });
 });
 
@@ -153,40 +161,32 @@ app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
     const { session_id } = req.params as { session_id: string };
     const ctx = sessions.getSession(session_id);
 
-    if (!ctx || ctx.state !== "CONNECTING") {
+    if (!ctx || (ctx.state !== "CONNECTING" && ctx.state !== "QUEUED")) {
         socket.send(JSON.stringify({
             type: "error", session_id,
             code: "session_not_found",
-            message: "Session not found or not in CONNECTING state.",
-        }));
-        socket.close();
-        return;
-    }
-
-    const entryClipId = ctx.current_clip_id ?? scenarios.getEntryClip(ctx.scenario_id);
-    const clip        = entryClipId ? scenarios.getClip(ctx.scenario_id, entryClipId) : null;
-
-    if (!clip) {
-        socket.send(JSON.stringify({
-            type: "error", session_id,
-            code: "scenario_not_found",
-            message: `No entry clip found for scenario ${ctx.scenario_id}.`,
+            message: "Session not found or not in a connectable state.",
         }));
         socket.close();
         return;
     }
 
     const sendFn = (msg: object) => socket.send(JSON.stringify(msg));
-    coord.registerSession(session_id, clip, sendFn);
-    sessions.markActive(session_id);
-    sessions.setCurrentClip(session_id, clip.clip_id);
 
-    sendFn({
-        type:         "clip_ready",
-        session_id,
-        next_clip_id: clip.clip_id,
-        clip_score:   0,
-    });
+    // If the session is queued, the socket is open but we wait for a slot.
+    // session_ready is sent when the session is promoted (see promoteNext in
+    // SessionManager — it transitions to CONNECTING, and the timer is running;
+    // the client must then send request_clip { activate: true } to go ACTIVE).
+    //
+    // We notify the client immediately if they're already active/connecting,
+    // and wire up the queue promotion callback if queued.
+    if (ctx.state === "QUEUED") {
+        // Attach the send function so SessionManager can push session_ready
+        // when the slot becomes available.
+        sessions.setQueuedSocket(session_id, () =>
+            sendFn({ type: "session_ready", session_id })
+        );
+    }
 
     socket.on("message", (raw: Buffer) => {
         let msg: ClientMessage;
@@ -197,31 +197,112 @@ app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
             return;
         }
 
+        if (msg.type === "get_scenarios") {
+            sendFn({
+                type:      "scenarios_list",
+                session_id,
+                scenarios: scenarios.listScenarios(),
+            });
+            return;
+        }
+
+        if (msg.type === "request_clip") {
+            handleRequestClip(msg.scenario_id, msg.clip_id, msg.activate, sendFn);
+            return;
+        }
+
         if (msg.type === "video_frame") {
             coord.onFrame(msg);
-        } else if (msg.type === "audio_chunk") {
+            return;
+        }
+
+        if (msg.type === "audio_chunk") {
             coord.onAudio(msg);
-        } else if (msg.type === "clip_ended") {
+            return;
+        }
+
+        if (msg.type === "clip_ended") {
             controller.handleClipEnded(msg, sendFn).catch(err =>
                 app.log.error({ err, session_id }, "clip_ended handling failed")
             );
-        } else {
-            app.log.warn({ session_id }, "Unknown WebSocket message type");
+            return;
         }
+
+        app.log.warn({ session_id }, "Unknown WebSocket message type");
     });
 
     socket.on("close", () => {
-        const ctx = sessions.getSession(session_id);
-        // Only treat as a drop if the session is still actively running.
-        // COMPLETED sessions close cleanly after SessionComplete is sent —
-        // that's not a drop, and calling markDropped would corrupt the state
-        // machine and double-release the capacity slot.
-        if (ctx && (ctx.state === "ACTIVE" || ctx.state === "PAUSED")) {
+        const current = sessions.getSession(session_id);
+        if (current && (current.state === "ACTIVE" || current.state === "PAUSED")) {
             coord.deregisterSession(session_id);
             sessions.markDropped(session_id);
         }
-        // COMPLETED, CONNECTING, DROPPED, EXPIRED — do nothing.
+        // COMPLETED, CONNECTING, QUEUED, DROPPED, EXPIRED — do nothing.
     });
+
+    // ── request_clip handler (closure over session_id and socket context) ─────
+
+    function handleRequestClip(
+        scenarioId: string,
+        clipId:     string,
+        activate:   boolean,
+        send:       (msg: object) => void,
+    ): void {
+        const current = sessions.getSession(session_id);
+        if (!current) return;
+
+        const clip = scenarios.getClip(scenarioId, clipId);
+        if (!clip) {
+            send({ type: "error", session_id, code: "clip_not_found",
+                message: `Clip "${clipId}" not found in scenario "${scenarioId}".` });
+            return;
+        }
+
+        if (activate) {
+            // Validate: only permitted from CONNECTING state (first activation)
+            // or on a resumed session that already has a scenario bound.
+            if (current.state === "ACTIVE" || current.state === "PAUSED") {
+                // Already active — clip advancement is driven by clip_ended/clip_selected,
+                // not by further activate calls.
+                send({ type: "error", session_id, code: "activate_not_permitted",
+                    message: "Session is already active. Use clip_ended to advance clips." });
+                return;
+            }
+
+            if (current.state === "CONNECTING") {
+                const entryClip = scenarios.getEntryClip(scenarioId);
+                const isResumed = current.scenario_id !== null;
+
+                // Normal mode: must activate the entry clip on a fresh session.
+                // Admin mode or resumed session: any clip is valid.
+                if (!isResumed && !current.is_admin && clipId !== entryClip) {
+                    send({ type: "error", session_id, code: "activate_not_permitted",
+                        message: `Only the entry clip ("${entryClip}") may be activated to start a session.` });
+                    return;
+                }
+
+                // Bind scenario (no-op if already bound from a previous session).
+                sessions.setScenario(session_id, scenarioId);
+                sessions.setCurrentClip(session_id, clipId);
+
+                // Register with coordinator and transition to ACTIVE.
+                coord.registerSession(session_id, clip, (m) => send(m));
+                sessions.markActive(session_id);
+            }
+        }
+
+        // Send clip_data regardless of activate — always a data response.
+        send({
+            type:             "clip_data",
+            session_id,
+            clip_id:          clip.clip_id,
+            scenario_id:      clip.scenario_id,
+            video_url:        clip.video_url,
+            transcript:       clip.transcript,
+            notable_features: clip.notable_features,
+            branch_conditions: clip.branch_conditions,
+        });
+    }
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────

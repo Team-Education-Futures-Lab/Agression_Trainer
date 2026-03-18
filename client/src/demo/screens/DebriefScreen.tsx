@@ -1,16 +1,39 @@
 import type { SessionComplete } from "@ar-training/shared";
 
 interface DebriefScreenProps {
-    streamedAdvice:  string;          // tokens accumulated so far
-    finalMessage:    SessionComplete | null;
-    onRestart:       () => void;
+    streamedAdvice:      string;
+    finalMessage:        SessionComplete | null;
+    feedbackUnavailable: boolean;
+    onRestart:           () => void;
 }
 
-export function DebriefScreen({ streamedAdvice, finalMessage, onRestart }: DebriefScreenProps) {
-    const complete  = finalMessage !== null;
-    const advice    = complete ? finalMessage.advice : streamedAdvice;
-    const severity  = finalMessage?.severity;
+export function DebriefScreen({
+                                  streamedAdvice, finalMessage, feedbackUnavailable, onRestart,
+                              }: DebriefScreenProps) {
+    const complete   = finalMessage !== null;
+    const advice     = complete ? finalMessage.advice : streamedAdvice;
+    const severity   = finalMessage?.severity;
     const highlights = finalMessage?.highlights ?? [];
+
+    if (feedbackUnavailable) {
+        return (
+            <div style={s.root}>
+                <div style={s.card}>
+                    <h2 style={s.title}>Sessie afgerond</h2>
+                    <div style={s.errorBox}>
+                        <p style={s.errorText}>
+                            De feedbackservice is momenteel niet beschikbaar. Je sessie is
+                            succesvol afgerond, maar er kan nu geen persoonlijke terugkoppeling
+                            worden gegenereerd. Probeer het later opnieuw.
+                        </p>
+                    </div>
+                    <button style={s.btn} onClick={onRestart}>
+                        Nieuwe sessie starten
+                    </button>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div style={s.root}>
@@ -90,10 +113,10 @@ const s = {
         color:      "#f1f5f9",
     },
     badge: {
-        padding:      "3px 10px",
-        borderRadius: "999px",
-        fontSize:     "12px",
-        fontWeight:   "600" as const,
+        padding:       "3px 10px",
+        borderRadius:  "999px",
+        fontSize:      "12px",
+        fontWeight:    "600" as const,
         textTransform: "uppercase" as const,
         letterSpacing: "0.05em",
     },
@@ -130,14 +153,27 @@ const s = {
         letterSpacing: "0.08em",
     },
     highlightsList: {
-        margin:    0,
-        padding:   "0 0 0 16px",
+        margin:  0,
+        padding: "0 0 0 16px",
     },
     highlightItem: {
         fontSize:     "13px",
         color:        "#94a3b8",
         lineHeight:   1.6,
         marginBottom: "4px",
+    },
+    errorBox: {
+        background:   "#1c1019",
+        border:       "1px solid #7f1d1d",
+        borderRadius: "8px",
+        padding:      "16px 18px",
+        marginBottom: "20px",
+    },
+    errorText: {
+        margin:     0,
+        fontSize:   "14px",
+        color:      "#fca5a5",
+        lineHeight: 1.6,
     },
     btn: {
         width:        "100%",

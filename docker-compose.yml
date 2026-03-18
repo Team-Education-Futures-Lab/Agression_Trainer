@@ -5,6 +5,10 @@ services:
     build:
       context: .
       dockerfile: client/Dockerfile
+    volumes:
+      # Mount the scenarios directory so Nginx can serve video files at
+      # /scenarios/{scenario_id}/{file}. Read-only — the client never writes.
+      - ./scenarios:/usr/share/nginx/html/scenarios:ro
     ports:
       - "3000:80"
     restart: unless-stopped

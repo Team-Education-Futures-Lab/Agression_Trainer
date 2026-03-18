@@ -1,12 +1,35 @@
+// =============================================================================
+// PlayerScreen
+//
+// Full-page layout during an active clip. Left column: scenario video area +
+// clip context (transcript, notable features). Right column: live webcam.
+// =============================================================================
+
 import { useState } from "react";
+import type { ClipMetadata } from "@ar-training/shared";
 
 interface PlayerScreenProps {
-    videoRef:       React.RefObject<HTMLVideoElement | null>;
-    currentClipId:  string;
-    onClipEnded:    (clipId: string) => void;
+    videoRef:      React.RefObject<HTMLVideoElement | null>;
+    currentClipId: string;
+    clipMeta:      ClipMetadata | null;
+    onClipEnded:   (clipId: string) => void;
 }
 
-export function PlayerScreen({ videoRef, currentClipId, onClipEnded }: PlayerScreenProps) {
+// Human-readable labels for notable_features values
+const FEATURE_LABELS: Record<string, string> = {
+    raised_voice:       "Luide stem",
+    calm_voice:         "Rustige stem",
+    aggressive_posture: "Agressieve houding",
+    open_posture:       "Open houding",
+    crossed_arms:       "Gekruiste armen",
+    direct_eye_contact: "Oogcontact",
+    crying:             "Emotioneel",
+    pointing_gesture:   "Wijzend gebaar",
+    backing_away:       "Achteruit lopen",
+    silence:            "Stilte",
+};
+
+export function PlayerScreen({ videoRef, currentClipId, clipMeta, onClipEnded }: PlayerScreenProps) {
     const [confirmed, setConfirmed] = useState(false);
 
     const handleDone = () => {
@@ -16,29 +39,52 @@ export function PlayerScreen({ videoRef, currentClipId, onClipEnded }: PlayerScr
 
     return (
         <div style={s.root}>
-            {/* Scenario video placeholder — real video playback is out of scope
-                for the demo harness; the clip ID is shown instead. */}
-            <div style={s.videoArea}>
+
+            {/* ── Left column ─────────────────────────────────────────── */}
+            <div style={s.left}>
+
+                {/* Video placeholder — fills the left column */}
                 <div style={s.videoPlaceholder}>
-                    <span style={s.clipLabel}>Scenario clip</span>
-                    <span style={s.clipId}>{currentClipId}</span>
-                    <span style={s.videoHint}>Video playback komt hier</span>
+                    <span style={s.videoPlaceholderLabel}>Scenario video</span>
+                    <span style={s.videoPlaceholderSub}>{currentClipId}</span>
                 </div>
+
+                {/* Clip transcript */}
+                {clipMeta?.transcript && (
+                    <div style={s.transcriptBox}>
+                        <span style={s.sectionLabel}>Wat de ander zegt</span>
+                        <p style={s.transcriptText}>"{clipMeta.transcript}"</p>
+                    </div>
+                )}
+
+                {/* Notable features */}
+                {clipMeta && clipMeta.notable_features.length > 0 && (
+                    <div style={s.featuresBox}>
+                        <span style={s.sectionLabel}>Gedragskenmerken</span>
+                        <div style={s.featureTags}>
+                            {clipMeta.notable_features.map(f => (
+                                <span key={f} style={s.tag}>
+                                    {FEATURE_LABELS[f] ?? f}
+                                </span>
+                            ))}
+                        </div>
+                    </div>
+                )}
             </div>
 
-            {/* Webcam inset */}
-            <div style={s.webcamWrap}>
-                <video
-                    ref={videoRef}
-                    muted
-                    playsInline
-                    style={s.webcam}
-                />
-                <div style={s.webcamLabel}>Jouw reactie</div>
-            </div>
+            {/* ── Right column ────────────────────────────────────────── */}
+            <div style={s.right}>
+                <div style={s.webcamCard}>
+                    <span style={s.sectionLabel}>Jouw reactie</span>
+                    {/* The persistent video element — srcObject already bound */}
+                    <video
+                        ref={videoRef}
+                        muted
+                        playsInline
+                        style={s.webcam}
+                    />
+                </div>
 
-            {/* Done button */}
-            <div style={s.controls}>
                 <button
                     style={{ ...s.btn, ...(confirmed ? s.btnDone : {}) }}
                     disabled={confirmed}
@@ -46,6 +92,11 @@ export function PlayerScreen({ videoRef, currentClipId, onClipEnded }: PlayerScr
                 >
                     {confirmed ? "Verwerken…" : "Klaar met reageren"}
                 </button>
+
+                <p style={s.hint}>
+                    Reageer op de situatie zoals je dat in de klas zou doen.
+                    Druk op de knop als je klaar bent.
+                </p>
             </div>
         </div>
     );
@@ -53,18 +104,19 @@ export function PlayerScreen({ videoRef, currentClipId, onClipEnded }: PlayerScr
 
 const s = {
     root: {
-        minHeight:      "100vh",
+        minHeight:   "100vh",
+        display:     "grid",
+        gridTemplateColumns: "1fr 340px",
+        gap:         "0",
+        background:  "#0f172a",
+    },
+    left: {
         display:        "flex",
         flexDirection:  "column" as const,
-        alignItems:     "center",
-        justifyContent: "center",
-        gap:            "24px",
-        background:     "#0f172a",
+        gap:            "16px",
         padding:        "24px",
-    },
-    videoArea: {
-        width:     "100%",
-        maxWidth:  "720px",
+        borderRight:    "1px solid #1e293b",
+        overflowY:      "auto" as const,
     },
     videoPlaceholder: {
         width:          "100%",
@@ -76,27 +128,62 @@ const s = {
         flexDirection:  "column" as const,
         alignItems:     "center",
         justifyContent: "center",
-        gap:            "8px",
+        gap:            "6px",
+        flexShrink:     0,
     },
-    clipLabel: {
-        fontSize:  "11px",
-        color:     "#475569",
+    videoPlaceholderLabel: {
+        fontSize:      "12px",
+        color:         "#475569",
         textTransform: "uppercase" as const,
-        letterSpacing: "0.1em",
+        letterSpacing: "0.08em",
     },
-    clipId: {
-        fontSize:   "18px",
-        fontWeight: "600" as const,
-        color:      "#94a3b8",
+    videoPlaceholderSub: {
+        fontSize:   "14px",
+        color:      "#64748b",
         fontFamily: "monospace",
     },
-    videoHint: {
-        fontSize: "12px",
-        color:    "#334155",
+    transcriptBox: {
+        background:   "#1e293b",
+        borderRadius: "8px",
+        padding:      "14px 16px",
+        borderLeft:   "3px solid #6366f1",
     },
-    webcamWrap: {
-        position: "relative" as const,
-        width:    "200px",
+    transcriptText: {
+        margin:     "6px 0 0",
+        fontSize:   "15px",
+        color:      "#cbd5e1",
+        lineHeight: 1.6,
+        fontStyle:  "italic",
+    },
+    featuresBox: {
+        background:   "#1e293b",
+        borderRadius: "8px",
+        padding:      "14px 16px",
+    },
+    featureTags: {
+        display:   "flex",
+        flexWrap:  "wrap" as const,
+        gap:       "6px",
+        marginTop: "8px",
+    },
+    tag: {
+        padding:      "3px 10px",
+        borderRadius: "999px",
+        fontSize:     "12px",
+        background:   "#334155",
+        color:        "#94a3b8",
+        border:       "1px solid #475569",
+    },
+    right: {
+        display:       "flex",
+        flexDirection: "column" as const,
+        gap:           "16px",
+        padding:       "24px",
+    },
+    webcamCard: {
+        display:       "flex",
+        flexDirection: "column" as const,
+        gap:           "8px",
     },
     webcam: {
         width:        "100%",
@@ -104,27 +191,22 @@ const s = {
         objectFit:    "cover" as const,
         borderRadius: "8px",
         display:      "block",
-        background:   "#0f172a",
+        background:   "#0c1221",
         border:       "1px solid #334155",
+        transform:    "scaleX(-1)", // mirror — feels more natural for self-view
     },
-    webcamLabel: {
-        position:   "absolute" as const,
-        bottom:     "6px",
-        left:       "8px",
-        fontSize:   "10px",
-        color:      "#94a3b8",
-        background: "rgba(0,0,0,0.5)",
-        padding:    "2px 6px",
-        borderRadius: "4px",
-    },
-    controls: {
-        width:    "100%",
-        maxWidth: "720px",
+    sectionLabel: {
+        display:       "block",
+        fontSize:      "10px",
+        color:         "#475569",
+        textTransform: "uppercase" as const,
+        letterSpacing: "0.1em",
+        marginBottom:  "2px",
     },
     btn: {
         width:        "100%",
         padding:      "14px",
-        fontSize:     "16px",
+        fontSize:     "15px",
         fontWeight:   "600" as const,
         background:   "#6366f1",
         color:        "#fff",
@@ -136,5 +218,11 @@ const s = {
         background: "#1e293b",
         color:      "#475569",
         cursor:     "not-allowed",
+    },
+    hint: {
+        margin:     0,
+        fontSize:   "12px",
+        color:      "#475569",
+        lineHeight: 1.5,
     },
 } as const;

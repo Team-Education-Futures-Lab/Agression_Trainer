@@ -19,6 +19,7 @@ export class SessionManager {
     private readonly sessions: Map<string, SessionContext> = new Map();
     private readonly timers: Map<string, NodeJS.Timeout> = new Map();
     private readonly queue: string[] = [];
+    private readonly promotionCallbacks: Map<string, () => void> = new Map();
     private activeSlots = 0;
 
     constructor(config: SessionManagerConfig) {
@@ -27,9 +28,9 @@ export class SessionManager {
 
     // ── Public API ────────────────────────────────────────────────────────────
 
-    createSession(userId: string, scenarioId: string, language: string): CreateSessionResult {
+    createSession(userId: string, language: string, isAdmin: boolean): CreateSessionResult {
         if (this.activeSlots < this.config.maxSessions) {
-            const ctx = this.makeContext(userId, scenarioId, language, "CONNECTING");
+            const ctx = this.makeContext(userId, language, "CONNECTING", isAdmin);
             this.sessions.set(ctx.session_id, ctx);
             this.activeSlots++;
             this.startConnectionTimer(ctx.session_id);
@@ -45,7 +46,7 @@ export class SessionManager {
         }
 
         const pos = this.queue.length + 1;
-        const ctx = this.makeContext(userId, scenarioId, language, "QUEUED", pos);
+        const ctx = this.makeContext(userId, language, "QUEUED", isAdmin, pos);
         this.sessions.set(ctx.session_id, ctx);
         this.queue.push(ctx.session_id);
         return { status: "queued", context: ctx, queue_position: pos};
@@ -104,6 +105,17 @@ export class SessionManager {
         this.startRecoveryTimer(sessionId);
     }
 
+    /**
+     * Binds a scenario to the session. Called when the first request_clip
+     * { activate: true } is received. No-op if the scenario is already set
+     * (guards against duplicate calls during a resumed session).
+     */
+    setScenario(sessionId: string, scenarioId: string): void {
+        const ctx = this.sessions.get(sessionId);
+        if (!ctx || ctx.scenario_id !== null) return;
+        ctx.scenario_id = scenarioId;
+    }
+
     setCurrentClip(sessionId: string, clipId: string): void {
         const ctx = this.sessions.get(sessionId);
         if (!ctx) return;
@@ -119,7 +131,7 @@ export class SessionManager {
 
     buildFeedbackRequest(sessionId: string): FeedbackRequest | null {
         const ctx = this.sessions.get(sessionId);
-        if (!ctx) return null;
+        if (!ctx || !ctx.scenario_id) return null;
         return {
             session_id:  ctx.session_id,
             scenario_id: ctx.scenario_id,
@@ -127,26 +139,47 @@ export class SessionManager {
             history:     [...ctx.conversation_history],
         };
     }
+
+    /**
+     * Registers a callback to be invoked once when a queued session is promoted
+     * to CONNECTING. Called by the WebSocket handler so it can push session_ready
+     * to the client without the SessionManager needing to know about sockets.
+     * The callback is cleared after it fires.
+     */
+    setQueuedSocket(sessionId: string, onPromoted: () => void): void {
+        this.promotionCallbacks.set(sessionId, onPromoted);
+    }
+
+    /**
+     * Checks whether the provided token is a valid admin key.
+     * Returns false if ADMIN_API_KEY is unset, making admin mode unavailable.
+     */
+    isAdminToken(token: string | undefined): boolean {
+        if (!this.config.adminApiKey || !token) return false;
+        return token === this.config.adminApiKey;
+    }
+
     // ── Internal ──────────────────────────────────────────────────────────────
 
     private makeContext(
         userId: string,
-        scenarioId: string,
         language: string,
         state: SessionState,
+        isAdmin: boolean,
         queuePos: number | null = null,
     ): SessionContext {
         return {
-            session_id: randomUUID(),
-            user_id: userId,
+            session_id:           randomUUID(),
+            user_id:              userId,
             state,
-            scenario_id: scenarioId,
+            scenario_id:          null,
             language,
-            current_clip_id: null,
+            current_clip_id:      null,
             conversation_history: [],
-            turn_count: 0,
-            queue_position: queuePos,
-        }
+            turn_count:           0,
+            queue_position:       queuePos,
+            is_admin:             isAdmin,
+        };
     }
 
     private transition(ctx: SessionContext, next: SessionState): void {
@@ -168,6 +201,13 @@ export class SessionManager {
         this.transition(ctx, "CONNECTING");
         this.activeSlots++;
         this.startConnectionTimer(nextId);
+
+        // Notify the waiting WebSocket that its session is ready.
+        const cb = this.promotionCallbacks.get(nextId);
+        if (cb) {
+            this.promotionCallbacks.delete(nextId);
+            cb();
+        }
 
         this.queue.forEach((id, i) => {
             const c = this.sessions.get(id);

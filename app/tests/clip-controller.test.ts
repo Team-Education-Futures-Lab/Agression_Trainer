@@ -12,6 +12,7 @@ function makeClip(clipId: string, nextClip: string | null = null): ClipMetadata 
     return {
         clip_id:           clipId,
         scenario_id:       "scenario_01",
+        video_url:         `/scenarios/scenario_01/${clipId}.mp4`,
         transcript:        "Test transcript",
         notable_features:  [],
         branch_conditions: [{ min_score: -1.0, max_score: 1.01, next_clip: nextClip }],
@@ -40,21 +41,19 @@ function makeClipEndedMsg(sessionId: string, clipId: string): ClipEnded {
     return { type: "clip_ended", session_id: sessionId, clip_id: clipId };
 }
 
-// Builds a minimal mock SessionManager. Individual tests override what they need.
 function makeMockSessions(overrides: Partial<SessionManager> = {}): SessionManager {
     return {
-        getSession:          vi.fn().mockReturnValue({ state: "ACTIVE", scenario_id: "scenario_01", turn_count: 0 }),
-        markPaused:          vi.fn(),
-        markActive:          vi.fn(),
-        appendTurn:          vi.fn(),
-        endSession:          vi.fn(),
-        setCurrentClip:      vi.fn(),
+        getSession:           vi.fn().mockReturnValue({ state: "ACTIVE", scenario_id: "scenario_01", turn_count: 0 }),
+        markPaused:           vi.fn(),
+        markActive:           vi.fn(),
+        appendTurn:           vi.fn(),
+        endSession:           vi.fn(),
+        setCurrentClip:       vi.fn(),
         buildFeedbackRequest: vi.fn().mockReturnValue({ session_id: "s1", scenario_id: "scenario_01", language: "nl", history: [] }),
-        // Satisfy the type — unused methods
-        createSession:       vi.fn(),
-        resumeSession:       vi.fn(),
-        getQueueStatus:      vi.fn(),
-        markDropped:         vi.fn(),
+        createSession:        vi.fn(),
+        resumeSession:        vi.fn(),
+        getQueueStatus:       vi.fn(),
+        markDropped:          vi.fn(),
         ...overrides,
     } as unknown as SessionManager;
 }
@@ -65,14 +64,17 @@ function makeMockCoord(overrides: Partial<Coordinator> = {}): Coordinator {
         resetSession:      vi.fn().mockResolvedValue(undefined),
         getLastResult:     vi.fn().mockReturnValue(null),
         getLastTranscript: vi.fn().mockReturnValue(null),
+        deregisterSession: vi.fn(),
         ...overrides,
     } as unknown as Coordinator;
 }
 
 function makeMockScenarios(clip: ClipMetadata | null = makeClip("clip_01")): ScenarioLoader {
     return {
-        getClip:      vi.fn().mockReturnValue(clip),
-        getEntryClip: vi.fn(),
+        getClip:          vi.fn().mockReturnValue(clip),
+        getEntryClip:     vi.fn(),
+        listScenarios:    vi.fn().mockReturnValue([]),
+        getClipVideoUrl:  vi.fn(),
     } as unknown as ScenarioLoader;
 }
 
@@ -146,14 +148,14 @@ describe("ClipController", () => {
         });
     });
 
-    // ── ClipReady message ─────────────────────────────────────────────────────
+    // ── clip_candidates + clip_selected messages ──────────────────────────────
 
-    describe("ClipReady notification", () => {
-        it("sends a ClipReady message with the resolved next_clip_id", async () => {
-            const coord = makeMockCoord({
+    describe("clip_candidates and clip_selected", () => {
+        it("sends clip_candidates before clip_selected", async () => {
+            const coord  = makeMockCoord({
                 getLastResult: vi.fn().mockReturnValue(makeBehaviourResult("s1")),
             });
-            const ctrl = new ClipController(
+            const ctrl   = new ClipController(
                 makeMockSessions(), coord,
                 makeMockScenarios(makeClip("clip_01", "clip_02")),
                 makeMockFeedback(),
@@ -162,27 +164,97 @@ describe("ClipController", () => {
 
             await ctrl.handleClipEnded(makeClipEndedMsg("s1", "clip_01"), sendFn);
 
-            const msg = sendFn.mock.calls[0][0];
-            expect(msg.type).toBe("clip_ready");
-            expect(msg.next_clip_id).toBe("clip_02");
-            expect(msg.clip_score).toBe(0.2); // escalation_score from makeBehaviourResult
+            const types = sendFn.mock.calls.map(c => c[0].type);
+            expect(types.indexOf("clip_candidates")).toBeLessThan(types.indexOf("clip_selected"));
         });
 
-        it("sends ClipReady with next_clip_id null for a terminal clip", async () => {
-            const sessions  = makeMockSessions();
-            const feedback  = makeMockFeedback();
-            const ctrl      = new ClipController(
-                sessions, makeMockCoord(),
+        it("clip_candidates lists the possible next clip", async () => {
+            const currentClip   = makeClip("clip_01", "clip_02");
+            const candidateClip = makeClip("clip_02");
+            const scenarios = {
+                getClip:         vi.fn()
+                    .mockReturnValueOnce(currentClip)   // current clip lookup
+                    .mockReturnValueOnce(candidateClip) // buildCandidates lookup
+                    .mockReturnValueOnce(candidateClip), // nextClipMeta for resetSession
+                getEntryClip:    vi.fn(),
+                listScenarios:   vi.fn().mockReturnValue([]),
+                getClipVideoUrl: vi.fn(),
+            } as unknown as ScenarioLoader;
+            const ctrl   = new ClipController(makeMockSessions(), makeMockCoord(), scenarios, makeMockFeedback());
+            const sendFn = vi.fn();
+
+            await ctrl.handleClipEnded(makeClipEndedMsg("s1", "clip_01"), sendFn);
+
+            const candidates = sendFn.mock.calls.find(c => c[0].type === "clip_candidates")[0];
+            expect(candidates.candidates).toHaveLength(1);
+            expect(candidates.candidates[0].clip_id).toBe("clip_02");
+        });
+
+        it("clip_candidates is an empty array for a terminal clip", async () => {
+            const ctrl   = new ClipController(
+                makeMockSessions(), makeMockCoord(),
                 makeMockScenarios(makeClip("clip_01", null)),
-                feedback,
+                makeMockFeedback(),
             );
             const sendFn = vi.fn();
 
             await ctrl.handleClipEnded(makeClipEndedMsg("s1", "clip_01"), sendFn);
 
-            const msg = sendFn.mock.calls[0][0];
-            expect(msg.type).toBe("clip_ready");
-            expect(msg.next_clip_id).toBeNull();
+            const candidates = sendFn.mock.calls.find(c => c[0].type === "clip_candidates")[0];
+            expect(candidates.candidates).toHaveLength(0);
+        });
+
+        it("clip_selected carries the resolved clip_id and clip_score", async () => {
+            const coord  = makeMockCoord({
+                getLastResult: vi.fn().mockReturnValue(makeBehaviourResult("s1")),
+            });
+            const ctrl   = new ClipController(
+                makeMockSessions(), coord,
+                makeMockScenarios(makeClip("clip_01", "clip_02")),
+                makeMockFeedback(),
+            );
+            const sendFn = vi.fn();
+
+            await ctrl.handleClipEnded(makeClipEndedMsg("s1", "clip_01"), sendFn);
+
+            const selected = sendFn.mock.calls.find(c => c[0].type === "clip_selected")[0];
+            expect(selected.clip_id).toBe("clip_02");
+            expect(selected.clip_score).toBe(0.2);
+        });
+
+        it("clip_selected has clip_id null for a terminal clip", async () => {
+            const ctrl   = new ClipController(
+                makeMockSessions(), makeMockCoord(),
+                makeMockScenarios(makeClip("clip_01", null)),
+                makeMockFeedback(),
+            );
+            const sendFn = vi.fn();
+
+            await ctrl.handleClipEnded(makeClipEndedMsg("s1", "clip_01"), sendFn);
+
+            const selected = sendFn.mock.calls.find(c => c[0].type === "clip_selected")[0];
+            expect(selected.clip_id).toBeNull();
+        });
+
+        it("clip_candidates includes video_url for each candidate", async () => {
+            const currentClip   = makeClip("clip_01", "clip_02");
+            const candidateClip = makeClip("clip_02");
+            const scenarios = {
+                getClip:         vi.fn()
+                    .mockReturnValueOnce(currentClip)
+                    .mockReturnValueOnce(candidateClip)
+                    .mockReturnValueOnce(candidateClip),
+                getEntryClip:    vi.fn(),
+                listScenarios:   vi.fn().mockReturnValue([]),
+                getClipVideoUrl: vi.fn(),
+            } as unknown as ScenarioLoader;
+            const ctrl   = new ClipController(makeMockSessions(), makeMockCoord(), scenarios, makeMockFeedback());
+            const sendFn = vi.fn();
+
+            await ctrl.handleClipEnded(makeClipEndedMsg("s1", "clip_01"), sendFn);
+
+            const candidates = sendFn.mock.calls.find(c => c[0].type === "clip_candidates")[0];
+            expect(candidates.candidates[0].video_url).toBe("/scenarios/scenario_01/clip_02.mp4");
         });
     });
 
@@ -190,12 +262,15 @@ describe("ClipController", () => {
 
     describe("non-terminal clip", () => {
         it("passes the next clip metadata to resetSession", async () => {
-            const nextClip = makeClip("clip_02");
+            const nextClip  = makeClip("clip_02");
             const scenarios = {
-                getClip:      vi.fn()
-                    .mockReturnValueOnce(makeClip("clip_01", "clip_02"))
-                    .mockReturnValueOnce(nextClip),
-                getEntryClip: vi.fn(),
+                getClip:         vi.fn()
+                    .mockReturnValueOnce(makeClip("clip_01", "clip_02")) // current clip
+                    .mockReturnValueOnce(nextClip)                       // buildCandidates
+                    .mockReturnValueOnce(nextClip),                      // nextClipMeta for resetSession
+                getEntryClip:    vi.fn(),
+                listScenarios:   vi.fn().mockReturnValue([]),
+                getClipVideoUrl: vi.fn(),
             } as unknown as ScenarioLoader;
             const coord = makeMockCoord();
             const ctrl  = new ClipController(makeMockSessions(), coord, scenarios, makeMockFeedback());
@@ -246,6 +321,19 @@ describe("ClipController", () => {
             await ctrl.handleClipEnded(makeClipEndedMsg("s1", "clip_01"), vi.fn());
 
             expect(sessions.endSession).toHaveBeenCalledWith("s1");
+        });
+
+        it("deregisters the coordinator session on terminal clip", async () => {
+            const coord = makeMockCoord();
+            const ctrl  = new ClipController(
+                makeMockSessions(), coord,
+                makeMockScenarios(makeClip("clip_01", null)),
+                makeMockFeedback(),
+            );
+
+            await ctrl.handleClipEnded(makeClipEndedMsg("s1", "clip_01"), vi.fn());
+
+            expect(coord.deregisterSession).toHaveBeenCalledWith("s1");
         });
 
         it("triggers feedback streaming after the session ends", async () => {
@@ -328,7 +416,7 @@ describe("ClipController", () => {
             await ctrl.handleClipEnded(makeClipEndedMsg("s1", "clip_01"), vi.fn());
 
             const turn = (sessions.appendTurn as ReturnType<typeof vi.fn>).mock.calls[0][1];
-            expect(turn.student_response.notable_signals ?? turn.student_response.signal_summary.notable_signals).toContain("no_data");
+            expect(turn.student_response.signal_summary.notable_signals).toContain("no_data");
         });
     });
 });

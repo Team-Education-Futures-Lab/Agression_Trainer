@@ -5,8 +5,8 @@ import type { SessionManager } from "./session-manager.js";
 import type {
     BehaviourResult,
     BranchCondition,
+    ClipCandidateData,
     ClipEnded,
-    ClipReady,
     ConversationTurn,
 } from "@ar-training/shared";
 
@@ -17,14 +17,15 @@ import type {
 //
 // Sequence:
 //   1. Pause session — prevents stray frames being buffered mid-transition
-//   2. Flush: finalise transcript, dispatch single AnalysisWindow to Evaluation
-//   3. Read clip score from the single BehaviourResult returned by Evaluation
-//   4. Resolve next clip from branch conditions
-//   5. Append a ConversationTurn to session history
-//   6. Reset evaluation audio buffer and transcription VAD state
-//   7. Notify the client (ClipReady)
-//   8a. If terminal: trigger feedback and end the session
-//   8b. If not terminal: advance coordinator and session to the next clip
+//   2. Send clip_candidates immediately from branch conditions (before evaluation)
+//   3. Flush: finalise transcript, dispatch single AnalysisWindow to Evaluation
+//   4. Read clip score from the single BehaviourResult returned by Evaluation
+//   5. Resolve next clip from branch conditions
+//   6. Append a ConversationTurn to session history
+//   7. Reset evaluation audio buffer and transcription VAD state
+//   8. Send clip_selected to the client
+//   9a. If terminal: trigger feedback and end the session
+//   9b. If not terminal: advance coordinator and session to the next clip
 // ─────────────────────────────────────────────────────────────────────────────
 
 export class ClipController {
@@ -50,25 +51,34 @@ export class ClipController {
     async handleClipEnded(msg: ClipEnded, sendFn: SendFn): Promise<void> {
         const { session_id, clip_id } = msg;
         const ctx = this.sessions.getSession(session_id);
-        if (!ctx || ctx.state !== "ACTIVE") return;
+        if (!ctx || ctx.state !== "ACTIVE" || !ctx.scenario_id) return;
 
         // 1. Pause — prevents stray frames being buffered mid-transition.
         this.sessions.markPaused(session_id);
 
-        // 2. Flush — finalises transcript and dispatches the full clip window.
+        const currentClip = this.scenarios.getClip(ctx.scenario_id, clip_id);
+
+        // 2. Send clip_candidates immediately so the client can begin preloading
+        //    while evaluation runs. Derived purely from branch conditions — no
+        //    evaluation result needed yet.
+        const candidates = currentClip
+            ? this.buildCandidates(ctx.scenario_id, currentClip.branch_conditions)
+            : [];
+        sendFn({ type: "clip_candidates", session_id, candidates });
+
+        // 3. Flush — finalises transcript and dispatches the full clip window.
         await this.coord.flushSession(session_id);
 
-        // 3. Clip score comes from the single BehaviourResult for this clip.
-        const result   = this.coord.getLastResult(session_id);
+        // 4. Clip score from the single BehaviourResult for this clip.
+        const result    = this.coord.getLastResult(session_id);
         const clipScore = result?.escalation_score ?? 0;
 
-        // 4. Resolve the next clip from branch conditions.
-        const currentClip = this.scenarios.getClip(ctx.scenario_id, clip_id);
-        const nextClipId  = currentClip
+        // 5. Resolve the next clip from branch conditions.
+        const nextClipId = currentClip
             ? this.resolveNextClip(currentClip.branch_conditions, clipScore)
             : null;
 
-        // 5. Append a ConversationTurn to session history.
+        // 6. Append a ConversationTurn to session history.
         if (currentClip) {
             const turn: ConversationTurn = {
                 turn_id:            ctx.turn_count + 1,
@@ -79,32 +89,50 @@ export class ClipController {
             this.sessions.appendTurn(session_id, turn);
         }
 
-        // 6. Reset buffers and open a fresh ClipSession for the next clip.
-        //    nextClipId may be null (terminal) — in that case we still reset
-        //    evaluation buffers but do not need a ClipSession for transcription.
+        // 7. Reset buffers and open a fresh ClipSession for the next clip.
+        //    nextClipId may be null (terminal) — still reset evaluation buffers
+        //    but no new ClipSession is needed.
         const nextClipMeta = nextClipId
             ? this.scenarios.getClip(ctx.scenario_id, nextClipId) ?? null
             : null;
         await this.coord.resetSession(session_id, nextClipMeta);
 
-        // 7. Notify the client.
-        const reply: ClipReady = {
-            type:         "clip_ready",
-            session_id,
-            next_clip_id: nextClipId,
-            clip_score:   clipScore,
-        };
-        sendFn(reply);
+        // 8. Notify the client which candidate was selected.
+        sendFn({ type: "clip_selected", session_id, clip_id: nextClipId, clip_score: clipScore });
 
-        // 8. Advance or complete.
+        // 9. Advance or complete.
         if (nextClipId === null) {
             await this.complete(session_id, sendFn);
         } else {
-            this.advance(session_id, ctx.scenario_id, nextClipId);
+            this.advance(session_id, nextClipId);
         }
     }
 
     // ── Internal ──────────────────────────────────────────────────────────────
+
+    /**
+     * Builds the candidate list from branch conditions.
+     * De-duplicates next_clip values so each distinct clip appears once.
+     * Null (terminal) branches are excluded — there is nothing to preload.
+     */
+    private buildCandidates(scenarioId: string, conditions: BranchCondition[]): ClipCandidateData[] {
+        const seen = new Set<string>();
+        const candidates: ClipCandidateData[] = [];
+        for (const cond of conditions) {
+            if (cond.next_clip === null || seen.has(cond.next_clip)) continue;
+            seen.add(cond.next_clip);
+            const clip = this.scenarios.getClip(scenarioId, cond.next_clip);
+            if (!clip) continue;
+            candidates.push({
+                clip_id:           clip.clip_id,
+                video_url:         clip.video_url,
+                transcript:        clip.transcript,
+                notable_features:  clip.notable_features,
+                branch_conditions: clip.branch_conditions,
+            });
+        }
+        return candidates;
+    }
 
     private resolveNextClip(conditions: BranchCondition[], score: number): string | null {
         for (const cond of conditions) {
@@ -125,11 +153,8 @@ export class ClipController {
         }
     }
 
-    private advance(sessionId: string, scenarioId: string, nextClipId: string): void {
-        const nextClip = this.scenarios.getClip(scenarioId, nextClipId);
-        if (nextClip) {
-            this.sessions.setCurrentClip(sessionId, nextClipId);
-        }
+    private advance(sessionId: string, nextClipId: string): void {
+        this.sessions.setCurrentClip(sessionId, nextClipId);
         this.sessions.markActive(sessionId);
     }
 

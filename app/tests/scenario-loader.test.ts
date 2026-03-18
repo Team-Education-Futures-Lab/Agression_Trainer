@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -14,10 +14,11 @@ function makeScenarioDir(base: string, scenarioId: string, metadata: object): st
 }
 
 const VALID_METADATA = {
-    scenario_id: "scenario_01",
-    title:       "Frustrated Student",
-    language:    "nl",
-    entry_clip:  "clip_01_intro",
+    scenario_id:  "scenario_01",
+    title:        "Frustrated Student",
+    description:  "A student confronts the teacher about a failing grade.",
+    language:     "nl",
+    entry_clip:   "clip_01_intro",
     clips: {
         clip_01_intro: {
             file:             "clip_01_intro.mp4",
@@ -50,11 +51,6 @@ const VALID_METADATA = {
 // ─── Suite ────────────────────────────────────────────────────────────────────
 
 describe("FileScenarioLoader", () => {
-    let tmpDir: string;
-
-    beforeAll(() => {
-        tmpDir = mkdtempSync(join(tmpdir(), "ar-training-test-"));
-    });
 
     // ── Happy path ────────────────────────────────────────────────────────────
 
@@ -75,6 +71,7 @@ describe("FileScenarioLoader", () => {
             expect(clip).not.toBeNull();
             expect(clip!.clip_id).toBe("clip_01_intro");
             expect(clip!.scenario_id).toBe("scenario_01");
+            expect(clip!.video_url).toBe("/scenarios/scenario_01/clip_01_intro.mp4");
             expect(clip!.notable_features).toContain("raised_voice");
             expect(clip!.branch_conditions).toHaveLength(2);
         });
@@ -120,6 +117,37 @@ describe("FileScenarioLoader", () => {
             const clip   = loader.getClip("scenario_01", "clip_02_calm")!;
             expect(clip.branch_conditions[0].next_clip).toBeNull();
         });
+
+        it("listScenarios returns summary for all loaded scenarios", () => {
+            const dir = mkdtempSync(join(tmpdir(), "ar-"));
+            makeScenarioDir(dir, "scenario_01", VALID_METADATA);
+            makeScenarioDir(dir, "scenario_02", { ...VALID_METADATA, scenario_id: "scenario_02", title: "Second Scenario" });
+
+            const loader    = new FileScenarioLoader(dir);
+            const summaries = loader.listScenarios();
+
+            expect(summaries).toHaveLength(2);
+            const s1 = summaries.find(s => s.scenario_id === "scenario_01")!;
+            expect(s1.title).toBe("Frustrated Student");
+            expect(s1.description).toBe("A student confronts the teacher about a failing grade.");
+            expect(s1.language).toBe("nl");
+            expect(s1.entry_clip_id).toBe("clip_01_intro");
+        });
+
+        it("getClipVideoUrl returns the browser-relative URL for a known clip", () => {
+            const dir    = mkdtempSync(join(tmpdir(), "ar-"));
+            makeScenarioDir(dir, "scenario_01", VALID_METADATA);
+            const loader = new FileScenarioLoader(dir);
+            expect(loader.getClipVideoUrl("scenario_01", "clip_01_intro"))
+                .toBe("/scenarios/scenario_01/clip_01_intro.mp4");
+        });
+
+        it("getClipVideoUrl returns null for an unknown clip", () => {
+            const dir    = mkdtempSync(join(tmpdir(), "ar-"));
+            makeScenarioDir(dir, "scenario_01", VALID_METADATA);
+            const loader = new FileScenarioLoader(dir);
+            expect(loader.getClipVideoUrl("scenario_01", "clip_99")).toBeNull();
+        });
     });
 
     // ── Validation errors ─────────────────────────────────────────────────────
@@ -153,6 +181,27 @@ describe("FileScenarioLoader", () => {
             const meta = { ...VALID_METADATA, scenario_id: undefined };
             makeScenarioDir(dir, "scenario_01", meta);
             expect(() => new FileScenarioLoader(dir)).toThrow(/scenario_id/);
+        });
+
+        it("throws when title is missing", () => {
+            const dir  = mkdtempSync(join(tmpdir(), "ar-"));
+            const meta = { ...VALID_METADATA, title: undefined };
+            makeScenarioDir(dir, "scenario_01", meta);
+            expect(() => new FileScenarioLoader(dir)).toThrow(/title/);
+        });
+
+        it("throws when description is missing", () => {
+            const dir  = mkdtempSync(join(tmpdir(), "ar-"));
+            const meta = { ...VALID_METADATA, description: undefined };
+            makeScenarioDir(dir, "scenario_01", meta);
+            expect(() => new FileScenarioLoader(dir)).toThrow(/description/);
+        });
+
+        it("throws when language is missing", () => {
+            const dir  = mkdtempSync(join(tmpdir(), "ar-"));
+            const meta = { ...VALID_METADATA, language: undefined };
+            makeScenarioDir(dir, "scenario_01", meta);
+            expect(() => new FileScenarioLoader(dir)).toThrow(/language/);
         });
 
         it("throws when entry_clip is missing", () => {
@@ -198,6 +247,19 @@ describe("FileScenarioLoader", () => {
             };
             makeScenarioDir(dir, "scenario_01", meta);
             expect(() => new FileScenarioLoader(dir)).toThrow(/clip_99_ghost/);
+        });
+
+        it("throws when a clip is missing its file field", () => {
+            const dir  = mkdtempSync(join(tmpdir(), "ar-"));
+            const meta = {
+                ...VALID_METADATA,
+                clips: {
+                    ...VALID_METADATA.clips,
+                    clip_01_intro: { ...VALID_METADATA.clips.clip_01_intro, file: undefined },
+                },
+            };
+            makeScenarioDir(dir, "scenario_01", meta);
+            expect(() => new FileScenarioLoader(dir)).toThrow(/file/);
         });
     });
 });

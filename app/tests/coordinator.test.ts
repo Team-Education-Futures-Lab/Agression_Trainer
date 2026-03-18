@@ -6,8 +6,8 @@ import { EventEmitter } from "events";
 
 // ─── Mock WebSocket ───────────────────────────────────────────────────────────
 //
-// Same mock used in clip-session.test.ts — an EventEmitter-based stand-in that
-// lets tests drive connection state and emit Transcription service messages.
+// An EventEmitter-based stand-in that lets tests drive connection state and
+// emit Transcription service messages without a real WebSocket.
 // ─────────────────────────────────────────────────────────────────────────────
 
 class MockWebSocket extends EventEmitter {
@@ -71,6 +71,7 @@ function makeClip(clipId: string): ClipMetadata {
     return {
         clip_id:           clipId,
         scenario_id:       "scenario_01",
+        video_url:         `/scenarios/scenario_01/${clipId}.mp4`,
         transcript:        "Test transcript",
         notable_features:  [],
         branch_conditions: [{ min_score: -1.0, max_score: 1.01, next_clip: null }],
@@ -106,11 +107,6 @@ function mockFetchFailure(): void {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 500 }));
 }
 
-/**
- * Creates a Coordinator with an injected ws factory that always returns the
- * provided MockWebSocket. Returns both the Coordinator and the socket so
- * tests can drive Transcription messages.
- */
 function makeCoord(ws: MockWebSocket) {
     const factory = vi.fn().mockReturnValue(ws);
     const coord   = new Coordinator(makeConfig(), factory);
@@ -162,18 +158,14 @@ describe("Coordinator", () => {
     // ── Frame and audio buffering ─────────────────────────────────────────────
 
     describe("frame and audio buffering", () => {
-        it("does not dispatch to evaluation before flushSession is called", async () => {
+        it("does not dispatch to evaluation before flushSession is called", () => {
             const ws = new MockWebSocket();
             const { coord } = makeCoord(ws);
             coord.registerSession("s1", makeClip("clip_01"), vi.fn());
 
             for (let i = 0; i < 30; i++) coord.onFrame(makeFrame("s1", i));
 
-            // fetch is stubbed to a 500 response — if it were called the test
-            // would still pass, but we verify it is not called at all.
-            const fetchMock = fetch as ReturnType<typeof vi.fn>;
-            // Allow for the WebSocket connection (no fetch calls expected here)
-            expect(fetchMock).not.toHaveBeenCalled();
+            expect(fetch as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
         });
 
         it("forwards audio chunks to the ClipSession WebSocket", () => {
@@ -181,7 +173,6 @@ describe("Coordinator", () => {
             const { coord } = makeCoord(ws);
             coord.registerSession("s1", makeClip("clip_01"), vi.fn());
 
-            // Drain the connect queue by simulating the socket opening
             ws.open();
             coord.onAudio(makeChunk("s1", 1));
 
@@ -216,7 +207,7 @@ describe("Coordinator", () => {
             const { coord } = makeCoord(ws);
 
             await expect(coord.flushSession("unknown")).resolves.not.toThrow();
-            expect(fetch).not.toHaveBeenCalled();
+            expect(fetch as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
         });
 
         it("includes the accumulated transcript in the dispatched window", async () => {
@@ -280,6 +271,7 @@ describe("Coordinator", () => {
             const body = JSON.parse(call[1].body);
             expect(body.session_id).toBe("s1");
             expect(body.clip_metadata.clip_id).toBe("clip_01");
+            expect(body.clip_metadata.video_url).toBe("/scenarios/scenario_01/clip_01.mp4");
         });
 
         it("stores the BehaviourResult as lastResult after a successful evaluation", async () => {
@@ -297,7 +289,9 @@ describe("Coordinator", () => {
             await flush;
 
             expect(coord.getLastResult("s1")).toEqual(result);
-        });        it("does not throw when the evaluation request fails", async () => {
+        });
+
+        it("does not throw when the evaluation request fails", async () => {
             const ws = new MockWebSocket();
             const { coord } = makeCoord(ws);
             mockFetchFailure();
@@ -315,7 +309,6 @@ describe("Coordinator", () => {
         it("window_id sequence increments across clips", async () => {
             const ws = new MockWebSocket();
             const { coord } = makeCoord(ws);
-            // Calls in order: finalise(clip1), evaluate(clip1), eval-reset, trans-reset, finalise(clip2), evaluate(clip2)
             vi.stubGlobal("fetch", vi.fn()
                 .mockResolvedValue({ ok: true, json: () => Promise.resolve(makeBehaviourResult("s1", "s1:1", 0.1)) }),
             );
@@ -353,8 +346,6 @@ describe("Coordinator", () => {
             for (let i = 0; i < 5; i++) coord.onFrame(makeFrame("s1", i));
 
             const flush = coord.flushSession("s1");
-            // No transcript emitted — ClipSession never resolves on its own
-
             vi.advanceTimersByTime(5_000);
             await expect(flush).resolves.not.toThrow();
 
@@ -384,7 +375,6 @@ describe("Coordinator", () => {
             coord.registerSession("s1", makeClip("clip_01"), vi.fn());
             ws.open();
 
-            // Flush a clip to populate lastTranscript
             mockFetchSuccess(makeBehaviourResult("s1", "s1:1", 0.0));
             const flush = coord.flushSession("s1");
             emitTranscript(ws, "some text", true);
@@ -431,7 +421,6 @@ describe("Coordinator", () => {
             coord.registerSession("s1", makeClip("clip_01"), vi.fn());
             await coord.resetSession("s1", makeClip("clip_02"));
 
-            // Factory called twice — once for clip_01, once for clip_02
             expect(factory).toHaveBeenCalledTimes(2);
         });
     });

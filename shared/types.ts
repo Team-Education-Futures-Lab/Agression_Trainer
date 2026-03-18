@@ -4,7 +4,7 @@
 // Used by: client/, app/, feedback/
 //
 // Python equivalent: evaluation/src/interfaces.py
-// Wire format reference: docs/API_CONTRACT.md
+// Wire format reference: docs/api_contract.md
 // =============================================================================
 
 // ─── Primitives ───────────────────────────────────────────────────────────────
@@ -78,14 +78,17 @@ export interface AudioChunk {
  * Sent by the client when a scenario clip finishes playing.
  *
  * The App container uses this to:
- *   1. Signal the ClipSession to flush and finalise the transcript
- *   2. Await the resolved AnalysisWindow and dispatch it to Evaluation
- *   3. Resolve the next clip from branch_conditions using the returned escalation_score
- *   4. Append a ConversationTurn to the session history
- *   5. Transition ACTIVE → PAUSED → ACTIVE (or COMPLETED if terminal)
+ *   1. Immediately send `clip_candidates` for all possible next clips
+ *   2. Signal the ClipSession to flush and finalise the transcript
+ *   3. Await the resolved AnalysisWindow and dispatch it to Evaluation
+ *   4. Resolve the next clip from branch_conditions using the returned escalation_score
+ *   5. Append a ConversationTurn to the session history
+ *   6. Send `clip_selected` identifying which candidate to play
+ *   7. Transition ACTIVE → PAUSED → ACTIVE (or COMPLETED if terminal)
  *
  * The client must stop sending VideoFrame and AudioChunk messages after
- * sending this and wait for a ClipReady or SessionComplete response.
+ * sending this and wait for ClipSelected (or FeedbackToken/SessionComplete
+ * if the clip is terminal).
  */
 export interface ClipEnded {
     type: "clip_ended";
@@ -93,7 +96,38 @@ export interface ClipEnded {
     clip_id: string;
 }
 
-export type ClientMessage = VideoFrame | AudioChunk | ClipEnded;
+/**
+ * Requests clip metadata and video URL from the App container.
+ *
+ * `activate: true` — the client intends to play this clip. On a fresh session
+ * this also binds the scenario and transitions the session from CONNECTING to
+ * ACTIVE. Must target the scenario's entry clip unless the session is admin or
+ * resumed. Only one activate call is permitted per clip transition; clip
+ * advancement is driven by `clip_ended` / `clip_selected`, not by further
+ * activate calls.
+ *
+ * `activate: false` — preload only. Pure data lookup with no state change.
+ * Valid at any point during the session, including while a clip is playing.
+ */
+export interface RequestClip {
+    type: "request_clip";
+    session_id: string;
+    scenario_id: string;
+    clip_id: string;
+    /** True to play this clip; false to preload only. */
+    activate: boolean;
+}
+
+/**
+ * Requests the list of available scenarios from the App container.
+ * May be sent at any point after the WebSocket connection is open.
+ */
+export interface GetScenarios {
+    type: "get_scenarios";
+    session_id: string;
+}
+
+export type ClientMessage = VideoFrame | AudioChunk | ClipEnded | RequestClip | GetScenarios;
 
 // ─── Server → Client (WebSocket) ─────────────────────────────────────────────
 
@@ -116,6 +150,106 @@ export interface SessionUpdate {
     queue_position: number | null;
 }
 
+/**
+ * Sent by the App container when a queued session is promoted to active.
+ * The client should proceed to scenario discovery (get_scenarios) or clip
+ * selection (request_clip) after receiving this message.
+ */
+export interface SessionReady {
+    type: "session_ready";
+    session_id: string;
+}
+
+/**
+ * Sent in response to a `get_scenarios` message.
+ * Contains summary metadata for all scenarios available on the server.
+ * Full clip details are fetched separately via `request_clip`.
+ */
+export interface ScenariosListMessage {
+    type: "scenarios_list";
+    session_id: string;
+    scenarios: ScenarioSummary[];
+}
+
+/**
+ * Summary metadata for a single scenario, returned in `ScenariosListMessage`.
+ * Does not include per-clip details — those are fetched via `request_clip`.
+ */
+export interface ScenarioSummary {
+    scenario_id: string;
+    title: string;
+    description: string;
+    /** ISO 639-1 language code, e.g. `"nl"`. */
+    language: string;
+    /** The clip_id the client should use for the first `request_clip` call. */
+    entry_clip_id: string;
+}
+
+/**
+ * Sent in response to a `request_clip` message.
+ * Contains all information the client needs to load and display the clip,
+ * including the video URL and branch conditions for preloading candidates.
+ */
+export interface ClipData {
+    type: "clip_data";
+    session_id: string;
+    clip_id: string;
+    scenario_id: string;
+    /**
+     * Browser-relative URL path for the video file.
+     * Served by the client Nginx container from the mounted scenarios directory.
+     * e.g. `/scenarios/scenario_01/clip_01_intro.mp4`
+     */
+    video_url: string;
+    /** Verbatim transcript of the dialogue in this clip. */
+    transcript: string;
+    /** Observable behaviors in the clip relevant to de-escalation. */
+    notable_features: string[];
+    branch_conditions: BranchCondition[];
+}
+
+/**
+ * Sent immediately when the App receives a `clip_ended` message, before
+ * evaluation completes. Contains full clip data for every clip that could
+ * possibly follow, so the client can begin preloading all candidates in
+ * parallel while evaluation is running.
+ *
+ * `candidates` is an empty array when all branch conditions have
+ * `next_clip: null` (terminal clip — no next clip to preload).
+ */
+export interface ClipCandidates {
+    type: "clip_candidates";
+    session_id: string;
+    candidates: ClipCandidateData[];
+}
+
+/**
+ * Full clip data for a single candidate in a `ClipCandidates` message.
+ * Same fields as `ClipData` minus the message envelope fields.
+ */
+export interface ClipCandidateData {
+    clip_id: string;
+    video_url: string;
+    transcript: string;
+    notable_features: string[];
+    branch_conditions: BranchCondition[];
+}
+
+/**
+ * Sent once evaluation completes, after `ClipCandidates`.
+ * Identifies which candidate the client should actually play.
+ *
+ * When `clip_id` is null the scenario is complete — the client should
+ * wait for `FeedbackToken` and `SessionComplete` messages.
+ */
+export interface ClipSelected {
+    type: "clip_selected";
+    session_id: string;
+    /** The clip to play. Null if the scenario is terminal. */
+    clip_id: string | null;
+    /** The escalation_score that drove this branching decision. */
+    clip_score: number;
+}
 
 /**
  * Sent once at the end of a session when feedback generation is complete.
@@ -145,34 +279,40 @@ export interface FeedbackToken {
 export interface ServerError {
     type: "error";
     session_id: string;
-    /** Machine-readable error code, e.g. `"session_expired"`, `"invalid_frame"`. */
+    /**
+     * Machine-readable error code.
+     * e.g. `"session_expired"`, `"invalid_frame"`, `"feedback_unavailable"`,
+     * `"scenario_not_found"`, `"clip_not_found"`, `"activate_not_permitted"`.
+     */
     code: string;
     message: string;
 }
 
-/**
- * Sent by the App container after processing a ClipEnded message.
- * Tells the client which clip to load and play next.
- *
- * When next_clip_id is null the scenario is complete — the client should
- * wait for FeedbackToken and SessionComplete messages.
- */
-export interface ClipReady {
-    type: "clip_ready";
-    session_id: string;
-    /** The clip the client should load and begin playing. Null if terminal. */
-    next_clip_id: string | null;
-    /** The escalation_score that drove this branching decision. */
-    clip_score: number;
-}
-
-export type ServerMessage = SessionUpdate | SessionComplete | FeedbackToken | ServerError | ClipReady;
+export type ServerMessage =
+    | SessionUpdate
+    | SessionReady
+    | ScenariosListMessage
+    | ClipData
+    | ClipCandidates
+    | ClipSelected
+    | SessionComplete
+    | FeedbackToken
+    | ServerError;
 
 // ─── HTTP — Session management ────────────────────────────────────────────────
 
+/**
+ * Body for `POST /session/create`.
+ * `scenario_id` is no longer required at creation time — the scenario is
+ * bound later via `request_clip` with `activate: true`.
+ *
+ * Admin mode: include `Authorization: Bearer <ADMIN_API_KEY>` to create an
+ * admin session. Admin sessions bypass clip activation restrictions, allowing
+ * any clip to be activated regardless of scenario entry point. If `ADMIN_API_KEY`
+ * is unset in the server environment, admin mode is permanently unavailable.
+ */
 export interface CreateSessionRequest {
     user_id: string;
-    scenario_id: string;
     /** ISO 639-1 language code, e.g. `"nl"`. */
     language: string;
 }
@@ -180,25 +320,37 @@ export interface CreateSessionRequest {
 /**
  * Returned by `POST /session/create`.
  *
- * When `state` is `"queued"` the server is at capacity. The client should
- * poll `GET /session/{id}/queue` until `state` becomes `"active"`.
+ * `ws_path` is the WebSocket endpoint the client should connect to immediately.
+ * When `state` is `"queued"` the server is at capacity; the client should open
+ * the WebSocket and wait for a `session_ready` message before proceeding.
  */
 export interface CreateSessionResponse {
     session_id: string;
     state: "active" | "queued";
-    scenario_id?: string;
-    language?: string;
+    /** WebSocket endpoint path, e.g. `"/ws/{session_id}"`. */
+    ws_path: string;
     /** Only present when `state === "queued"`. */
     queue_position?: number;
 }
 
+/**
+ * Returned by `POST /session/{id}/resume`.
+ *
+ * `scenario_id` and `current_clip_id` are null if the session was dropped
+ * before a scenario was bound via `request_clip`.
+ *
+ * `ws_path` is included so the client does not need to infer it from the
+ * session ID — consistent with `CreateSessionResponse`.
+ */
 export interface ResumeSessionResponse {
     session_id: string;
     state: string;
-    scenario_id: string;
-    current_clip_id: string;
+    scenario_id: string | null;
+    current_clip_id: string | null;
     /** Number of turns already completed before the resume. */
     turn_count: number;
+    /** WebSocket endpoint path, e.g. `"/ws/{session_id}"`. */
+    ws_path: string;
 }
 
 export interface QueueStatusResponse {
@@ -228,18 +380,25 @@ export interface BranchCondition {
 /**
  * Metadata for a single clip within a scenario.
  *
- * Passed to the Evaluation container as part of each `AnalysisWindow` so the
- * classifier and LLM have context about what the student is responding to.
+ * Used internally by the App container and forwarded to the Evaluation and
+ * Feedback containers as part of `AnalysisWindow` and `ConversationTurn`.
+ * `video_url` is constructed by the App and ignored by Evaluation and Feedback.
  */
 export interface ClipMetadata {
     clip_id: string;
     scenario_id: string;
+    /**
+     * Browser-relative URL path for the video file.
+     * Constructed by the App container; ignored by Evaluation and Feedback.
+     * e.g. `/scenarios/scenario_01/clip_01_intro.mp4`
+     */
+    video_url: string;
     /** Verbatim transcript of the dialogue in this clip. */
     transcript: string;
     /**
      * Observable behaviors in the clip relevant to de-escalation,
      * e.g. `"raised_voice"`, `"aggressive_posture"`. Used as context by the
-     * classifier and LLM. See `scenarios/schema.md` for recommended values.
+     * classifier and LLM. See `docs/scenario_schema.md` for recommended values.
      */
     notable_features: string[];
     branch_conditions: BranchCondition[];
@@ -290,7 +449,7 @@ export interface SignalSummary {
 /**
  * The result of analyzing a clip's complete AnalysisWindow.
  * Produced by the Evaluation container, consumed by the App container
- * (for immediate client branching) and the Feedback container (for debrief).
+ * (for clip branching) and the Feedback container (for debrief).
  */
 export interface BehaviourResult {
     window_id: WindowID;
@@ -338,13 +497,14 @@ export interface FeedbackRequest {
 /**
  * The client's view of the current session state.
  *
- * Mirrors the server-side state machine defined in `docs/SESSION_LIFECYCLE.md`,
+ * Mirrors the server-side state machine defined in `docs/session_lifecycle.md`,
  * with an additional `"idle"` state for before any session has been created.
  */
 export type SessionState =
     | "idle"
     | "connecting"
     | "queued"
+    | "selecting"
     | "active"
     | "paused"
     | "completed"

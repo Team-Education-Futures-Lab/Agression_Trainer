@@ -3,7 +3,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { SessionManager } from "../src/session-manager.js";
 import type { ConversationTurn } from "@ar-training/shared";
-import {SessionManagerConfig} from "../src/types";
+import type { SessionManagerConfig } from "../src/types.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -14,6 +14,7 @@ function makeConfig(overrides: Partial<SessionManagerConfig> = {}): SessionManag
         capacityPolicy:   "QUEUE",
         sessionTimeoutMs: 30_000,
         recoveryWindowMs: 30_000,
+        adminApiKey:      undefined,
         ...overrides,
     };
 }
@@ -24,6 +25,7 @@ function makeTurn(turn_id: number): ConversationTurn {
         clip: {
             clip_id:           `clip_0${turn_id}`,
             scenario_id:       "scenario_01",
+            video_url:         `/scenarios/scenario_01/clip_0${turn_id}.mp4`,
             transcript:        "Test transcript",
             notable_features:  [],
             branch_conditions: [{ min_score: -1.0, max_score: 1.01, next_clip: null }],
@@ -54,25 +56,26 @@ describe("SessionManager", () => {
     // ── Capacity & admission ──────────────────────────────────────────────────
 
     describe("capacity and admission", () => {
-        it("returns status 'active' with a SessionContext when under capacity", async () => {
-            const sm = new SessionManager(makeConfig());
-            const result = sm.createSession("user_1", "scenario_01", "nl");
+        it("returns status 'active' with a SessionContext when under capacity", () => {
+            const sm     = new SessionManager(makeConfig());
+            const result = sm.createSession("user_1", "nl", false);
 
             expect(result.status).toBe("active");
             if (result.status !== "active") return;
 
             expect(result.context.session_id).toBeTypeOf("string");
             expect(result.context.state).toBe("CONNECTING");
-            expect(result.context.scenario_id).toBe("scenario_01");
+            expect(result.context.scenario_id).toBeNull();
             expect(result.context.language).toBe("nl");
+            expect(result.context.is_admin).toBe(false);
         });
 
-        it("returns status 'queued' with queue_position when at capacity and policy is QUEUE", async () => {
+        it("returns status 'queued' with queue_position when at capacity and policy is QUEUE", () => {
             const sm = new SessionManager(makeConfig({ capacityPolicy: "QUEUE" }));
 
-            sm.createSession("user_1", "scenario_01", "nl");
-            sm.createSession("user_2", "scenario_01", "nl");
-            const result = sm.createSession("user_3", "scenario_01", "nl");
+            sm.createSession("user_1", "nl", false);
+            sm.createSession("user_2", "nl", false);
+            const result = sm.createSession("user_3", "nl", false);
 
             expect(result.status).toBe("queued");
             if (result.status !== "queued") return;
@@ -81,34 +84,34 @@ describe("SessionManager", () => {
             expect(result.context.state).toBe("QUEUED");
         });
 
-        it("returns status 'at_capacity' when at capacity and policy is REJECT", async () => {
+        it("returns status 'at_capacity' when at capacity and policy is REJECT", () => {
             const sm = new SessionManager(makeConfig({ capacityPolicy: "REJECT" }));
 
-            sm.createSession("user_1", "scenario_01", "nl");
-            sm.createSession("user_2", "scenario_01", "nl");
-            const result = sm.createSession("user_3", "scenario_01", "nl");
+            sm.createSession("user_1", "nl", false);
+            sm.createSession("user_2", "nl", false);
+            const result = sm.createSession("user_3", "nl", false);
 
             expect(result.status).toBe("at_capacity");
         });
 
-        it("returns status 'at_capacity' when the queue itself is full", async () => {
+        it("returns status 'at_capacity' when the queue itself is full", () => {
             const sm = new SessionManager(makeConfig({ capacityPolicy: "QUEUE", maxQueueSize: 1 }));
 
-            sm.createSession("user_1", "scenario_01", "nl");
-            sm.createSession("user_2", "scenario_01", "nl");
-            sm.createSession("user_3", "scenario_01", "nl"); // fills the queue
-            const result = sm.createSession("user_4", "scenario_01", "nl");
+            sm.createSession("user_1", "nl", false);
+            sm.createSession("user_2", "nl", false);
+            sm.createSession("user_3", "nl", false); // fills the queue
+            const result = sm.createSession("user_4", "nl", false);
 
             expect(result.status).toBe("at_capacity");
         });
 
-        it("queue positions are 1-indexed and increment correctly", async () => {
+        it("queue positions are 1-indexed and increment correctly", () => {
             const sm = new SessionManager(makeConfig({ capacityPolicy: "QUEUE", maxQueueSize: 3 }));
 
-            sm.createSession("user_1", "scenario_01", "nl");
-            sm.createSession("user_2", "scenario_01", "nl");
-            const r1 = sm.createSession("user_3", "scenario_01", "nl");
-            const r2 = sm.createSession("user_4", "scenario_01", "nl");
+            sm.createSession("user_1", "nl", false);
+            sm.createSession("user_2", "nl", false);
+            const r1 = sm.createSession("user_3", "nl", false);
+            const r2 = sm.createSession("user_4", "nl", false);
 
             expect(r1.status).toBe("queued");
             expect(r2.status).toBe("queued");
@@ -118,12 +121,12 @@ describe("SessionManager", () => {
             expect(r2.queue_position).toBe(2);
         });
 
-        it("promotes queued session to CONNECTING when an active session ends", async () => {
+        it("promotes queued session to CONNECTING when an active session ends", () => {
             const sm = new SessionManager(makeConfig({ capacityPolicy: "QUEUE" }));
 
-            const s1 = sm.createSession("user_1", "scenario_01", "nl");
-            sm.createSession("user_2", "scenario_01", "nl");
-            const queued = sm.createSession("user_3", "scenario_01", "nl");
+            const s1     = sm.createSession("user_1", "nl", false);
+            sm.createSession("user_2", "nl", false);
+            const queued = sm.createSession("user_3", "nl", false);
 
             expect(queued.status).toBe("queued");
             if (s1.status !== "active" || queued.status !== "queued") return;
@@ -136,12 +139,59 @@ describe("SessionManager", () => {
             expect(promoted!.queue_position).toBeNull();
         });
 
-        it("getQueueStatus returns current position while queued", async () => {
+        it("calls the promotion callback when a queued session is promoted", () => {
             const sm = new SessionManager(makeConfig({ capacityPolicy: "QUEUE" }));
 
-            sm.createSession("user_1", "scenario_01", "nl");
-            sm.createSession("user_2", "scenario_01", "nl");
-            const queued = sm.createSession("user_3", "scenario_01", "nl");
+            const s1     = sm.createSession("user_1", "nl", false);
+            sm.createSession("user_2", "nl", false);
+            const queued = sm.createSession("user_3", "nl", false);
+
+            if (s1.status !== "active" || queued.status !== "queued") return;
+
+            const onPromoted = vi.fn();
+            sm.setQueuedSocket(queued.context.session_id, onPromoted);
+
+            sm.markActive(s1.context.session_id);
+            sm.endSession(s1.context.session_id);
+
+            expect(onPromoted).toHaveBeenCalledOnce();
+        });
+
+        it("does not call the promotion callback a second time after it fires", () => {
+            const sm = new SessionManager(makeConfig({ capacityPolicy: "QUEUE" }));
+
+            const s1 = sm.createSession("user_1", "nl", false);
+            const s2 = sm.createSession("user_2", "nl", false);
+            const q1 = sm.createSession("user_3", "nl", false);
+            const q2 = sm.createSession("user_4", "nl", false);
+
+            if (s1.status !== "active" || s2.status !== "active"
+                || q1.status !== "queued" || q2.status !== "queued") return;
+
+            const cb1 = vi.fn();
+            const cb2 = vi.fn();
+            sm.setQueuedSocket(q1.context.session_id, cb1);
+            sm.setQueuedSocket(q2.context.session_id, cb2);
+
+            sm.markActive(s1.context.session_id);
+            sm.endSession(s1.context.session_id); // promotes q1
+
+            expect(cb1).toHaveBeenCalledOnce();
+            expect(cb2).not.toHaveBeenCalled();
+
+            sm.markActive(s2.context.session_id);
+            sm.endSession(s2.context.session_id); // promotes q2
+
+            expect(cb1).toHaveBeenCalledOnce(); // still only once
+            expect(cb2).toHaveBeenCalledOnce();
+        });
+
+        it("getQueueStatus returns current position while queued", () => {
+            const sm = new SessionManager(makeConfig({ capacityPolicy: "QUEUE" }));
+
+            sm.createSession("user_1", "nl", false);
+            sm.createSession("user_2", "nl", false);
+            const queued = sm.createSession("user_3", "nl", false);
 
             if (queued.status !== "queued") return;
 
@@ -151,12 +201,12 @@ describe("SessionManager", () => {
             expect(status.queue_position).toBe(1);
         });
 
-        it("getQueueStatus returns state 'active' with null queue_position after promotion", async () => {
+        it("getQueueStatus returns 'active' with null queue_position after promotion", () => {
             const sm = new SessionManager(makeConfig({ capacityPolicy: "QUEUE" }));
 
-            const s1 = sm.createSession("user_1", "scenario_01", "nl");
-            sm.createSession("user_2", "scenario_01", "nl");
-            const queued = sm.createSession("user_3", "scenario_01", "nl");
+            const s1     = sm.createSession("user_1", "nl", false);
+            sm.createSession("user_2", "nl", false);
+            const queued = sm.createSession("user_3", "nl", false);
 
             if (s1.status !== "active" || queued.status !== "queued") return;
 
@@ -173,27 +223,27 @@ describe("SessionManager", () => {
     // ── State transitions ─────────────────────────────────────────────────────
 
     describe("state transitions", () => {
-        it("fresh session starts in CONNECTING state", async () => {
-            const sm = new SessionManager(makeConfig());
-            const result = sm.createSession("user_1", "scenario_01", "nl");
+        it("fresh session starts in CONNECTING state", () => {
+            const sm     = new SessionManager(makeConfig());
+            const result = sm.createSession("user_1", "nl", false);
 
             expect(result.status).toBe("active");
             if (result.status !== "active") return;
             expect(result.context.state).toBe("CONNECTING");
         });
 
-        it("transitions to ACTIVE when WebSocket opens", async () => {
-            const sm = new SessionManager(makeConfig());
-            const result = sm.createSession("user_1", "scenario_01", "nl");
+        it("transitions to ACTIVE via markActive", () => {
+            const sm     = new SessionManager(makeConfig());
+            const result = sm.createSession("user_1", "nl", false);
             if (result.status !== "active") return;
 
             sm.markActive(result.context.session_id);
             expect(sm.getSession(result.context.session_id)!.state).toBe("ACTIVE");
         });
 
-        it("transitions ACTIVE → PAUSED when clip ends", async () => {
-            const sm = new SessionManager(makeConfig());
-            const result = sm.createSession("user_1", "scenario_01", "nl");
+        it("transitions ACTIVE → PAUSED when clip ends", () => {
+            const sm     = new SessionManager(makeConfig());
+            const result = sm.createSession("user_1", "nl", false);
             if (result.status !== "active") return;
 
             sm.markActive(result.context.session_id);
@@ -201,9 +251,9 @@ describe("SessionManager", () => {
             expect(sm.getSession(result.context.session_id)!.state).toBe("PAUSED");
         });
 
-        it("transitions PAUSED → ACTIVE when next clip starts", async () => {
-            const sm = new SessionManager(makeConfig());
-            const result = sm.createSession("user_1", "scenario_01", "nl");
+        it("transitions PAUSED → ACTIVE when next clip starts", () => {
+            const sm     = new SessionManager(makeConfig());
+            const result = sm.createSession("user_1", "nl", false);
             if (result.status !== "active") return;
 
             sm.markActive(result.context.session_id);
@@ -212,9 +262,9 @@ describe("SessionManager", () => {
             expect(sm.getSession(result.context.session_id)!.state).toBe("ACTIVE");
         });
 
-        it("transitions to COMPLETED when endSession is called", async () => {
-            const sm = new SessionManager(makeConfig());
-            const result = sm.createSession("user_1", "scenario_01", "nl");
+        it("transitions to COMPLETED when endSession is called", () => {
+            const sm     = new SessionManager(makeConfig());
+            const result = sm.createSession("user_1", "nl", false);
             if (result.status !== "active") return;
 
             sm.markActive(result.context.session_id);
@@ -222,9 +272,9 @@ describe("SessionManager", () => {
             expect(sm.getSession(result.context.session_id)!.state).toBe("COMPLETED");
         });
 
-        it("transitions ACTIVE → DROPPED on unexpected disconnect", async () => {
-            const sm = new SessionManager(makeConfig());
-            const result = sm.createSession("user_1", "scenario_01", "nl");
+        it("transitions ACTIVE → DROPPED on unexpected disconnect", () => {
+            const sm     = new SessionManager(makeConfig());
+            const result = sm.createSession("user_1", "nl", false);
             if (result.status !== "active") return;
 
             sm.markActive(result.context.session_id);
@@ -232,9 +282,9 @@ describe("SessionManager", () => {
             expect(sm.getSession(result.context.session_id)!.state).toBe("DROPPED");
         });
 
-        it("transitions DROPPED → CONNECTING on resume within recovery window", async () => {
-            const sm = new SessionManager(makeConfig());
-            const result = sm.createSession("user_1", "scenario_01", "nl");
+        it("transitions DROPPED → CONNECTING on resume within recovery window", () => {
+            const sm     = new SessionManager(makeConfig());
+            const result = sm.createSession("user_1", "nl", false);
             if (result.status !== "active") return;
 
             sm.markActive(result.context.session_id);
@@ -248,8 +298,8 @@ describe("SessionManager", () => {
 
         it("transitions DROPPED → EXPIRED when recovery window passes without resume", async () => {
             vi.useFakeTimers();
-            const sm = new SessionManager(makeConfig({ recoveryWindowMs: 30_000 }));
-            const result = sm.createSession("user_1", "scenario_01", "nl");
+            const sm     = new SessionManager(makeConfig({ recoveryWindowMs: 30_000 }));
+            const result = sm.createSession("user_1", "nl", false);
             if (result.status !== "active") return;
 
             sm.markActive(result.context.session_id);
@@ -260,10 +310,10 @@ describe("SessionManager", () => {
             vi.useRealTimers();
         });
 
-        it("transitions CONNECTING → DROPPED when WebSocket never opens within session timeout", async () => {
+        it("transitions CONNECTING → DROPPED when no activation arrives within session timeout", async () => {
             vi.useFakeTimers();
-            const sm = new SessionManager(makeConfig({ sessionTimeoutMs: 30_000 }));
-            const result = sm.createSession("user_1", "scenario_01", "nl");
+            const sm     = new SessionManager(makeConfig({ sessionTimeoutMs: 30_000 }));
+            const result = sm.createSession("user_1", "nl", false);
             if (result.status !== "active") return;
 
             await vi.advanceTimersByTimeAsync(30_000);
@@ -272,9 +322,9 @@ describe("SessionManager", () => {
             vi.useRealTimers();
         });
 
-        it("resuming an ACTIVE session returns status 'not_found'", async () => {
-            const sm = new SessionManager(makeConfig());
-            const result = sm.createSession("user_1", "scenario_01", "nl");
+        it("resuming an ACTIVE session returns status 'not_found'", () => {
+            const sm     = new SessionManager(makeConfig());
+            const result = sm.createSession("user_1", "nl", false);
             if (result.status !== "active") return;
 
             sm.markActive(result.context.session_id);
@@ -283,12 +333,112 @@ describe("SessionManager", () => {
         });
     });
 
+    // ── Scenario binding ──────────────────────────────────────────────────────
+
+    describe("scenario binding", () => {
+        it("scenario_id is null on a fresh session", () => {
+            const sm     = new SessionManager(makeConfig());
+            const result = sm.createSession("user_1", "nl", false);
+            if (result.status !== "active") return;
+
+            expect(result.context.scenario_id).toBeNull();
+        });
+
+        it("setScenario binds the scenario_id", () => {
+            const sm     = new SessionManager(makeConfig());
+            const result = sm.createSession("user_1", "nl", false);
+            if (result.status !== "active") return;
+
+            sm.setScenario(result.context.session_id, "scenario_01");
+            expect(sm.getSession(result.context.session_id)!.scenario_id).toBe("scenario_01");
+        });
+
+        it("setScenario is a no-op if the scenario is already bound", () => {
+            const sm     = new SessionManager(makeConfig());
+            const result = sm.createSession("user_1", "nl", false);
+            if (result.status !== "active") return;
+
+            sm.setScenario(result.context.session_id, "scenario_01");
+            sm.setScenario(result.context.session_id, "scenario_02"); // should be ignored
+            expect(sm.getSession(result.context.session_id)!.scenario_id).toBe("scenario_01");
+        });
+
+        it("buildFeedbackRequest returns null if scenario is not yet bound", () => {
+            const sm     = new SessionManager(makeConfig());
+            const result = sm.createSession("user_1", "nl", false);
+            if (result.status !== "active") return;
+
+            sm.markActive(result.context.session_id);
+            expect(sm.buildFeedbackRequest(result.context.session_id)).toBeNull();
+        });
+
+        it("buildFeedbackRequest succeeds once the scenario is bound", () => {
+            const sm     = new SessionManager(makeConfig());
+            const result = sm.createSession("user_1", "nl", false);
+            if (result.status !== "active") return;
+
+            sm.markActive(result.context.session_id);
+            sm.setScenario(result.context.session_id, "scenario_01");
+            sm.appendTurn(result.context.session_id, makeTurn(1));
+
+            const req = sm.buildFeedbackRequest(result.context.session_id);
+            expect(req).not.toBeNull();
+            expect(req!.scenario_id).toBe("scenario_01");
+            expect(req!.history).toHaveLength(1);
+        });
+    });
+
+    // ── Admin mode ────────────────────────────────────────────────────────────
+
+    describe("admin mode", () => {
+        it("is_admin is false for a normal session", () => {
+            const sm     = new SessionManager(makeConfig());
+            const result = sm.createSession("user_1", "nl", false);
+            if (result.status !== "active") return;
+
+            expect(result.context.is_admin).toBe(false);
+        });
+
+        it("is_admin is true when the session is created with isAdmin=true", () => {
+            const sm     = new SessionManager(makeConfig({ adminApiKey: "secret" }));
+            const result = sm.createSession("user_1", "nl", true);
+            if (result.status !== "active") return;
+
+            expect(result.context.is_admin).toBe(true);
+        });
+
+        it("isAdminToken returns true for the correct token", () => {
+            const sm = new SessionManager(makeConfig({ adminApiKey: "secret-key" }));
+            expect(sm.isAdminToken("secret-key")).toBe(true);
+        });
+
+        it("isAdminToken returns false for an incorrect token", () => {
+            const sm = new SessionManager(makeConfig({ adminApiKey: "secret-key" }));
+            expect(sm.isAdminToken("wrong-key")).toBe(false);
+        });
+
+        it("isAdminToken returns false when adminApiKey is not configured", () => {
+            const sm = new SessionManager(makeConfig({ adminApiKey: undefined }));
+            expect(sm.isAdminToken("any-token")).toBe(false);
+        });
+
+        it("isAdminToken returns false for an empty string token", () => {
+            const sm = new SessionManager(makeConfig({ adminApiKey: "secret-key" }));
+            expect(sm.isAdminToken("")).toBe(false);
+        });
+
+        it("isAdminToken returns false for undefined", () => {
+            const sm = new SessionManager(makeConfig({ adminApiKey: "secret-key" }));
+            expect(sm.isAdminToken(undefined)).toBe(false);
+        });
+    });
+
     // ── Session data ──────────────────────────────────────────────────────────
 
     describe("session data", () => {
-        it("appendTurn accumulates ConversationTurns in order", async () => {
-            const sm = new SessionManager(makeConfig());
-            const result = sm.createSession("user_1", "scenario_01", "nl");
+        it("appendTurn accumulates ConversationTurns in order", () => {
+            const sm     = new SessionManager(makeConfig());
+            const result = sm.createSession("user_1", "nl", false);
             if (result.status !== "active") return;
 
             sm.markActive(result.context.session_id);
@@ -301,12 +451,25 @@ describe("SessionManager", () => {
             expect(session!.conversation_history.map(t => t.turn_id)).toEqual([1, 2, 3]);
         });
 
-        it("buildFeedbackRequest compiles history into a correct FeedbackRequest", async () => {
-            const sm = new SessionManager(makeConfig());
-            const result = sm.createSession("user_1", "scenario_01", "nl");
+        it("turn_count mirrors conversation_history length", () => {
+            const sm     = new SessionManager(makeConfig());
+            const result = sm.createSession("user_1", "nl", false);
             if (result.status !== "active") return;
 
             sm.markActive(result.context.session_id);
+            sm.appendTurn(result.context.session_id, makeTurn(1));
+            sm.appendTurn(result.context.session_id, makeTurn(2));
+
+            expect(sm.getSession(result.context.session_id)!.turn_count).toBe(2);
+        });
+
+        it("buildFeedbackRequest compiles history into a correct FeedbackRequest", () => {
+            const sm     = new SessionManager(makeConfig());
+            const result = sm.createSession("user_1", "nl", false);
+            if (result.status !== "active") return;
+
+            sm.markActive(result.context.session_id);
+            sm.setScenario(result.context.session_id, "scenario_01");
             sm.appendTurn(result.context.session_id, makeTurn(1));
             sm.appendTurn(result.context.session_id, makeTurn(2));
 
@@ -318,12 +481,13 @@ describe("SessionManager", () => {
             expect(req!.history).toHaveLength(2);
         });
 
-        it("resumeSession restores turn_count and current_clip_id", async () => {
-            const sm = new SessionManager(makeConfig());
-            const result = sm.createSession("user_1", "scenario_01", "nl");
+        it("resumeSession restores turn_count and current_clip_id", () => {
+            const sm     = new SessionManager(makeConfig());
+            const result = sm.createSession("user_1", "nl", false);
             if (result.status !== "active") return;
 
             sm.markActive(result.context.session_id);
+            sm.setScenario(result.context.session_id, "scenario_01");
             sm.appendTurn(result.context.session_id, makeTurn(1));
             sm.setCurrentClip(result.context.session_id, "clip_02_calm");
             sm.markDropped(result.context.session_id);
@@ -334,6 +498,7 @@ describe("SessionManager", () => {
 
             expect(resumed.context.turn_count).toBe(1);
             expect(resumed.context.current_clip_id).toBe("clip_02_calm");
+            expect(resumed.context.scenario_id).toBe("scenario_01");
         });
     });
 
@@ -342,8 +507,8 @@ describe("SessionManager", () => {
     describe("edge cases", () => {
         it("resuming an EXPIRED session returns status 'not_found'", async () => {
             vi.useFakeTimers();
-            const sm = new SessionManager(makeConfig({ recoveryWindowMs: 30_000 }));
-            const result = sm.createSession("user_1", "scenario_01", "nl");
+            const sm     = new SessionManager(makeConfig({ recoveryWindowMs: 30_000 }));
+            const result = sm.createSession("user_1", "nl", false);
             if (result.status !== "active") return;
 
             sm.markActive(result.context.session_id);
@@ -355,35 +520,34 @@ describe("SessionManager", () => {
             vi.useRealTimers();
         });
 
-        it("resuming an unknown session ID returns status 'not_found'", async () => {
+        it("resuming an unknown session ID returns status 'not_found'", () => {
             const sm = new SessionManager(makeConfig());
-            const resumed = sm.resumeSession("non-existent-id");
-            expect(resumed.status).toBe("not_found");
+            expect(sm.resumeSession("non-existent-id").status).toBe("not_found");
         });
 
-        it("capacity slot is released when session reaches COMPLETED", async () => {
+        it("capacity slot is released when session reaches COMPLETED", () => {
             const sm = new SessionManager(makeConfig({ maxSessions: 1 }));
-            const s1 = sm.createSession("user_1", "scenario_01", "nl");
+            const s1 = sm.createSession("user_1", "nl", false);
             if (s1.status !== "active") return;
 
             sm.markActive(s1.context.session_id);
             sm.endSession(s1.context.session_id);
 
-            const s2 = sm.createSession("user_2", "scenario_01", "nl");
+            const s2 = sm.createSession("user_2", "nl", false);
             expect(s2.status).toBe("active");
         });
 
         it("capacity slot is released when session reaches EXPIRED", async () => {
             vi.useFakeTimers();
             const sm = new SessionManager(makeConfig({ maxSessions: 1, recoveryWindowMs: 30_000 }));
-            const s1 = sm.createSession("user_1", "scenario_01", "nl");
+            const s1 = sm.createSession("user_1", "nl", false);
             if (s1.status !== "active") return;
 
             sm.markActive(s1.context.session_id);
             sm.markDropped(s1.context.session_id);
             await vi.advanceTimersByTimeAsync(30_000);
 
-            const s2 = sm.createSession("user_2", "scenario_01", "nl");
+            const s2 = sm.createSession("user_2", "nl", false);
             expect(s2.status).toBe("active");
             vi.useRealTimers();
         });

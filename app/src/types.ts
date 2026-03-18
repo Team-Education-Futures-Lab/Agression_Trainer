@@ -29,7 +29,11 @@ export interface SessionContext {
     session_id:           string;
     user_id:              string;
     state:                SessionState;
-    scenario_id:          string;
+    /**
+     * Null until a scenario is bound via request_clip { activate: true }.
+     * Set by SessionManager.setScenario().
+     */
+    scenario_id:          string | null;
     language:             string;
     /** The clip currently playing, or null if the session has not started. */
     current_clip_id:      string | null;
@@ -39,6 +43,16 @@ export interface SessionContext {
     turn_count:           number;
     /** 1-indexed position in the waiting queue, or null if not queued. */
     queue_position:       number | null;
+    /**
+     * True if the session was created with a valid ADMIN_API_KEY.
+     * Admin sessions bypass clip activation restrictions (any clip may be
+     * activated, not just the scenario entry clip).
+     *
+     * This is the extension point for per-user admin tokens — when a teacher
+     * dashboard is added, replace the env-var check at session creation with a
+     * token lookup; nothing downstream changes.
+     */
+    is_admin:             boolean;
 }
 
 // ─── Coordinator config ───────────────────────────────────────────────────────
@@ -73,6 +87,17 @@ export interface SessionManagerConfig {
     sessionTimeoutMs: number;
     /** How long a DROPPED session can be resumed before it expires (ms). */
     recoveryWindowMs: number;
+    /**
+     * Optional admin API key. When set, POST /session/create requests carrying
+     * Authorization: Bearer <adminApiKey> create admin sessions.
+     * When unset (undefined or empty string), admin mode is permanently unavailable.
+     */
+    /**
+     * Optional admin API key. When set, POST /session/create requests carrying
+     * Authorization: Bearer <adminApiKey> create admin sessions.
+     * When unset (undefined or empty string), admin mode is permanently unavailable.
+     */
+    adminApiKey:      string | undefined;
 }
 
 // ─── Session Manager results ──────────────────────────────────────────────────
@@ -92,7 +117,7 @@ export type CreateSessionResult =
 /**
  * Result of SessionManager.resumeSession().
  *
- *   "ok"        → 200 { session_id, state, scenario_id, current_clip_id, turn_count }
+ *   "ok"        → 200 { session_id, state, scenario_id, current_clip_id, turn_count, ws_path }
  *   "not_found" → 404 { error: "session_not_found" }
  */
 export type ResumeSessionResult =

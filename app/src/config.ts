@@ -76,6 +76,8 @@ export function loadConfig(): AppConfig {
             capacityPolicy:   enumEnv("CAPACITY_POLICY",  ["QUEUE", "REJECT"], "QUEUE"),
             sessionTimeoutMs: intEnv("SESSION_TIMEOUT_MS", 30_000),
             recoveryWindowMs: intEnv("RECOVERY_WINDOW_MS", 30_000),
+            // Optional — if unset, admin mode is permanently unavailable.
+            adminApiKey:      process.env["ADMIN_API_KEY"] || undefined,
         },
     };
 }

@@ -10,11 +10,20 @@ This document is the source of truth for inter-container communication. If a Pyt
 
 ### `POST /session/create`
 
+Creates a session slot. The scenario is not required at creation time — it is
+bound later via `request_clip` with `activate: true` over the WebSocket.
+
+**Admin mode:** include `Authorization: Bearer <ADMIN_API_KEY>` to create an
+admin session. Admin sessions bypass clip activation restrictions (any clip may
+be activated, not just the scenario entry clip). If `ADMIN_API_KEY` is unset in
+the server environment, admin mode is permanently unavailable. This header is
+the extension point for per-user admin tokens in future (e.g. a teacher
+dashboard) — only the lookup changes, not the session creation logic.
+
 **Request**
 ```json
 {
   "user_id": "string",
-  "scenario_id": "string",
   "language": "string  // ISO 639-1, e.g. 'nl'"
 }
 ```
@@ -24,8 +33,7 @@ This document is the source of truth for inter-container communication. If a Pyt
 {
   "session_id": "string  // UUID",
   "state": "active",
-  "scenario_id": "string",
-  "language": "string"
+  "ws_path": "string  // e.g. '/ws/{session_id}'"
 }
 ```
 
@@ -34,6 +42,7 @@ This document is the source of truth for inter-container communication. If a Pyt
 {
   "session_id": "string",
   "state": "queued",
+  "ws_path": "string",
   "queue_position": "integer  // 1-indexed"
 }
 ```
@@ -50,14 +59,21 @@ This document is the source of truth for inter-container communication. If a Pyt
 
 ### `POST /session/{session_id}/resume`
 
+Resumes a dropped session. The client should immediately open the WebSocket
+at the returned `ws_path`.
+
+`scenario_id` and `current_clip_id` are null if the session was dropped before
+a scenario was bound via `request_clip`.
+
 **Response 200**
 ```json
 {
   "session_id": "string",
   "state": "string",
-  "scenario_id": "string",
-  "current_clip_id": "string",
-  "turn_count": "integer  // number of completed turns so far"
+  "scenario_id": "string | null",
+  "current_clip_id": "string | null",
+  "turn_count": "integer  // number of completed turns so far",
+  "ws_path": "string  // e.g. '/ws/{session_id}'"
 }
 ```
 
@@ -73,7 +89,9 @@ This document is the source of truth for inter-container communication. If a Pyt
 
 ### `POST /session/{session_id}/end`
 
-No request body required. Handles abnormal termination only — in the normal clip flow, sessions complete automatically when a terminal clip is reached via `ClipEnded`.
+No request body required. Handles abnormal termination only — in the normal
+clip flow, sessions complete automatically when a terminal clip is reached
+via `clip_ended`.
 
 **Response 200**
 ```json
@@ -111,8 +129,8 @@ No request body required. Handles abnormal termination only — in the normal cl
 ### `GET /health`
 
 Called by monitoring tools and the compose healthcheck. Queries all configured
-evaluation, transcription, and feedback instances in parallel and reports per-instance
-reachability.
+evaluation, transcription, and feedback instances in parallel and reports
+per-instance reachability.
 
 **Status levels**
 
@@ -147,7 +165,7 @@ reachability.
 }
 ```
 
-**Response 503 — critical (all evaluation or transcription instances down)**
+**Response 503 — critical**
 ```json
 {
   "status": "critical",
@@ -175,11 +193,41 @@ reachability.
 
 ### `WebSocket /ws/{session_id}`
 
-Connection must be established after a successful `/session/create` or `/session/resume`.
+Connection must be established after a successful `/session/create` or
+`/session/resume`. The WebSocket is the sole channel for scenario discovery,
+clip negotiation, data streaming, evaluation results, and feedback delivery.
 
 #### Client → Server messages
 
-**VideoFrame**
+**GetScenarios** — request the list of available scenarios
+```json
+{
+  "type": "get_scenarios",
+  "session_id": "string"
+}
+```
+
+**RequestClip** — request clip metadata and video URL
+```json
+{
+  "type": "request_clip",
+  "session_id": "string",
+  "scenario_id": "string",
+  "clip_id": "string",
+  "activate": "boolean"
+}
+```
+
+`activate: true` — the client intends to play this clip. On a fresh session,
+also binds the scenario and transitions the session from CONNECTING to ACTIVE.
+In normal mode, must target the scenario's entry clip. In admin mode (session
+created with `ADMIN_API_KEY`), any clip may be activated. On a resumed session,
+any clip is valid regardless of admin status.
+
+`activate: false` — preload only. Pure data lookup with no state change. Valid
+at any point during the session, including while a clip is playing.
+
+**VideoFrame** — sent continuously while a clip is playing
 ```json
 {
   "type": "video_frame",
@@ -200,7 +248,7 @@ Connection must be established after a successful `/session/create` or `/session
 }
 ```
 
-**AudioChunk**
+**AudioChunk** — sent continuously while a clip is playing
 ```json
 {
   "type": "audio_chunk",
@@ -225,33 +273,117 @@ Connection must be established after a successful `/session/create` or `/session
 }
 ```
 
-The client must stop sending `VideoFrame` and `AudioChunk` messages after sending this and wait for a `ClipReady` or `SessionComplete` response.
+The client must stop sending `VideoFrame` and `AudioChunk` messages after
+sending this. The App responds immediately with `clip_candidates`, then with
+`clip_selected` once evaluation completes.
 
 #### Server → Client messages
 
-**SessionUpdate** — sent when a finalised transcript segment arrives from the Transcription container
+**SessionReady** — sent when a queued session is promoted to active
+```json
+{
+  "type": "session_ready",
+  "session_id": "string"
+}
+```
+
+The client should proceed to send `get_scenarios` or `request_clip` after
+receiving this message.
+
+**ScenariosListMessage** — sent in response to `get_scenarios`
+```json
+{
+  "type": "scenarios_list",
+  "session_id": "string",
+  "scenarios": [
+    {
+      "scenario_id": "string",
+      "title": "string",
+      "description": "string",
+      "language": "string  // ISO 639-1",
+      "entry_clip_id": "string"
+    }
+  ]
+}
+```
+
+**ClipData** — sent in response to `request_clip`
+```json
+{
+  "type": "clip_data",
+  "session_id": "string",
+  "clip_id": "string",
+  "scenario_id": "string",
+  "video_url": "string  // browser-relative path, e.g. /scenarios/scenario_01/clip_01_intro.mp4",
+  "transcript": "string",
+  "notable_features": ["string"],
+  "branch_conditions": [
+    {
+      "min_score": "float",
+      "max_score": "float",
+      "next_clip": "string | null"
+    }
+  ]
+}
+```
+
+`video_url` is a browser-relative path served by the client Nginx container
+from the mounted scenarios directory. The client resolves it against its own
+origin — no cross-origin request is needed.
+
+**SessionUpdate** — sent when a transcript segment arrives from the Transcription container
 ```json
 {
   "type": "session_update",
   "session_id": "string",
   "transcript": "string  // accumulated transcript for the current clip so far",
-  "queue_position": "integer | null"
+  "queue_position": "integer | null  // non-null only while QUEUED"
 }
 ```
 
-This message is intended for development and debugging. The client may choose not to display the transcript to students in production.
+Intended for development and debugging. The client may choose not to display
+the transcript to students in production.
 
-**ClipReady** — sent in response to a `ClipEnded` message
+**ClipCandidates** — sent immediately on receiving `clip_ended`, before evaluation completes
 ```json
 {
-  "type": "clip_ready",
+  "type": "clip_candidates",
   "session_id": "string",
-  "next_clip_id": "string | null  // null when the scenario is complete",
+  "candidates": [
+    {
+      "clip_id": "string",
+      "video_url": "string",
+      "transcript": "string",
+      "notable_features": ["string"],
+      "branch_conditions": [
+        {
+          "min_score": "float",
+          "max_score": "float",
+          "next_clip": "string | null"
+        }
+      ]
+    }
+  ]
+}
+```
+
+`candidates` contains one entry per distinct non-null `next_clip` value in the
+finished clip's `branch_conditions`. The client should begin preloading all
+candidates in parallel. `candidates` is an empty array when all branch
+conditions have `next_clip: null` (terminal clip).
+
+**ClipSelected** — sent once evaluation completes, after `ClipCandidates`
+```json
+{
+  "type": "clip_selected",
+  "session_id": "string",
+  "clip_id": "string | null  // null if the scenario is terminal",
   "clip_score": "float  // escalation_score from the clip's BehaviourResult"
 }
 ```
 
-When `next_clip_id` is `null` the scenario is complete — the client should wait for `FeedbackToken` and `SessionComplete` messages.
+When `clip_id` is null the scenario is complete — the client should wait for
+`FeedbackToken` and `SessionComplete` messages.
 
 **FeedbackToken** — streamed during debrief generation
 ```json
@@ -280,10 +412,22 @@ When `next_clip_id` is `null` the scenario is complete — the client should wai
 {
   "type": "error",
   "session_id": "string",
-  "code": "string  // e.g. 'session_expired', 'invalid_frame'",
+  "code": "string",
   "message": "string"
 }
 ```
+
+Error codes relevant to the new flow:
+
+| Code                     | Meaning                                                                  |
+|--------------------------|--------------------------------------------------------------------------|
+| `session_not_found`      | Session ID unknown or expired                                            |
+| `scenario_not_found`     | Requested scenario does not exist                                        |
+| `clip_not_found`         | Requested clip does not exist in the scenario                            |
+| `activate_not_permitted` | `activate: true` on a non-entry clip in a non-admin, non-resumed session |
+| `feedback_unavailable`   | Feedback container unreachable; session is otherwise complete            |
+| `invalid_frame`          | Malformed `video_frame` or `audio_chunk` message                         |
+| `session_expired`        | Session recovery window elapsed                                          |
 
 ---
 
@@ -392,6 +536,7 @@ Same shared secret scheme as Transcription — all requests carry `Authorization
   "clip_metadata": {
     "clip_id": "string",
     "scenario_id": "string",
+    "video_url": "string  // ignored by Evaluation",
     "transcript": "string",
     "notable_features": ["string"],
     "branch_conditions": [
@@ -408,19 +553,19 @@ Same shared secret scheme as Transcription — all requests carry `Authorization
 **Response 200** — BehaviourResult
 ```json
 {
-  "window_id": "string",
-  "session_id": "string",
-  "escalation_score": "float  // -1.0 to 1.0",
-  "dominant_emotion": "string  // e.g. 'angry', 'calm', 'fearful'",
-  "confidence": "float  // 0.0 to 1.0",
-  "signal_summary": {
-    "voice_tension": "float",
-    "speech_pace": "float  // syllables/sec",
-    "hand_velocity": "float  // avg landmark movement per frame",
-    "gaze_stability": "float  // 0=erratic, 1=steady",
-    "open_palm_ratio": "float",
-    "notable_signals": ["string"]
-  }
+    "window_id": "string",
+    "session_id": "string",
+    "escalation_score": "float  // -1.0 to 1.0",
+    "dominant_emotion": "string  // e.g. 'angry', 'calm', 'fearful'",
+    "confidence": "float  // 0.0 to 1.0",
+    "signal_summary": {
+        "voice_tension": "float",
+        "speech_pace": "float  // syllables/sec",
+        "hand_velocity": "float  // avg landmark movement per frame",
+        "gaze_stability": "float  // 0=erratic, 1=steady",
+        "open_palm_ratio": "float",
+        "notable_signals": ["string"]
+    }
 }
 ```
 
@@ -442,8 +587,8 @@ No request body. Called by the App container at the end of each clip.
 **Response 200**
 ```json
 {
-  "status": "ok",
-  "device": "cpu | cuda"
+    "status": "ok",
+    "device": "cpu | cuda"
 }
 ```
 
@@ -462,27 +607,27 @@ Same shared secret scheme — all requests carry `Authorization: Bearer <INTERNA
 **Request** — FeedbackRequest
 ```json
 {
-  "session_id": "string",
-  "scenario_id": "string",
-  "language": "string",
-  "history": [
-    {
-      "turn_id": "integer",
-      "clip": "ClipMetadata  // same shape as in AnalysisWindow",
-      "student_response": "BehaviourResult  // same shape as /evaluate/analyse response",
-      "student_transcript": "string"
-    }
-  ]
+    "session_id": "string",
+    "scenario_id": "string",
+    "language": "string",
+    "history": [
+        {
+            "turn_id": "integer",
+            "clip": "ClipMetadata  // same shape as in AnalysisWindow",
+            "student_response": "BehaviourResult  // same shape as /evaluate/analyse response",
+            "student_transcript": "string"
+        }
+    ]
 }
 ```
 
 **Response 200** — Feedback
 ```json
 {
-  "session_id": "string",
-  "advice": "string",
-  "severity": "low | medium | high",
-  "highlights": ["string"]
+    "session_id": "string",
+    "advice": "string",
+    "severity": "low | medium | high",
+    "highlights": ["string"]
 }
 ```
 
@@ -511,8 +656,8 @@ data: {"type": "complete", "feedback": { ...Feedback object... }}\n\n
 **Response 200**
 ```json
 {
-  "status": "ok",
-  "ollama_reachable": "boolean",
-  "model": "string  // e.g. 'llama3.2'"
+    "status": "ok",
+    "ollama_reachable": "boolean",
+    "model": "string  // e.g. 'llama3.2'"
 }
 ```
