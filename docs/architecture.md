@@ -58,7 +58,7 @@ Each session follows this sequence:
 
 4. **Branch** — The Evaluation container returns one `BehaviourResult` with an `escalation_score`. The App container uses this score to resolve the next clip from the scenario's branch conditions and sends a `ClipReady` message to the client.
 
-5. **Debrief** — At session end, the full `ConversationHistory` (what each video clip showed + how the student responded) is sent to the Feedback container. The LLM generates a structured debrief which streams back to the client.
+5. **Debrief** — At session end, the full `ConversationHistory` (what each video clip showed and how the student responded) is sent to the Feedback container via `POST /feedback/generate/stream`. The Feedback container calls Ollama and returns an SSE stream. The App container reads that stream and forwards each token to the client as a `feedback_token` WebSocket message. When the SSE stream ends with a `complete` event, the App sends a final `session_complete` WebSocket message containing the assembled `Feedback` object.
 
 ---
 

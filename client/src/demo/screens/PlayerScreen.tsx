@@ -1,21 +1,26 @@
 // =============================================================================
 // PlayerScreen
 //
-// Full-page layout during an active clip. Left column: scenario video area +
-// clip context (transcript, notable features). Right column: live webcam.
+// Full-page layout during an active clip. Left column: scenario video (or
+// graceful fallback if the file is missing/fails) + clip context. Right
+// column: live webcam feed + "done" button.
+//
+// The scenario video is attempted from clipMeta.video_url. If it errors, or
+// if no URL is present, the left column falls back to showing the transcript
+// and notable features as the primary content so the session can continue
+// normally without any video files being present.
 // =============================================================================
 
 import { useState } from "react";
-import type { ClipMetadata } from "@ar-training/shared";
+import type { ClipData } from "@ar-training/shared";
 
 interface PlayerScreenProps {
     videoRef:      React.RefObject<HTMLVideoElement | null>;
     currentClipId: string;
-    clipMeta:      ClipMetadata | null;
+    clipMeta:      ClipData | null;
     onClipEnded:   (clipId: string) => void;
 }
 
-// Human-readable labels for notable_features values
 const FEATURE_LABELS: Record<string, string> = {
     raised_voice:       "Luide stem",
     calm_voice:         "Rustige stem",
@@ -30,12 +35,17 @@ const FEATURE_LABELS: Record<string, string> = {
 };
 
 export function PlayerScreen({ videoRef, currentClipId, clipMeta, onClipEnded }: PlayerScreenProps) {
-    const [confirmed, setConfirmed] = useState(false);
+    const [confirmed,   setConfirmed]   = useState(false);
+    const [videoFailed, setVideoFailed] = useState(false);
 
     const handleDone = () => {
         setConfirmed(true);
         onClipEnded(currentClipId);
     };
+
+    const videoUrl    = clipMeta?.video_url ?? null;
+    const showVideo   = videoUrl !== null && !videoFailed;
+    const showFallback = !showVideo;
 
     return (
         <div style={s.root}>
@@ -43,21 +53,35 @@ export function PlayerScreen({ videoRef, currentClipId, clipMeta, onClipEnded }:
             {/* ── Left column ─────────────────────────────────────────── */}
             <div style={s.left}>
 
-                {/* Video placeholder — fills the left column */}
-                <div style={s.videoPlaceholder}>
-                    <span style={s.videoPlaceholderLabel}>Scenario video</span>
-                    <span style={s.videoPlaceholderSub}>{currentClipId}</span>
-                </div>
+                {/* Scenario video — hidden (but mounted) when failed so we
+                    don't keep a broken element in the visual flow */}
+                {videoUrl && (
+                    <video
+                        key={videoUrl}           // remount on clip change
+                        src={videoUrl}
+                        controls
+                        style={{ ...s.scenarioVideo, display: showVideo ? "block" : "none" }}
+                        onError={() => setVideoFailed(true)}
+                    />
+                )}
 
-                {/* Clip transcript */}
+                {/* Fallback header — shown when video is unavailable */}
+                {showFallback && (
+                    <div style={s.fallbackHeader}>
+                        <span style={s.fallbackLabel}>Scenario video niet beschikbaar</span>
+                        <span style={s.fallbackClipId}>{currentClipId}</span>
+                    </div>
+                )}
+
+                {/* Transcript — always shown; promoted to top when video fails */}
                 {clipMeta?.transcript && (
-                    <div style={s.transcriptBox}>
+                    <div style={{ ...s.transcriptBox, ...(showFallback ? s.transcriptBoxPromoted : {}) }}>
                         <span style={s.sectionLabel}>Wat de ander zegt</span>
                         <p style={s.transcriptText}>"{clipMeta.transcript}"</p>
                     </div>
                 )}
 
-                {/* Notable features */}
+                {/* Notable features — always shown */}
                 {clipMeta && clipMeta.notable_features.length > 0 && (
                     <div style={s.featuresBox}>
                         <span style={s.sectionLabel}>Gedragskenmerken</span>
@@ -70,19 +94,21 @@ export function PlayerScreen({ videoRef, currentClipId, clipMeta, onClipEnded }:
                         </div>
                     </div>
                 )}
+
+                {/* Placeholder shown only when there is genuinely nothing to display */}
+                {!clipMeta && (
+                    <div style={s.emptyPlaceholder}>
+                        <span style={s.fallbackLabel}>Clipgegevens laden…</span>
+                        <span style={s.fallbackClipId}>{currentClipId}</span>
+                    </div>
+                )}
             </div>
 
             {/* ── Right column ────────────────────────────────────────── */}
             <div style={s.right}>
                 <div style={s.webcamCard}>
                     <span style={s.sectionLabel}>Jouw reactie</span>
-                    {/* The persistent video element — srcObject already bound */}
-                    <video
-                        ref={videoRef}
-                        muted
-                        playsInline
-                        style={s.webcam}
-                    />
+                    <video ref={videoRef} muted playsInline style={s.webcam} />
                 </div>
 
                 <button
@@ -104,21 +130,42 @@ export function PlayerScreen({ videoRef, currentClipId, clipMeta, onClipEnded }:
 
 const s = {
     root: {
-        minHeight:   "100vh",
-        display:     "grid",
+        minHeight:           "100vh",
+        display:             "grid",
         gridTemplateColumns: "1fr 340px",
-        gap:         "0",
-        background:  "#0f172a",
+        background:          "#0f172a",
     },
     left: {
+        display:       "flex",
+        flexDirection: "column" as const,
+        gap:           "16px",
+        padding:       "24px",
+        borderRight:   "1px solid #1e293b",
+        overflowY:     "auto" as const,
+    },
+    scenarioVideo: {
+        width:        "100%",
+        aspectRatio:  "16/9",
+        borderRadius: "10px",
+        background:   "#000",
+        border:       "1px solid #334155",
+        display:      "block",
+        flexShrink:   0,
+    },
+    fallbackHeader: {
+        width:          "100%",
+        aspectRatio:    "16/9",
+        background:     "#1e293b",
+        borderRadius:   "10px",
+        border:         "1px dashed #334155",
         display:        "flex",
         flexDirection:  "column" as const,
-        gap:            "16px",
-        padding:        "24px",
-        borderRight:    "1px solid #1e293b",
-        overflowY:      "auto" as const,
+        alignItems:     "center",
+        justifyContent: "center",
+        gap:            "6px",
+        flexShrink:     0,
     },
-    videoPlaceholder: {
+    emptyPlaceholder: {
         width:          "100%",
         aspectRatio:    "16/9",
         background:     "#1e293b",
@@ -131,14 +178,14 @@ const s = {
         gap:            "6px",
         flexShrink:     0,
     },
-    videoPlaceholderLabel: {
+    fallbackLabel: {
         fontSize:      "12px",
         color:         "#475569",
         textTransform: "uppercase" as const,
         letterSpacing: "0.08em",
     },
-    videoPlaceholderSub: {
-        fontSize:   "14px",
+    fallbackClipId: {
+        fontSize:   "13px",
         color:      "#64748b",
         fontFamily: "monospace",
     },
@@ -147,6 +194,12 @@ const s = {
         borderRadius: "8px",
         padding:      "14px 16px",
         borderLeft:   "3px solid #6366f1",
+    },
+    // When video is absent, make the transcript box visually heavier
+    transcriptBoxPromoted: {
+        padding:    "20px 20px",
+        fontSize:   "16px",
+        borderLeft: "4px solid #6366f1",
     },
     transcriptText: {
         margin:     "6px 0 0",
@@ -193,7 +246,7 @@ const s = {
         display:      "block",
         background:   "#0c1221",
         border:       "1px solid #334155",
-        transform:    "scaleX(-1)", // mirror — feels more natural for self-view
+        transform:    "scaleX(-1)",
     },
     sectionLabel: {
         display:       "block",

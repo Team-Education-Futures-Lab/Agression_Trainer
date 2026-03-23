@@ -2,24 +2,28 @@
 // Demo — Scenario flow
 //
 // Screen order:
-//   LandingScreen   — idle / error
-//   QueueScreen     — queued
-//   ScenarioScreen  — selecting (connected, scenarios loaded, no choice yet)
-//   PlayerScreen    — active (clip loaded and playing)
+//   LandingScreen    — idle / error
+//   QueueScreen      — queued
+//   ScenarioScreen   — selecting (connected, scenarios loaded, awaiting choice)
+//   PlayerScreen     — active (clip loaded and playing)
 //   EvaluatingScreen — paused (clip ended, waiting for clip_selected)
-//   DebriefScreen   — completed
+//   DebriefScreen    — completed
+//
+// Every state that depends on a server response has a timeout. If the expected
+// message does not arrive within RESPONSE_TIMEOUT_MS, an inline error is shown
+// with a disconnect button so the user is never stuck indefinitely.
 // =============================================================================
 
 import { useEffect, useRef, useState } from "react";
 import type { SessionComplete, ServerMessage, ScenarioSummary } from "@ar-training/shared";
-import { useCapture }        from "../hooks/useCapture.ts";
-import { useSession }        from "../hooks/useSession.ts";
-import { LandingScreen }     from "./screens/LandingScreen.tsx";
-import { QueueScreen }       from "./screens/QueueScreen.tsx";
-import { ScenarioScreen }    from "./screens/ScenarioScreen.tsx";
-import { PlayerScreen }      from "./screens/PlayerScreen.tsx";
-import { EvaluatingScreen }  from "./screens/EvaluatingScreen.tsx";
-import { DebriefScreen }     from "./screens/DebriefScreen.tsx";
+import { useCapture }       from "../hooks/useCapture.ts";
+import { useSession }       from "../hooks/useSession.ts";
+import { LandingScreen }    from "./screens/LandingScreen.tsx";
+import { QueueScreen }      from "./screens/QueueScreen.tsx";
+import { ScenarioScreen }   from "./screens/ScenarioScreen.tsx";
+import { PlayerScreen }     from "./screens/PlayerScreen.tsx";
+import { EvaluatingScreen } from "./screens/EvaluatingScreen.tsx";
+import { DebriefScreen }    from "./screens/DebriefScreen.tsx";
 
 const styleEl = document.createElement("style");
 styleEl.textContent = `
@@ -29,11 +33,54 @@ styleEl.textContent = `
 `;
 document.head.appendChild(styleEl);
 
+/** After this many ms without the expected response, show the timeout screen. */
+const RESPONSE_TIMEOUT_MS = 15_000;
+
+// ─── useStuckTimeout ─────────────────────────────────────────────────────────
+// Returns true when the given condition has been true for longer than the
+// threshold without being cleared. `condition` going false resets the timer.
+
+function useStuckTimeout(condition: boolean, ms = RESPONSE_TIMEOUT_MS): boolean {
+    const [stuck, setStuck] = useState(false);
+    useEffect(() => {
+        if (!condition) { setStuck(false); return; }
+        const id = setTimeout(() => setStuck(true), ms);
+        return () => clearTimeout(id);
+    }, [condition, ms]);
+    return stuck;
+}
+
+// ─── TimeoutScreen ────────────────────────────────────────────────────────────
+
+function TimeoutScreen({ message, onDisconnect }: { message: string; onDisconnect: () => void }) {
+    return (
+        <div style={ts.root}>
+            <div style={ts.card}>
+                <p style={ts.icon}>⚠</p>
+                <h2 style={ts.title}>Er ging iets mis</h2>
+                <p style={ts.body}>{message}</p>
+                <button style={ts.btn} onClick={onDisconnect}>Opnieuw proberen</button>
+            </div>
+        </div>
+    );
+}
+
+const ts = {
+    root:  { minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#0f172a", padding: "24px" },
+    card:  { maxWidth: "400px", width: "100%", background: "#1e293b", borderRadius: "12px", padding: "36px", textAlign: "center" as const, boxShadow: "0 8px 32px rgba(0,0,0,0.4)" },
+    icon:  { margin: "0 0 12px", fontSize: "32px" },
+    title: { margin: "0 0 12px", fontSize: "20px", fontWeight: "600" as const, color: "#f1f5f9" },
+    body:  { margin: "0 0 24px", fontSize: "14px", color: "#94a3b8", lineHeight: 1.6 },
+    btn:   { width: "100%", padding: "12px", fontSize: "15px", fontWeight: "600" as const, background: "#6366f1", color: "#fff", border: "none", borderRadius: "8px", cursor: "pointer" },
+} as const;
+
+// ─── Demo ─────────────────────────────────────────────────────────────────────
+
 export function Demo() {
     const { capture, ready, videoRef } = useCapture();
 
-    const [streamedAdvice,  setStreamedAdvice]  = useState("");
-    const [finalMessage,    setFinalMessage]    = useState<SessionComplete | null>(null);
+    const [streamedAdvice, setStreamedAdvice] = useState("");
+    const [finalMessage,   setFinalMessage]   = useState<SessionComplete | null>(null);
 
     const demoStateRef = useRef({ finalMessage });
     demoStateRef.current = { finalMessage };
@@ -45,13 +92,10 @@ export function Demo() {
         if (msg.type === "session_complete" && demoStateRef.current.finalMessage === null) {
             setFinalMessage(msg);
         }
-        // Preload candidate clips in the background when clip_candidates arrives.
         if (msg.type === "clip_candidates") {
             msg.candidates.forEach(c => {
                 const link = document.createElement("link");
-                link.rel  = "preload";
-                link.as   = "video";
-                link.href = c.video_url;
+                link.rel = "preload"; link.as = "video"; link.href = c.video_url;
                 document.head.appendChild(link);
             });
         }
@@ -59,122 +103,111 @@ export function Demo() {
 
     const {
         state, queuePos, scenarios, currentClipData, feedbackUnavailable,
-        connect, disconnect, selectScenario, preloadClip, sendClipEnded,
+        connect, disconnect, selectScenario, sendClipEnded,
     } = useSession(capture, { onMessage: handleMessage });
 
-    // ── Connect (called from LandingScreen) ───────────────────────────────────
+    // ── Timeout conditions ────────────────────────────────────────────────────
+    // Each boolean is true only while we are waiting for a specific response.
+    const waitingForScenarios = (state === "connecting" || state === "selecting") && scenarios.length === 0;
+    const waitingForClipData  = state === "active" && currentClipData === null;
+    const waitingForEval      = state === "paused";
+    const waitingForFeedback  = state === "completed" && finalMessage === null && !feedbackUnavailable;
+
+    const scenariosTimedOut = useStuckTimeout(waitingForScenarios);
+    const clipDataTimedOut  = useStuckTimeout(waitingForClipData);
+    const evalTimedOut      = useStuckTimeout(waitingForEval);
+    const feedbackTimedOut  = useStuckTimeout(waitingForFeedback);
+
+    // ── Connect ───────────────────────────────────────────────────────────────
     const handleConnect = async () => {
-        // Start capture immediately so MediaPipe warms up while the user reads
-        // the scenario list. Capture does not send data until selectScenario()
-        // transitions the session to active.
         if (videoRef.current) await capture.start(videoRef.current);
         await connect();
     };
 
-    // ── Scenario selection ────────────────────────────────────────────────────
     const handleSelectScenario = (sc: ScenarioSummary) => {
         selectScenario(sc.scenario_id, sc.entry_clip_id);
     };
 
-    // ── Clip ended ────────────────────────────────────────────────────────────
-    const handleClipEnded = (clipId: string) => {
-        sendClipEnded(clipId);
-    };
-
-    // ── Preload next candidates ────────────────────────────────────────────────
-    // When clip_data arrives for a non-activating request (preload), we don't
-    // need to do anything extra — preloadClip() is called from the debug harness
-    // or anywhere callers want to prefetch. The browser handles caching.
-    void preloadClip; // acknowledge the import; used via selectScenario internally
-
-    // ── Restart ───────────────────────────────────────────────────────────────
     const handleRestart = () => {
         disconnect();
         setStreamedAdvice("");
         setFinalMessage(null);
     };
 
-    // ── Capture cleanup on error / disconnect ─────────────────────────────────
     useEffect(() => {
-        if (state === "idle") {
-            capture.stop();
-        }
+        if (state === "idle") capture.stop();
     }, [state, capture]);
 
-    // ─── Persistent hidden video element ─────────────────────────────────────
-    // The <video> element is kept mounted for the entire session so srcObject
-    // binding is never broken. PlayerScreen renders it in-place via the ref;
-    // all other screens see only the hidden copy below.
+    // ─── Persistent hidden video element ──────────────────────────────────────
     const hiddenVideo = (
-        <video
-            ref={videoRef}
-            muted
-            playsInline
-            style={{ position: "fixed", opacity: 0, pointerEvents: "none", width: 1, height: 1, top: 0, left: 0 }}
+        <video ref={videoRef} muted playsInline
+               style={{ position: "fixed", opacity: 0, pointerEvents: "none", width: 1, height: 1, top: 0, left: 0 }}
         />
     );
 
     // ─── Screen selection ─────────────────────────────────────────────────────
 
     if (state === "idle" || state === "error") {
-        return (
-            <>{hiddenVideo}
-                <LandingScreen ready={ready} onConnect={handleConnect} />
-            </>
-        );
+        return <>{hiddenVideo}<LandingScreen ready={ready} onConnect={handleConnect} /></>;
     }
 
     if (state === "queued") {
         return <>{hiddenVideo}<QueueScreen queuePos={queuePos} /></>;
     }
 
-    if (state === "selecting" || state === "connecting") {
-        // "connecting" covers the brief window between session_ready and
-        // scenarios_list arriving. Show the scenario screen with an empty list;
-        // it displays a loading message until scenarios populate.
-        return (
-            <>{hiddenVideo}
-                <ScenarioScreen scenarios={scenarios} onSelect={handleSelectScenario} />
-            </>
-        );
+    if (state === "connecting" || state === "selecting") {
+        if (scenariosTimedOut) {
+            return <>{hiddenVideo}<TimeoutScreen
+                message="De server reageerde niet op tijd. Controleer de verbinding en probeer het opnieuw."
+                onDisconnect={handleRestart}
+            /></>;
+        }
+        return <>{hiddenVideo}<ScenarioScreen scenarios={scenarios} onSelect={handleSelectScenario} /></>;
     }
 
     if (state === "completed" || finalMessage !== null) {
-        return (
-            <>{hiddenVideo}
-                <DebriefScreen
-                    streamedAdvice={streamedAdvice}
-                    finalMessage={finalMessage}
-                    feedbackUnavailable={feedbackUnavailable}
-                    onRestart={handleRestart}
-                />
-            </>
-        );
+        return <>{hiddenVideo}<DebriefScreen
+            streamedAdvice={streamedAdvice}
+            finalMessage={finalMessage}
+            feedbackUnavailable={feedbackUnavailable || feedbackTimedOut}
+            onRestart={handleRestart}
+        /></>;
     }
 
     if (state === "paused") {
+        if (evalTimedOut) {
+            return <>{hiddenVideo}<TimeoutScreen
+                message="De analyse duurde te lang. Mogelijk is er een probleem met de evaluatieservice."
+                onDisconnect={handleRestart}
+            /></>;
+        }
         return <>{hiddenVideo}<EvaluatingScreen /></>;
     }
 
-    if (state === "active" && currentClipData !== null) {
-        return (
-            <PlayerScreen
+    if (state === "active") {
+        if (clipDataTimedOut) {
+            return <>{hiddenVideo}<TimeoutScreen
+                message="De clipgegevens kwamen niet aan. Controleer of de scenario's correct zijn geconfigureerd."
+                onDisconnect={handleRestart}
+            /></>;
+        }
+        if (currentClipData !== null) {
+            return <PlayerScreen
                 videoRef={videoRef}
                 currentClipId={currentClipData.clip_id}
                 clipMeta={currentClipData}
-                onClipEnded={handleClipEnded}
-            />
-        );
-    }
-
-    // active but clip_data not yet arrived — transitional
-    return (
-        <>{hiddenVideo}
+                onClipEnded={sendClipEnded}
+            />;
+        }
+        // clip_data not yet arrived — transitional, timeout guard above handles the hang
+        return <>{hiddenVideo}
             <div style={loadingStyle}>
                 <p style={{ color: "#94a3b8", fontFamily: "sans-serif" }}>Clip laden…</p>
             </div>
-        </>
-    );
+        </>;
+    }
+
+    return null;
 }
 
 const loadingStyle: React.CSSProperties = {

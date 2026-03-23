@@ -8,17 +8,19 @@ Stubs are not fallback behaviour. They exist only for development and integratio
 
 ## Overview
 
-| Container     | Interface                  | Env variable           | Default  |
-|---------------|----------------------------|------------------------|----------|
-| Transcription | `TranscriptionPoolInterface` | `TRANSCRIPTION_POOL` | `stub`   |
-| Evaluation    | `BehaviourAnalyserInterface` | `BEHAVIOUR_ANALYSER` | `stub`   |
-| Feedback      | `FeedbackGeneratorInterface` | `FEEDBACK_GENERATOR` | `stub`   |
+| Container     | Interface                    | Env variable           | Default  |
+|---------------|------------------------------|------------------------|----------|
+| Transcription | `TranscriptionPoolInterface` | `TRANSCRIPTION_POOL`   | `stub`   |
+| Evaluation    | `BehaviourAnalyserInterface` | `BEHAVIOUR_ANALYSER`   | `stub`   |
+| Feedback      | `FeedbackGeneratorInterface` | `FEEDBACK_GENERATOR`   | `stub`   |
 
 ---
 
 ## Switching Between Stub and Real Implementations
 
-Each container selects its implementation based on an environment variable. The container's factory function instantiates the correct class:
+Each container selects its implementation based on an environment variable. The container's factory function instantiates the correct class.
+
+**Python containers (Transcription, Evaluation):**
 
 ```python
 # Transcription container (transcription/src/main.py)
@@ -38,6 +40,22 @@ match os.environ.get("BEHAVIOUR_ANALYSER", "stub"):
     case "production":
         from models.behaviour_analyser import ProductionBehaviourAnalyser
         return ProductionBehaviourAnalyser()
+```
+
+**TypeScript containers (Feedback):**
+
+```typescript
+// Feedback container (feedback/src/main.ts)
+function makeFeedbackGenerator(): FeedbackGeneratorInterface {
+    const impl = process.env.FEEDBACK_GENERATOR ?? "stub";
+    switch (impl) {
+        case "production":
+            return new OllamaFeedbackGenerator();
+        case "stub":
+        default:
+            return new StubFeedbackGenerator();
+    }
+}
 ```
 
 This pattern means no other code needs to change when swapping implementations.
@@ -122,42 +140,50 @@ Returns a canned `Feedback` object without calling Ollama. Useful for testing th
 - Always returns `severity: "medium"`.
 - `advice` is a fixed Dutch placeholder string.
 - `highlights` references the first and last turn in the history to verify that turn references are wired correctly.
+- `generateStream()` splits the canned advice word by word and yields tokens with a small artificial delay to simulate realistic streaming behaviour.
 
 ### Implementation
 
-```python
-from interfaces import FeedbackGeneratorInterface, FeedbackRequest, Feedback
-from typing import AsyncIterator
+```typescript
+import type { FeedbackGeneratorInterface } from "./interfaces.js";
+import type { FeedbackRequest, Feedback } from "@ar-training/shared";
 
-class StubFeedbackGenerator(FeedbackGeneratorInterface):
-    """
-    Stub implementation for development and integration testing.
-    Returns hardcoded feedback without calling Ollama.
-    Do not use in production.
-    """
+export class StubFeedbackGenerator implements FeedbackGeneratorInterface {
+    /**
+     * Stub implementation for development and integration testing.
+     * Returns hardcoded feedback without calling Ollama.
+     * Do not use in production.
+     */
 
-    async def generate(self, req: FeedbackRequest) -> Feedback:
-        highlights = []
-        if req.history:
-            highlights.append(f"Turn {req.history[0].turn_id}: [stub] eerste reactie geanalyseerd.")
-        if len(req.history) > 1:
-            highlights.append(f"Turn {req.history[-1].turn_id}: [stub] laatste reactie geanalyseerd.")
+    async generate(req: FeedbackRequest): Promise<Feedback> {
+        const highlights: string[] = [];
+        if (req.history.length > 0) {
+            highlights.push(`Turn ${req.history[0].turn_id}: [stub] eerste reactie geanalyseerd.`);
+        }
+        if (req.history.length > 1) {
+            highlights.push(`Turn ${req.history[req.history.length - 1].turn_id}: [stub] laatste reactie geanalyseerd.`);
+        }
 
-        return Feedback(
-            session_id=req.session_id,
-            advice=(
-                "[STUB] Dit is een testfeedback. In een echte sessie zou hier een "
-                "gepersonaliseerde analyse van jouw de-escalatiegedrag staan, gegenereerd "
+        return {
+            session_id: req.session_id,
+            advice: (
+                "[STUB] Dit is een testfeedback. In een echte sessie zou hier een " +
+                "gepersonaliseerde analyse van jouw de-escalatiegedrag staan, gegenereerd " +
                 "op basis van jouw reacties op de videoscenario's."
             ),
-            severity="medium",
-            highlights=highlights,
-        )
+            severity: "medium",
+            highlights,
+        };
+    }
 
-    async def generate_stream(self, req: FeedbackRequest) -> AsyncIterator[str]:
-        feedback = await self.generate(req)
-        for word in feedback.advice.split():
-            yield word + " "
+    async *generateStream(req: FeedbackRequest): AsyncGenerator<string> {
+        const feedback = await this.generate(req);
+        for (const word of feedback.advice.split(" ")) {
+            yield word + " ";
+            await new Promise(resolve => setTimeout(resolve, 30));
+        }
+    }
+}
 ```
 
 ---

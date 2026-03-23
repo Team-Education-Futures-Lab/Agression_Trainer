@@ -4,6 +4,7 @@
     "description": "Een student is boos over een onvoldoende en confronteert de docent. Oefen met het behouden van een kalme, constructieve toon onder druk.",
     "language": "nl",
     "entry_clip": "clip_01_intro",
+    "coaching_context": "De student oefent de rol van MBO-docent die geconfronteerd wordt met een boze student. Het doel is om kalm en constructief te blijven en de situatie te de-escaleren zonder de relatie met de student te beschadigen.",
 
     "clips": {
         "clip_01_intro": {

@@ -1,0 +1,26 @@
+{
+    "name": "feedback",
+    "version": "1.0.0",
+    "description": "AR Training — Feedback container",
+    "license": "ISC",
+    "type": "module",
+    "scripts": {
+        "build": "tsc",
+        "start": "node dist/main.js",
+        "dev": "node --watch --experimental-strip-types src/main.ts",
+        "test": "vitest run",
+        "test:watch": "vitest",
+        "test:ui": "vitest --ui",
+        "typecheck": "tsc --noEmit"
+    },
+    "dependencies": {
+        "@ar-training/shared": "file:../shared",
+        "fastify": "^5.8.1"
+    },
+    "devDependencies": {
+        "@types/node": "^22.0.0",
+        "@vitest/ui": "^3.1.2",
+        "typescript": "^5.9.3",
+        "vitest": "^3.1.2"
+    }
+}

@@ -28,6 +28,7 @@ import type {
     VideoFrame,
     AudioChunk,
     ClipData,
+    ClipCandidateData,
 } from "@ar-training/shared";
 import type { CaptureSession } from "./capture.ts";
 import { WebSocketTransport } from "./transport.ts";
@@ -255,33 +256,55 @@ export class SessionHandler {
                 break;
 
             case "clip_data":
-                // clip_data is forwarded via onMessage above.
-                // If this is an activating clip_data (activate=true path), start loops.
-                // We detect this by checking whether we are in the selecting or paused
-                // state; preload-only clip_data arrives while active/paused and should
-                // not start loops.
+                // An activating clip_data only arrives in two situations:
+                //   1. selectScenario() — first clip of a session (state: selecting)
+                //   2. The request_clip fallback in clip_selected (state: connecting)
+                // Preload-only clip_data arrives while active/paused and must not
+                // start loops.
                 if (this._state === "selecting" || this._state === "connecting") {
+                    this.callbacks.onActivatingClipData(msg);
                     this._startClip();
                 }
                 break;
 
             case "clip_candidates":
-                // Forwarded to onMessage above. No state transition — evaluation is
-                // running in the background. Callers use this to preload candidates.
+                // Store candidates so clip_selected can resolve without a round-trip.
+                this._lastCandidates = msg.candidates;
                 break;
 
             case "clip_selected":
                 if (msg.clip_id !== null) {
-                    // Evaluation complete — request and activate the selected clip.
-                    // clip_data will arrive and _startClip() will be called from there.
-                    if (this.sessionId) {
-                        // We need the scenario_id; it was set when selectScenario() was
-                        // called and we can retrieve it from the last clip_data received.
-                        // We store it on the instance at selectScenario() time.
-                        this._requestClip(this._activeScenarioId!, msg.clip_id, true);
+                    // The winning clip's full data is already in _lastCandidates —
+                    // the server sent it as part of clip_candidates before evaluation
+                    // ran. Use it directly instead of sending another request_clip,
+                    // which the server would reject (session is already ACTIVE).
+                    const candidate = this._lastCandidates.find(c => c.clip_id === msg.clip_id);
+                    if (candidate && this._activeScenarioId) {
+                        // Synthesise a ClipData message from the candidate.
+                        const clipData: ClipData = {
+                            type:             "clip_data",
+                            session_id:       this.sessionId!,
+                            clip_id:          candidate.clip_id,
+                            scenario_id:      this._activeScenarioId,
+                            video_url:        candidate.video_url,
+                            transcript:       candidate.transcript,
+                            notable_features: candidate.notable_features,
+                            branch_conditions: candidate.branch_conditions,
+                        };
+                        this._lastCandidates = [];
+                        this.callbacks.onActivatingClipData(clipData);
+                        this._startClip();
+                    } else {
+                        // Candidate not found (shouldn't happen in normal flow) —
+                        // fall back to a request_clip round-trip.
+                        this._lastCandidates = [];
+                        if (this._activeScenarioId) {
+                            this._requestClip(this._activeScenarioId, msg.clip_id, true);
+                        }
                     }
                 } else {
                     // Terminal clip — session is complete, waiting for feedback.
+                    this._lastCandidates = [];
                     this._setState("completed");
                 }
                 break;
@@ -309,6 +332,9 @@ export class SessionHandler {
 
     /** Scenario ID for the active session — set by selectScenario(). */
     private _activeScenarioId: string | null = null;
+
+    /** Last clip_candidates received — used to resolve clip_selected without a round-trip. */
+    private _lastCandidates: ClipCandidateData[] = [];
 
     private _requestClip(scenarioId: string, clipId: string, activate: boolean): void {
         if (!this.transport || !this.sessionId) return;

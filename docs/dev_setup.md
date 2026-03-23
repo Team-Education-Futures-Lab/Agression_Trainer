@@ -36,7 +36,10 @@ cd ar-training
 cp .env.example .env
 
 # 3. Pull the Ollama model (only needed once — persisted in a Docker volume)
-docker compose run --rm ollama ollama pull llama3.2
+#    The ollama/ollama image runs a server as its entrypoint, so the pull must
+#    be done by exec-ing into a running container rather than via `run`.
+docker compose up -d ollama
+docker compose exec ollama ollama pull llama3.2
 
 # 4. Start the full stack
 docker compose up --build
@@ -95,15 +98,26 @@ The Transcription container has a real Whisper implementation (`TRANSCRIPTION_PO
 
 ### Transcription container (`transcription/.env`)
 
-| Variable             | Default   | Description                                                                                   |
-|----------------------|-----------|-----------------------------------------------------------------------------------------------|
-| `INTERNAL_API_KEY`   | _(required)_ | Must match the value in `app/.env`.                                                        |
-| `TRANSCRIPTION_POOL` | `stub`    | `stub` — canned responses, no Whisper; `production` — real WhisperPool.                      |
-| `WHISPER_MODEL`      | `base`    | faster-whisper model size: `tiny`, `base`, `small`, `medium`, `large-v3`.                    |
-| `WHISPER_LANGUAGE`   | `nl`      | ISO 639-1 language code passed to Whisper.                                                    |
-| `WHISPER_WORKERS`    | `4`       | Number of `WhisperModel` instances in the pool — controls transcription parallelism.          |
-| `DEVICE`             | `cpu`     | `cpu` or `cuda`. CUDA requires the NVIDIA Container Toolkit.                                  |
-| `PORT`               | `8003`    | Internal listen port.                                                                         |
+| Variable             | Default      | Description                                                                          |
+|----------------------|--------------|--------------------------------------------------------------------------------------|
+| `INTERNAL_API_KEY`   | _(required)_ | Must match the value in `app/.env`.                                                  |
+| `TRANSCRIPTION_POOL` | `stub`       | `stub` — canned responses, no Whisper; `production` — real WhisperPool.              |
+| `WHISPER_MODEL`      | `base`       | faster-whisper model size: `tiny`, `base`, `small`, `medium`, `large-v3`.            |
+| `WHISPER_LANGUAGE`   | `nl`         | ISO 639-1 language code passed to Whisper.                                           |
+| `WHISPER_WORKERS`    | `4`          | Number of `WhisperModel` instances in the pool — controls transcription parallelism. |
+| `DEVICE`             | `cpu`        | `cpu` or `cuda`. CUDA requires the NVIDIA Container Toolkit.                         |
+| `PORT`               | `8003`       | Internal listen port.                                                                |
+
+### Feedback container (`feedback/.env`)
+
+| Variable             | Default               | Description                                                                                                                        |
+|----------------------|-----------------------|------------------------------------------------------------------------------------------------------------------------------------|
+| `INTERNAL_API_KEY`   | _(required)_          | Must match the value in `app/.env`.                                                                                                |
+| `FEEDBACK_GENERATOR` | `stub`                | `stub` — canned Dutch feedback, no Ollama; `production` — calls Ollama to generate real feedback.                                  |
+| `OLLAMA_HOST`        | `http://ollama:11434` | Base URL of the Ollama instance. Override to use an external Ollama server.                                                        |
+| `OLLAMA_MODEL`       | `llama3.2`            | The Ollama model name to use for generation.                                                                                       |
+| `OLLAMA_TIMEOUT_MS`  | `120000`              | How long to wait for Ollama to respond before treating it as unreachable (ms).                                                     |
+| `PORT`               | `8002`                | Internal listen port.                                                                                                              |
 
 ---
 
@@ -154,6 +168,7 @@ ar-training/
 │   ├── package.json
 │   ├── tsconfig.json
 │   ├── Dockerfile
+│   ├── .env                    ← Local env (not committed — copy from .env.example)
 │   ├── README.md
 │   └── .gitignore
 │
@@ -225,9 +240,9 @@ The `shared/` package contains TypeScript type definitions used by `app/`, `feed
 ```json
 // app/package.json, feedback/package.json, client/package.json
 {
-  "dependencies": {
-    "@ar-training/shared": "file:../shared"
-  }
+    "dependencies": {
+        "@ar-training/shared": "file:../shared"
+    }
 }
 ```
 
@@ -254,15 +269,21 @@ docker compose up
 # Start with rebuilt images (after code changes)
 docker compose up --build
 
+# Start without Ollama (all stubs active)
+docker compose up app client transcription evaluation feedback
+
 # Scale transcription or evaluation workers
 docker compose up --scale transcription=3
 docker compose up --scale evaluation=3
 
 # View logs for a specific container
-docker compose logs -f transcription
+docker compose logs -f feedback
 
 # Run TypeScript tests (App container)
 docker compose run --rm app npm test
+
+# Run TypeScript tests (Feedback container)
+docker compose run --rm feedback npm test
 
 # Run Python tests (Transcription container)
 docker compose run --rm transcription python -m pytest
@@ -291,10 +312,10 @@ docker compose down -v
 
 ## Implementing a Real AI Component
 
-Each AI component has a corresponding interface in its container's `src/interfaces.py`. To add a real implementation:
+Each AI component has a corresponding interface in its container's source directory. To add a real implementation:
 
 1. Create a new file in the appropriate container's source directory
-2. Subclass the relevant interface
+2. Subclass (Python) or implement (TypeScript) the relevant interface
 3. Implement all abstract methods
 4. Register the new implementation in the container's factory function (see `stub_guide.md` for the pattern)
 5. Set the corresponding environment variable in the container's `.env`

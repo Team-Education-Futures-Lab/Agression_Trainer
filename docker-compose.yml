@@ -32,6 +32,11 @@ services:
         condition: service_healthy
       evaluation:
         condition: service_healthy
+      # feedback is intentionally excluded from depends_on.
+      # An unreachable Feedback container is handled gracefully by the App,
+      # which sends error { code: "feedback_unavailable" } to the client
+      # rather than failing the session. The App must start even if feedback
+      # is down.
     restart: unless-stopped
 
   # ── Transcription ────────────────────────────────────────────────────────────
@@ -65,3 +70,35 @@ services:
       retries: 3
       start_period: 15s
     restart: unless-stopped
+
+  # ── Feedback ─────────────────────────────────────────────────────────────────
+  feedback:
+    build:
+      context: .
+      dockerfile: feedback/Dockerfile
+    env_file: feedback/.env
+    expose:
+      - "8002"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/feedback/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      # Ollama model loading can take up to 60 s on first start.
+      # In stub mode this is irrelevant, but the same compose file is used
+      # for production so a generous start_period avoids false-negative
+      # healthcheck failures during model warm-up.
+      start_period: 60s
+    restart: unless-stopped
+
+  # ── Ollama ───────────────────────────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama
+    volumes:
+      - ollama_models:/root/.ollama
+    expose:
+      - "11434"
+    restart: unless-stopped
+
+volumes:
+  ollama_models:
