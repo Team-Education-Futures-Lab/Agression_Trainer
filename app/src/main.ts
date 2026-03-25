@@ -14,28 +14,42 @@ import type { CreateSessionRequest, ClientMessage } from "@ar-training/shared";
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
 const config        = loadConfig();
-const app           = Fastify({ logger: true });
+const app           = Fastify({
+    logger: {
+        // Redact the Authorization header from all request/response logs so
+        // INTERNAL_API_KEY and ADMIN_API_KEY never appear in log output.
+        redact: ["req.headers.authorization"],
+    },
+});
 const sessions      = new SessionManager(config.sessionManager);
 const coord         = new Coordinator(config.coordinator);
 const scenarios     = new FileScenarioLoader(config.scenariosDir);
-const feedback      = new FeedbackClient(config.feedbackUrl, config.internalApiKey);
+const feedback      = new FeedbackClient(config.feedbackUrl, config.internalApiKey, config.feedbackTimeoutMs);
 const controller    = new ClipController(sessions, coord, scenarios, feedback);
 
 await app.register(websocketPlugin);
-await app.register(cors, { origin: true });
+await app.register(cors, { origin: config.corsOrigin });
 
 // ─── Health ───────────────────────────────────────────────────────────────────
+
+// Timeout for individual backend health-check fetches. Short enough that a
+// single hanging service does not stall the overall health response.
+const HEALTH_CHECK_TIMEOUT_MS = 5_000;
 
 app.get("/health", async (_req, reply) => {
     const [evalResults, transcriptionResults] = await Promise.all([
         Promise.allSettled(
             config.evaluationUrls.map(url =>
-                fetch(`${url}/evaluate/health`).then(r => r.ok)
+                fetch(`${url}/evaluate/health`, {
+                    signal: AbortSignal.timeout(HEALTH_CHECK_TIMEOUT_MS),
+                }).then(r => r.ok).catch(() => false)
             )
         ),
         Promise.allSettled(
             config.transcriptionUrls.map(url =>
-                fetch(`${url}/transcription/health`).then(r => r.ok)
+                fetch(`${url}/transcription/health`, {
+                    signal: AbortSignal.timeout(HEALTH_CHECK_TIMEOUT_MS),
+                }).then(r => r.ok).catch(() => false)
             )
         ),
     ]);
@@ -57,8 +71,9 @@ app.get("/health", async (_req, reply) => {
     const eval_ = buildInstanceStatus(config.evaluationUrls,    evalResults);
     const trans  = buildInstanceStatus(config.transcriptionUrls, transcriptionResults);
 
-    const feedOk     = await fetch(`${config.feedbackUrl}/feedback/health`)
-        .then(r => r.ok).catch(() => false);
+    const feedOk = await fetch(`${config.feedbackUrl}/feedback/health`, {
+        signal: AbortSignal.timeout(HEALTH_CHECK_TIMEOUT_MS),
+    }).then(r => r.ok).catch(() => false);
     const feedStatus = feedOk ? "ok" : "unreachable";
 
     const overallStatus =
@@ -155,7 +170,36 @@ app.get<{ Params: { session_id: string } }>("/session/:session_id/queue", async 
     });
 });
 
+// ─── Scenario routes ──────────────────────────────────────────────────────────
+
+app.get<{ Params: { scenario_id: string } }>("/scenarios/:scenario_id/clips", async (req, reply) => {
+    const { scenario_id } = req.params;
+    const entryClipId = scenarios.getEntryClip(scenario_id);
+    if (entryClipId === null) {
+        return reply.code(404).send({ error: "scenario_not_found", message: `Scenario "${scenario_id}" not found.` });
+    }
+    return reply.code(200).send({
+        scenario_id,
+        entry_clip_id: entryClipId,
+        clips: scenarios.listClips(scenario_id),
+    });
+});
+
 // ─── WebSocket handler ────────────────────────────────────────────────────────
+
+// Maximum raw WebSocket message size accepted from the client (bytes).
+// A legitimate video_frame with 478 face + 42 hand landmarks is ~15 KB as JSON.
+// A legitimate audio_chunk with 2 s of PCM at 16kHz is ~64 KB base64 + MFCCs.
+// 256 KB gives ample headroom for both while blocking obviously oversized payloads.
+const MAX_WS_MESSAGE_BYTES = 256 * 1024;
+
+// Per-clip frame cap. At 30 fps a 60-second clip produces 1800 frames.
+// 3600 = 2× that, so legitimate sessions are never affected.
+const MAX_FRAMES_PER_CLIP = 3_600;
+
+// Per-clip audio chunk cap. At one 2-second chunk per 2 s, a 60-second clip
+// produces 30 chunks. 120 = 4× that.
+const MAX_AUDIO_CHUNKS_PER_CLIP = 120;
 
 app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
     const { session_id } = req.params as { session_id: string };
@@ -173,22 +217,30 @@ app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
 
     const sendFn = (msg: object) => socket.send(JSON.stringify(msg));
 
+    // Per-connection counters reset when a new clip starts (coordinator.resetSession
+    // creates a new ClipSession). These are only used for rate-limiting; they do
+    // not need to be perfectly synchronised with clip transitions.
+    let frameCount = 0;
+    let audioCount = 0;
+
     // If the session is queued, the socket is open but we wait for a slot.
     // session_ready is sent when the session is promoted (see promoteNext in
     // SessionManager — it transitions to CONNECTING, and the timer is running;
     // the client must then send request_clip { activate: true } to go ACTIVE).
-    //
-    // We notify the client immediately if they're already active/connecting,
-    // and wire up the queue promotion callback if queued.
     if (ctx.state === "QUEUED") {
-        // Attach the send function so SessionManager can push session_ready
-        // when the slot becomes available.
         sessions.setQueuedSocket(session_id, () =>
             sendFn({ type: "session_ready", session_id })
         );
     }
 
     socket.on("message", (raw: Buffer) => {
+        // Reject oversized messages before parsing — prevents memory exhaustion
+        // from a client sending a single enormous JSON payload.
+        if (raw.length > MAX_WS_MESSAGE_BYTES) {
+            app.log.warn({ session_id, bytes: raw.length }, "WebSocket message exceeds size limit — dropped");
+            return;
+        }
+
         let msg: ClientMessage;
         try {
             msg = JSON.parse(raw.toString()) as ClientMessage;
@@ -212,17 +264,36 @@ app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
         }
 
         if (msg.type === "video_frame") {
-            coord.onFrame(msg);
+            // Use the authoritative session_id from the URL path, not from the
+            // message body, to prevent session confusion attacks.
+            if (frameCount >= MAX_FRAMES_PER_CLIP) {
+                app.log.warn({ session_id }, "video_frame rate limit reached — dropping frame");
+                return;
+            }
+            frameCount++;
+            coord.onFrame(session_id, msg);
             return;
         }
 
         if (msg.type === "audio_chunk") {
-            coord.onAudio(msg);
+            // Same reasoning as video_frame above.
+            if (audioCount >= MAX_AUDIO_CHUNKS_PER_CLIP) {
+                app.log.warn({ session_id }, "audio_chunk rate limit reached — dropping chunk");
+                return;
+            }
+            audioCount++;
+            coord.onAudio(session_id, msg);
             return;
         }
 
         if (msg.type === "clip_ended") {
-            controller.handleClipEnded(msg, sendFn).catch(err =>
+            // Reset per-clip counters before handling the transition so the
+            // next clip starts with a clean slate.
+            frameCount = 0;
+            audioCount = 0;
+            // Pass the authoritative session_id from the URL path — same
+            // session confusion defence as video_frame and audio_chunk.
+            controller.handleClipEnded(session_id, msg, sendFn).catch(err =>
                 app.log.error({ err, session_id }, "clip_ended handling failed")
             );
             return;
@@ -262,27 +333,37 @@ app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
             // Validate: only permitted from CONNECTING state (first activation)
             // or on a resumed session that already has a scenario bound.
             if (current.state === "ACTIVE" || current.state === "PAUSED") {
-                // Already active — clip advancement is driven by clip_ended/clip_selected,
-                // not by further activate calls.
                 send({ type: "error", session_id, code: "activate_not_permitted",
                     message: "Session is already active. Use clip_ended to advance clips." });
                 return;
             }
 
             if (current.state === "CONNECTING") {
-                const entryClip = scenarios.getEntryClip(scenarioId);
                 const isResumed = current.scenario_id !== null;
 
-                // Normal mode: must activate the entry clip on a fresh session.
-                // Admin mode or resumed session: any clip is valid.
-                if (!isResumed && !current.is_admin && clipId !== entryClip) {
-                    send({ type: "error", session_id, code: "activate_not_permitted",
-                        message: `Only the entry clip ("${entryClip}") may be activated to start a session.` });
-                    return;
+                if (isResumed) {
+                    // Resumed session: the scenario is already bound. Reject any
+                    // attempt to activate a clip from a different scenario — the
+                    // session history belongs to the original scenario.
+                    if (scenarioId !== current.scenario_id) {
+                        send({ type: "error", session_id, code: "activate_not_permitted",
+                            message: `Session is already bound to scenario "${current.scenario_id}".` });
+                        return;
+                    }
+                } else {
+                    // Fresh session: must activate the entry clip unless admin.
+                    const entryClip = scenarios.getEntryClip(scenarioId);
+                    if (!current.is_admin && clipId !== entryClip) {
+                        send({ type: "error", session_id, code: "activate_not_permitted",
+                            message: `Only the entry clip ("${entryClip}") may be activated to start a session.` });
+                        return;
+                    }
                 }
 
-                // Bind scenario (no-op if already bound from a previous session).
+                // Bind scenario and coaching context (no-ops on a resumed session
+                // because setScenario and setCoachingContext guard on scenario_id !== null).
                 sessions.setScenario(session_id, scenarioId);
+                sessions.setCoachingContext(session_id, scenarios.getCoachingContext(scenarioId));
                 sessions.setCurrentClip(session_id, clipId);
 
                 // Register with coordinator and transition to ACTIVE.
@@ -293,13 +374,13 @@ app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
 
         // Send clip_data regardless of activate — always a data response.
         send({
-            type:             "clip_data",
+            type:              "clip_data",
             session_id,
-            clip_id:          clip.clip_id,
-            scenario_id:      clip.scenario_id,
-            video_url:        clip.video_url,
-            transcript:       clip.transcript,
-            notable_features: clip.notable_features,
+            clip_id:           clip.clip_id,
+            scenario_id:       clip.scenario_id,
+            video_url:         clip.video_url,
+            transcript:        clip.transcript,
+            notable_features:  clip.notable_features,
             branch_conditions: clip.branch_conditions,
         });
     }

@@ -14,7 +14,7 @@ from dataclasses import asdict
 
 import uvicorn
 from fastapi import Depends, FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from auth import make_verify_token
 from config import EvaluationConfig, load_config
@@ -67,6 +67,12 @@ class BranchConditionModel(BaseModel):
 
 
 class ClipMetadataModel(BaseModel):
+    # Extra fields sent by the App container (e.g. video_url) are accepted but
+    # ignored — the Evaluation container only needs the fields listed here.
+    # model_config is set explicitly so the intent is clear rather than relying
+    # on Pydantic v2's default behaviour of silently ignoring extras.
+    model_config = ConfigDict(extra="ignore")
+
     clip_id:           str
     scenario_id:       str
     transcript:        str

@@ -1,0 +1,67 @@
+{
+    "scenario_id": "scenario_03",
+    "title": "Verwarde patiënt",
+    "description": "Een oudere patiënt is in de war over zijn medicatie en raakt steeds meer van streek. Hij is ervan overtuigd dat het personeel hem iets achterhoudt. Oefen met het opbouwen van vertrouwen en het kalmeren van een angstige, beschuldigende patiënt.",
+    "language": "nl",
+    "entry_clip": "clip_01_intro",
+    "coaching_context": "De student oefent de rol van zorgmedewerker die een verwarde oudere patiënt probeert te kalmeren. De patiënt is angstig en beschuldigend over zijn medicatie. Het doel is de patiënt zich gehoord en veilig te laten voelen en zijn vertrouwen in de zorg te herstellen.",
+
+    "clips": {
+        "clip_01_intro": {
+            "file": "clip_01_intro.mp4",
+            "transcript": "Waar zijn mijn pillen? Ik heb ze vanmorgen niet gekregen, dat weet ik zeker. Jullie verstoppen ze. Ik zie hoe jullie kijken. Ik ben niet gek, hoor. Zeg me de waarheid — waarom geef je me mijn medicijnen niet?",
+            "notable_features": ["raised_voice", "direct_eye_contact", "aggressive_posture"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 0.2,  "next_clip": "clip_02_enigszins_rustiger" },
+                { "min_score":  0.2, "max_score": 1.01, "next_clip": "clip_02_meer_angstig" }
+            ]
+        },
+
+        "clip_02_enigszins_rustiger": {
+            "file": "clip_02_enigszins_rustiger.mp4",
+            "transcript": "U zegt dat ze er zijn... maar ik heb ze niet gezien. Elke dag gaat het zo. Ik weet niet meer wat ik moet geloven. Kunt u het me laten zien? Dan geloof ik u misschien.",
+            "notable_features": ["calm_voice", "crossed_arms", "direct_eye_contact"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 0.2,  "next_clip": "clip_03_vertrouwen_opgebouwd" },
+                { "min_score":  0.2, "max_score": 1.01, "next_clip": "clip_03_twijfel_blijft" }
+            ]
+        },
+
+        "clip_02_meer_angstig": {
+            "file": "clip_02_meer_angstig.mp4",
+            "transcript": "Laat me los! Ik wil hier weg. Roep mijn dochter, ik wil mijn dochter. Jullie mogen me hier niet zo houden. Dit is mijn lichaam!",
+            "notable_features": ["raised_voice", "crying", "aggressive_posture"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 0.15, "next_clip": "clip_03_twijfel_blijft" },
+                { "min_score":  0.15, "max_score": 1.01, "next_clip": "clip_03_crisis" }
+            ]
+        },
+
+        "clip_03_vertrouwen_opgebouwd": {
+            "file": "clip_03_vertrouwen_opgebouwd.mp4",
+            "transcript": "Oh... u heeft ze dus al die tijd bewaard voor me. Excuus, ik wist het even niet meer. Ik schrik soms van mezelf. Dank u wel dat u geduldig bent.",
+            "notable_features": ["calm_voice", "open_posture", "backing_away"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
+            ]
+        },
+
+        "clip_03_twijfel_blijft": {
+            "file": "clip_03_twijfel_blijft.mp4",
+            "transcript": "Ik weet het niet... misschien heeft u gelijk. Maar ik voel me zo alleen hier. Niemand vertelt me wat er echt gebeurt. Ik wil gewoon weten wat er met me aan de hand is.",
+            "notable_features": ["crying", "silence", "crossed_arms"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
+            ]
+        },
+
+        "clip_03_crisis": {
+            "file": "clip_03_crisis.mp4",
+            "transcript": "Ik vertrouw u niet meer. Ik vertrouw niemand hier meer. Bel mijn dochter. Nu. Anders ga ik zelf schreeuwen totdat iemand me hoort.",
+            "notable_features": ["raised_voice", "crying", "direct_eye_contact"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
+            ]
+        }
+    }
+}

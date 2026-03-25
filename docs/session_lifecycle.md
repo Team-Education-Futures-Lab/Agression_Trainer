@@ -8,27 +8,27 @@ Describes every valid state a session can be in, what triggers each transition, 
 
 ```mermaid
 stateDiagram-v2
-    [*] --> CONNECTING : POST /session/create (capacity available)
-    [*] --> QUEUED     : POST /session/create (at capacity, policy=QUEUE)
-    [*] --> REJECTED   : POST /session/create (at capacity, policy=REJECT)
+   [*] --> CONNECTING : POST /session/create (capacity available)
+   [*] --> QUEUED     : POST /session/create (at capacity, policy=QUEUE)
+   [*] --> REJECTED   : POST /session/create (at capacity, policy=REJECT)
 
-    QUEUED     --> CONNECTING : slot becomes available
-    QUEUED     --> REJECTED   : queue timeout exceeded
+   QUEUED     --> CONNECTING : slot becomes available
+   QUEUED     --> REJECTED   : queue timeout exceeded
 
-    CONNECTING --> ACTIVE  : request_clip activate=true received
-    CONNECTING --> DROPPED : connection timeout (no activation within 30s)
+   CONNECTING --> ACTIVE  : request_clip activate=true received
+   CONNECTING --> DROPPED : connection timeout (no activation within 30s)
 
-    ACTIVE --> PAUSED    : clip ends, awaiting evaluation and branch decision
-    PAUSED --> ACTIVE    : next clip starts playing
-    PAUSED --> COMPLETED : null next_clip (terminal clip reached)
-    ACTIVE --> DROPPED   : WebSocket disconnected unexpectedly
+   ACTIVE --> PAUSED    : clip ends, awaiting evaluation and branch decision
+   PAUSED --> ACTIVE    : next clip starts playing
+   PAUSED --> COMPLETED : null next_clip (terminal clip reached)
+   ACTIVE --> DROPPED   : WebSocket disconnected unexpectedly
 
-    DROPPED --> CONNECTING : POST /session/{id}/resume (within recovery window)
-    DROPPED --> EXPIRED    : recovery window exceeded
+   DROPPED --> CONNECTING : POST /session/{id}/resume (within recovery window)
+   DROPPED --> EXPIRED    : recovery window exceeded
 
-    COMPLETED --> [*]
-    REJECTED  --> [*]
-    EXPIRED   --> [*]
+   COMPLETED --> [*]
+   REJECTED  --> [*]
+   EXPIRED   --> [*]
 ```
 
 ---
@@ -57,14 +57,14 @@ data without starting the session.
 
 ### `QUEUED`
 At-capacity session is held in a waiting room. The client opens the WebSocket
-immediately and receives periodic `SessionUpdate` messages with `queue_position`
-set. When a slot becomes available, the session moves to `CONNECTING` and the
-App sends a `session_ready` message over the WebSocket.
+immediately and waits for a `session_ready` message. When a slot becomes
+available, the session moves to CONNECTING and the App sends `session_ready`
+over the WebSocket. The client can poll `GET /session/{id}/queue` for position
+updates while waiting.
 
 **App container responsibilities:**
 - Maintain ordered queue
 - Send `session_ready` to the client when the session is promoted
-- Send `queue_position` updates via `session_update` as other sessions complete
 - Enforce maximum queue size — reject new sessions if queue is full
 
 ---
@@ -93,11 +93,20 @@ transcript segment arrives.
 ### `PAUSED`
 A clip has finished playing. The App container:
 
-1. Sends `clip_candidates` immediately — full clip data for every distinct
+1. Transitions ACTIVE → PAUSED immediately on receiving `clip_ended`
+2. Sends `clip_candidates` immediately — full clip data for every distinct
    non-null `next_clip` in the finished clip's `branch_conditions`, allowing
-   the client to begin preloading in parallel while evaluation runs.
-2. Finalises the transcript and dispatches the complete clip window to Evaluation.
-3. Awaits the `BehaviourResult`, resolves the next clip, and sends `clip_selected`.
+   the client to begin preloading in parallel while evaluation runs
+3. Finalises the transcript and dispatches the complete clip window to Evaluation
+4. Awaits the `BehaviourResult`, resolves the next clip
+5. Appends the completed `ConversationTurn` to session history
+6. Sends `clip_selected` to the client with the resolved `clip_id` and `clip_score`
+7. Calls `POST /transcription/reset/{session_id}` and `POST /evaluate/reset/{session_id}`
+   to clear buffers for the next clip
+8. Transitions to ACTIVE (or COMPLETED if the clip is terminal)
+
+Note: buffer resets (step 7) happen **after** `clip_selected` is sent (step 6)
+so the client receives the branching decision as quickly as possible.
 
 This state is brief — it exists to ensure all data is committed cleanly before
 the next clip begins.
@@ -111,8 +120,8 @@ the next clip begins.
 - Read the `escalation_score` from the returned `BehaviourResult`
 - Determine `next_clip` from `ClipMetadata.branch_conditions` using that score
 - Append the completed `ConversationTurn` to the session via `SessionManager.appendTurn()`
-- Call `POST /transcription/reset/{session_id}` and `POST /evaluate/reset/{session_id}` to clear buffers
 - Send `clip_selected` to the client with the resolved `clip_id` and `clip_score`
+- Call `POST /transcription/reset/{session_id}` and `POST /evaluate/reset/{session_id}` to clear buffers
 
 ---
 
@@ -123,8 +132,9 @@ committed. The App container compiles the full `FeedbackRequest` from
 delivered to the client over the still-open WebSocket as `FeedbackToken`
 messages followed by a final `SessionComplete`.
 
-If the Feedback container is unreachable, the App sends an `error` message with
-code `feedback_unavailable` rather than silently timing out.
+If the Feedback container is **unreachable** (network failure), the App sends
+an `error` message with code `feedback_unavailable`. A non-2xx HTTP response
+from a reachable Feedback container is treated the same way.
 
 **App container responsibilities:**
 - Compile `FeedbackRequest` from `SessionContext.conversation_history`
@@ -133,7 +143,6 @@ code `feedback_unavailable` rather than silently timing out.
 - Send final `SessionComplete` message when generation finishes
 - On Feedback failure: send `error { code: "feedback_unavailable" }` to the client
 - Release capacity slot
-- Close WebSocket cleanly
 
 **Feedback container responsibilities:**
 - Generate debrief from full `ConversationTurn` history
@@ -188,6 +197,10 @@ clip_score = BehaviourResult.escalation_score
 The first matching `branch_condition` where `min_score ≤ clip_score < max_score`
 determines `next_clip`.
 
+If the Evaluation container returns a non-2xx response or is unreachable, the
+App uses a fallback score of `0` and logs a warning. The session continues
+normally; the first branch condition covering score ≥ 0 is selected.
+
 ---
 
 ## Timing Constraints
@@ -197,7 +210,8 @@ determines `next_clip`.
 | WebSocket must open after create              | Within `session_timeout_s` (default 30s)                        |
 | `request_clip { activate: true }` must arrive | Within `session_timeout_s` of WebSocket open                    |
 | Reconnect after drop                          | Within `recovery_window_s` (default 30s)                        |
-| Queue position update interval                | Every 5–10s (client-side polling of `/session/{id}/queue`)      |
+| Queue position update interval                | Client-side polling of `GET /session/{id}/queue`                |
 | `clip_candidates` sent                        | Immediately on `clip_ended`, before evaluation is dispatched    |
 | Flush on clip end                             | Immediately after `clip_candidates` is sent                     |
+| `clip_selected` sent                          | After evaluation completes; before buffer resets                |
 | ClipSession resolve timeout                   | 5s — if final transcript not received, clip proceeds without it |

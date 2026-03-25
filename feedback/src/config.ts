@@ -26,9 +26,11 @@ function enumEnv<T extends string>(key: string, allowed: T[], fallback: T): T {
 function secretEnv(key: string, knownBadValue = "CHANGE_ME"): string {
     const value = requireEnv(key);
     if (value === knownBadValue) {
-        console.warn(
+        // Write directly to stderr — Fastify's JSON logger is not yet available
+        // at config load time. The key itself is never included in the message.
+        process.stderr.write(
             `[WARN] ${key} is set to the default placeholder value. ` +
-            "Generate a secure key with: openssl rand -hex 32"
+            "Generate a secure key with: openssl rand -hex 32\n"
         );
     }
     return value;

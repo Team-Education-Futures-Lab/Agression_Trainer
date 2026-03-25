@@ -81,12 +81,29 @@ export class Coordinator {
         this.transRouter.releaseSession(sessionId);
     }
 
-    onFrame(frame: VideoFrame): void {
-        this.sessions.get(frame.session_id)?.clipSession.onFrame(frame);
+    /**
+     * Routes a video frame to the correct ClipSession.
+     *
+     * `sessionId` is the authoritative session ID taken from the WebSocket URL
+     * path — not from the message body. The frame is routed using this value
+     * regardless of what `frame.session_id` contains, preventing a malicious
+     * client from injecting frames into another session's buffer.
+     */
+    onFrame(sessionId: string, frame: VideoFrame): void {
+        this.sessions.get(sessionId)?.clipSession.onFrame(frame);
     }
 
-    onAudio(chunk: AudioChunk): void {
-        this.sessions.get(chunk.session_id)?.clipSession.onAudio(chunk);
+    /**
+     * Routes an audio chunk to the correct ClipSession.
+     *
+     * `sessionId` is the authoritative session ID taken from the WebSocket URL
+     * path — not from the message body. The chunk is forwarded to the
+     * Transcription service with `session_id` overwritten to the authoritative
+     * value so the Transcription container's per-session buffer is always keyed
+     * on the real session, not on whatever the client sent.
+     */
+    onAudio(sessionId: string, chunk: AudioChunk): void {
+        this.sessions.get(sessionId)?.clipSession.onAudio(sessionId, chunk);
     }
 
     /**

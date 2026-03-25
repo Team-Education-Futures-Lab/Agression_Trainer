@@ -1,6 +1,5 @@
 import { WebSocket } from "ws";
-import type { VideoFrame, AudioChunk, AnalysisWindow, ClipMetadata } from "@ar-training/shared";
-import type {MfccMatrix} from "@ar-training/shared";
+import type { VideoFrame, AudioChunk, AnalysisWindow, ClipMetadata, MfccMatrix } from "@ar-training/shared";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -30,7 +29,17 @@ export const defaultWsFactory: WsFactory = (url, opts) => new WebSocket(url, opt
  */
 export type TranscriptUpdateCallback = (sessionId: string, transcript: string) => void;
 
-// ─── ClipSession ──────────────────────────────────────────────────────────────
+// Maximum frames buffered per clip. Matches MAX_FRAMES_PER_CLIP in main.ts.
+// The WebSocket handler enforces this first; this cap is a belt-and-suspenders
+// defence in case ClipSession is used outside the standard handler path.
+const MAX_FRAMES = 3_600;
+
+// Maximum audio chunks queued while the Transcription WebSocket is connecting.
+// In normal operation the socket opens within milliseconds; this only applies
+// to chunks that arrive before the open event fires.
+const MAX_AUDIO_QUEUE = 120;
+
+
 //
 // Owns the full lifecycle of one clip's relationship with the Transcription
 // service. Opens a WebSocket on construction, accumulates frames, MFCCs, and
@@ -150,20 +159,37 @@ export class ClipSession {
     // ── Data ingestion ────────────────────────────────────────────────────────
 
     onFrame(frame: VideoFrame): void {
-        this.frames.push(frame);
+        if (this.frames.length < MAX_FRAMES) {
+            this.frames.push(frame);
+        }
     }
 
     /**
      * Forwards the audio chunk to the Transcription service.
      * Queues the chunk if the WebSocket is still connecting.
      * Drops the chunk silently if the socket is closed.
+     *
+     * `sessionId` is the authoritative session ID from the WebSocket URL path,
+     * passed down from the Coordinator. The chunk is re-stamped with this value
+     * before being forwarded so the Transcription container always keys its
+     * per-session buffer on the real session ID, regardless of what the client
+     * originally sent in the message body.
      */
-    onAudio(chunk: AudioChunk): void {
-        const payload = JSON.stringify(chunk);
+    onAudio(sessionId: string, chunk: AudioChunk): void {
+        // Re-stamp session_id with the authoritative value before forwarding.
+        // This prevents a client that sends a mismatched session_id in the
+        // message body from polluting another session's transcription buffer.
+        const sanitised = chunk.session_id === sessionId
+            ? chunk
+            : { ...chunk, session_id: sessionId };
+
+        const payload = JSON.stringify(sanitised);
         if (this.ws.readyState === WebSocket.OPEN) {
             this.ws.send(payload);
         } else if (this.ws.readyState === WebSocket.CONNECTING) {
-            this.audioQueue.push(payload);
+            if (this.audioQueue.length < MAX_AUDIO_QUEUE) {
+                this.audioQueue.push(payload);
+            }
         }
         // CLOSING or CLOSED — drop silently
         this.mfccs.push(chunk.mfccs);

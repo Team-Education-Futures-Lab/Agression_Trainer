@@ -9,6 +9,11 @@
 // if no URL is present, the left column falls back to showing the transcript
 // and notable features as the primary content so the session can continue
 // normally without any video files being present.
+//
+// The single <video ref={videoRef}> element in the right column is the same
+// element owned by Demo.tsx and driven by CaptureSession. It must never be
+// conditionally unmounted — it is always present, here acting as the visible
+// webcam feed for the student.
 // =============================================================================
 
 import { useState } from "react";
@@ -43,8 +48,8 @@ export function PlayerScreen({ videoRef, currentClipId, clipMeta, onClipEnded }:
         onClipEnded(currentClipId);
     };
 
-    const videoUrl    = clipMeta?.video_url ?? null;
-    const showVideo   = videoUrl !== null && !videoFailed;
+    const videoUrl     = clipMeta?.video_url ?? null;
+    const showVideo    = videoUrl !== null && !videoFailed;
     const showFallback = !showVideo;
 
     return (
@@ -57,7 +62,7 @@ export function PlayerScreen({ videoRef, currentClipId, clipMeta, onClipEnded }:
                     don't keep a broken element in the visual flow */}
                 {videoUrl && (
                     <video
-                        key={videoUrl}           // remount on clip change
+                        key={videoUrl}           // remount on clip change for fresh load attempt
                         src={videoUrl}
                         controls
                         style={{ ...s.scenarioVideo, display: showVideo ? "block" : "none" }}
@@ -73,7 +78,7 @@ export function PlayerScreen({ videoRef, currentClipId, clipMeta, onClipEnded }:
                     </div>
                 )}
 
-                {/* Transcript — always shown; promoted to top when video fails */}
+                {/* Transcript — always shown; visually promoted when video is absent */}
                 {clipMeta?.transcript && (
                     <div style={{ ...s.transcriptBox, ...(showFallback ? s.transcriptBoxPromoted : {}) }}>
                         <span style={s.sectionLabel}>Wat de ander zegt</span>
@@ -108,6 +113,9 @@ export function PlayerScreen({ videoRef, currentClipId, clipMeta, onClipEnded }:
             <div style={s.right}>
                 <div style={s.webcamCard}>
                     <span style={s.sectionLabel}>Jouw reactie</span>
+                    {/* This is the same videoRef element owned by Demo.tsx —
+                        CaptureSession is already bound to it. Here it serves
+                        double duty as the visible webcam preview. */}
                     <video ref={videoRef} muted playsInline style={s.webcam} />
                 </div>
 
@@ -195,7 +203,6 @@ const s = {
         padding:      "14px 16px",
         borderLeft:   "3px solid #6366f1",
     },
-    // When video is absent, make the transcript box visually heavier
     transcriptBoxPromoted: {
         padding:    "20px 20px",
         fontSize:   "16px",

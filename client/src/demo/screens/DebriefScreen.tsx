@@ -47,7 +47,7 @@ export function DebriefScreen({
                     )}
                 </div>
 
-                {/* Streamed advice */}
+                {/* Streamed advice with blinking cursor while generating */}
                 <div style={s.adviceBox}>
                     <p style={s.adviceText}>
                         {advice || <span style={s.placeholder}>Feedback wordt gegenereerd…</span>}
@@ -55,7 +55,7 @@ export function DebriefScreen({
                     </p>
                 </div>
 
-                {/* Highlights — only once complete */}
+                {/* Highlights — only shown once complete */}
                 {highlights.length > 0 && (
                     <div style={s.highlights}>
                         <p style={s.highlightsLabel}>Opmerkelijke momenten</p>

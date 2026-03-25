@@ -8,11 +8,11 @@ Stubs are not fallback behaviour. They exist only for development and integratio
 
 ## Overview
 
-| Container     | Interface                    | Env variable           | Default  |
-|---------------|------------------------------|------------------------|----------|
-| Transcription | `TranscriptionPoolInterface` | `TRANSCRIPTION_POOL`   | `stub`   |
-| Evaluation    | `BehaviourAnalyserInterface` | `BEHAVIOUR_ANALYSER`   | `stub`   |
-| Feedback      | `FeedbackGeneratorInterface` | `FEEDBACK_GENERATOR`   | `stub`   |
+| Container     | Interface                    | Env variable         | Default |
+|---------------|------------------------------|----------------------|---------|
+| Transcription | `TranscriptionPoolInterface` | `TRANSCRIPTION_POOL` | `stub`  |
+| Evaluation    | `BehaviourAnalyserInterface` | `BEHAVIOUR_ANALYSER` | `stub`  |
+| Feedback      | `FeedbackGeneratorInterface` | `FEEDBACK_GENERATOR` | `stub`  |
 
 ---
 
@@ -33,29 +33,23 @@ match cfg.pool_impl:
         return WhisperPool(cfg)
 
 # Evaluation container (evaluation/src/main.py)
-match os.environ.get("BEHAVIOUR_ANALYSER", "stub"):
+match cfg.analyser_impl:
     case "stub":
-        from stubs.behaviour_analyser import StubBehaviourAnalyser
+        from stubs.stub_behaviour_analyser import StubBehaviourAnalyser
         return StubBehaviourAnalyser()
     case "production":
-        from models.behaviour_analyser import ProductionBehaviourAnalyser
+        from models.production_behaviour_analyser import ProductionBehaviourAnalyser
         return ProductionBehaviourAnalyser()
 ```
 
-**TypeScript containers (Feedback):**
+**TypeScript container (Feedback):**
 
 ```typescript
 // Feedback container (feedback/src/main.ts)
-function makeFeedbackGenerator(): FeedbackGeneratorInterface {
-    const impl = process.env.FEEDBACK_GENERATOR ?? "stub";
-    switch (impl) {
-        case "production":
-            return new OllamaFeedbackGenerator();
-        case "stub":
-        default:
-            return new StubFeedbackGenerator();
-    }
-}
+const generator: FeedbackGeneratorInterface =
+    config.generatorImpl === "production"
+        ? new OllamaFeedbackGenerator(config)
+        : new StubFeedbackGenerator();
 ```
 
 This pattern means no other code needs to change when swapping implementations.
@@ -94,7 +88,11 @@ Returns a deterministic but plausible `BehaviourResult` based on the clip contex
 ### Implementation
 
 ```python
+# evaluation/src/stubs/stub_behaviour_analyser.py
 from interfaces import BehaviourAnalyserInterface, AnalysisWindow, BehaviourResult, SignalSummary
+
+_CHALLENGING_FEATURES = {"raised_voice", "aggressive_posture", "pointing_gesture"}
+_EMOTIONS             = ["calm", "anxious", "frustrated", "neutral"]
 
 class StubBehaviourAnalyser(BehaviourAnalyserInterface):
     """
@@ -102,29 +100,30 @@ class StubBehaviourAnalyser(BehaviourAnalyserInterface):
     Returns plausible but hardcoded results based on clip context.
     Do not use in production.
     """
-    _emotions = ["calm", "anxious", "frustrated", "neutral"]
-    _counter = 0
+
+    def __init__(self) -> None:
+        self._counter: int = 0
 
     async def analyse(self, window: AnalysisWindow) -> BehaviourResult:
-        features = window.clip_metadata.notable_features
-        is_challenging = any(f in features for f in ["raised_voice", "aggressive_posture", "pointing_gesture"])
-        score = 0.4 if is_challenging else -0.2
-        emotion = self._emotions[self._counter % len(self._emotions)]
+        features       = set(window.clip_metadata.notable_features)
+        is_challenging = bool(features & _CHALLENGING_FEATURES)
+        score          = 0.4 if is_challenging else -0.2
+        emotion        = _EMOTIONS[self._counter % len(_EMOTIONS)]
         self._counter += 1
 
         return BehaviourResult(
-            window_id=window.window_id,
-            session_id=window.session_id,
-            escalation_score=score,
-            dominant_emotion=emotion,
-            confidence=1.0,
-            signal_summary=SignalSummary(
-                voice_tension=0.5,
-                speech_pace=3.2,
-                hand_velocity=0.3,
-                gaze_stability=0.7,
-                open_palm_ratio=0.6,
-                notable_signals=["stub_mode"],
+            window_id        = window.window_id,
+            session_id       = window.session_id,
+            escalation_score = score,
+            dominant_emotion = emotion,
+            confidence       = 1.0,
+            signal_summary   = SignalSummary(
+                voice_tension   = 0.5,
+                speech_pace     = 3.2,
+                hand_velocity   = 0.3,
+                gaze_stability  = 0.7,
+                open_palm_ratio = 0.6,
+                notable_signals = ["stub_mode"],
             ),
         )
 ```
@@ -145,8 +144,14 @@ Returns a canned `Feedback` object without calling Ollama. Useful for testing th
 ### Implementation
 
 ```typescript
-import type { FeedbackGeneratorInterface } from "./interfaces.js";
+// feedback/src/stub-feedback-generator.ts
 import type { FeedbackRequest, Feedback } from "@ar-training/shared";
+import type { FeedbackGeneratorInterface } from "./interfaces.js";
+
+const STUB_ADVICE =
+    "[STUB] Dit is een testfeedback. In een echte sessie zou hier een " +
+    "gepersonaliseerde analyse van jouw de-escalatiegedrag staan, gegenereerd " +
+    "op basis van jouw reacties op de videoscenario's.";
 
 export class StubFeedbackGenerator implements FeedbackGeneratorInterface {
     /**
@@ -161,17 +166,14 @@ export class StubFeedbackGenerator implements FeedbackGeneratorInterface {
             highlights.push(`Turn ${req.history[0].turn_id}: [stub] eerste reactie geanalyseerd.`);
         }
         if (req.history.length > 1) {
-            highlights.push(`Turn ${req.history[req.history.length - 1].turn_id}: [stub] laatste reactie geanalyseerd.`);
+            highlights.push(
+                `Turn ${req.history[req.history.length - 1].turn_id}: [stub] laatste reactie geanalyseerd.`
+            );
         }
-
         return {
             session_id: req.session_id,
-            advice: (
-                "[STUB] Dit is een testfeedback. In een echte sessie zou hier een " +
-                "gepersonaliseerde analyse van jouw de-escalatiegedrag staan, gegenereerd " +
-                "op basis van jouw reacties op de videoscenario's."
-            ),
-            severity: "medium",
+            advice:     STUB_ADVICE,
+            severity:   "medium",
             highlights,
         };
     }
@@ -180,7 +182,7 @@ export class StubFeedbackGenerator implements FeedbackGeneratorInterface {
         const feedback = await this.generate(req);
         for (const word of feedback.advice.split(" ")) {
             yield word + " ";
-            await new Promise(resolve => setTimeout(resolve, 30));
+            await new Promise<void>(resolve => setTimeout(resolve, 30));
         }
     }
 }
@@ -196,14 +198,15 @@ With all stubs active, a complete session flows as follows:
 2. Open WebSocket → send `VideoFrame` and `AudioChunk` messages
 3. Receive `SessionUpdate` messages carrying the live accumulated transcript as the Transcription container processes audio
 4. Send `ClipEnded` when the clip finishes playing
-5. Receive `ClipReady` with the resolved `next_clip_id` and `clip_score` from `StubBehaviourAnalyser`
-6. If `next_clip_id` is non-null: load the next clip and repeat from step 2
-7. If `next_clip_id` is null: the scenario is complete — wait for the debrief
-8. Receive `FeedbackToken` stream then `SessionComplete` from `StubFeedbackGenerator`
+5. Receive `clip_candidates` immediately — full clip data for each possible next clip, allowing preloading to begin while evaluation runs
+6. Receive `clip_selected` with the resolved `next_clip_id` and `clip_score` from `StubBehaviourAnalyser`
+7. If `next_clip_id` is non-null: load the next clip and repeat from step 2
+8. If `next_clip_id` is null: the scenario is complete — wait for the debrief
+9. Receive `FeedbackToken` stream then `SessionComplete` from `StubFeedbackGenerator`
 
 If this flow completes without errors, the full inter-container pipeline is working correctly and real implementations can be dropped in independently.
 
-> **Note:** `POST /session/{id}/end` exists as an explicit termination route but is not part of the normal clip flow. Feedback is triggered automatically when a terminal clip is reached via `ClipEnded`. The `/end` route handles abnormal termination only.
+> **Note:** `POST /session/{id}/end` exists as an explicit termination route but is not part of the normal clip flow. Feedback is triggered automatically when a terminal clip is reached via `ClipEnded`. The `/end` route handles abnormal termination only and does **not** stream feedback to the client.
 
 ---
 

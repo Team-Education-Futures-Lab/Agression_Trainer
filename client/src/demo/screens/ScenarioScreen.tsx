@@ -2,8 +2,9 @@
 // ScenarioScreen
 //
 // Shown while state === "selecting". Displays all available scenarios with
-// title and description. Tapping one calls onSelect, which triggers
-// selectScenario() and starts the capture pipeline.
+// title and description. Shows a spinner while scenarios.length === 0.
+// Tapping a scenario card calls onSelect, which triggers selectScenario()
+// and starts the capture pipeline.
 // =============================================================================
 
 import type { ScenarioSummary } from "@ar-training/shared";
@@ -24,7 +25,10 @@ export function ScenarioScreen({ scenarios, onSelect }: ScenarioScreenProps) {
                 </p>
 
                 {scenarios.length === 0 ? (
-                    <p style={s.empty}>Scenario's worden geladen…</p>
+                    <div style={s.loadingWrap}>
+                        <div style={s.spinner} />
+                        <p style={s.loadingText}>Scenario's worden geladen…</p>
+                    </div>
                 ) : (
                     <div style={s.list}>
                         {scenarios.map(sc => (
@@ -70,7 +74,23 @@ const s = {
         color:      "#94a3b8",
         lineHeight: 1.6,
     },
-    empty: {
+    loadingWrap: {
+        display:        "flex",
+        flexDirection:  "column" as const,
+        alignItems:     "center",
+        gap:            "16px",
+        padding:        "40px 0",
+    },
+    spinner: {
+        width:          "36px",
+        height:         "36px",
+        borderRadius:   "50%",
+        border:         "3px solid #334155",
+        borderTopColor: "#6366f1",
+        animation:      "spin 0.9s linear infinite",
+    },
+    loadingText: {
+        margin:    0,
         fontSize:  "14px",
         color:     "#475569",
         fontStyle: "italic",

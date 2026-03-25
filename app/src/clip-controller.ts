@@ -22,7 +22,7 @@ import type {
 //   4. Read clip score from the single BehaviourResult returned by Evaluation
 //   5. Resolve next clip from branch conditions
 //   6. Append a ConversationTurn to session history
-//   7. Reset evaluation audio buffer and transcription VAD state
+//   7. Reset evaluation and transcription buffers
 //   8. Send clip_selected to the client
 //   9a. If terminal: trigger feedback and end the session
 //   9b. If not terminal: advance coordinator and session to the next clip
@@ -48,13 +48,21 @@ export class ClipController {
 
     // ── Public API ────────────────────────────────────────────────────────────
 
-    async handleClipEnded(msg: ClipEnded, sendFn: SendFn): Promise<void> {
-        const { session_id, clip_id } = msg;
-        const ctx = this.sessions.getSession(session_id);
+    /**
+     * Handles a clip_ended event from the client.
+     *
+     * `sessionId` is the authoritative session ID from the WebSocket URL path,
+     * not from the message body. This prevents a malicious client from sending
+     * a clip_ended message with a different session's ID to trigger that
+     * session's clip transition.
+     */
+    async handleClipEnded(sessionId: string, msg: ClipEnded, sendFn: SendFn): Promise<void> {
+        const { clip_id } = msg;
+        const ctx = this.sessions.getSession(sessionId);
         if (!ctx || ctx.state !== "ACTIVE" || !ctx.scenario_id) return;
 
         // 1. Pause — prevents stray frames being buffered mid-transition.
-        this.sessions.markPaused(session_id);
+        this.sessions.markPaused(sessionId);
 
         const currentClip = this.scenarios.getClip(ctx.scenario_id, clip_id);
 
@@ -64,13 +72,13 @@ export class ClipController {
         const candidates = currentClip
             ? this.buildCandidates(ctx.scenario_id, currentClip.branch_conditions)
             : [];
-        sendFn({ type: "clip_candidates", session_id, candidates });
+        sendFn({ type: "clip_candidates", session_id: sessionId, candidates });
 
         // 3. Flush — finalises transcript and dispatches the full clip window.
-        await this.coord.flushSession(session_id);
+        await this.coord.flushSession(sessionId);
 
         // 4. Clip score from the single BehaviourResult for this clip.
-        const result    = this.coord.getLastResult(session_id);
+        const result    = this.coord.getLastResult(sessionId);
         const clipScore = result?.escalation_score ?? 0;
 
         // 5. Resolve the next clip from branch conditions.
@@ -83,10 +91,10 @@ export class ClipController {
             const turn: ConversationTurn = {
                 turn_id:            ctx.turn_count + 1,
                 clip:               currentClip,
-                student_response:   result ?? this.fallbackResult(session_id),
-                student_transcript: this.coord.getLastTranscript(session_id) ?? "",
+                student_response:   result ?? this.fallbackResult(sessionId),
+                student_transcript: this.coord.getLastTranscript(sessionId) ?? "",
             };
-            this.sessions.appendTurn(session_id, turn);
+            this.sessions.appendTurn(sessionId, turn);
         }
 
         // 7. Reset buffers and open a fresh ClipSession for the next clip.
@@ -95,16 +103,16 @@ export class ClipController {
         const nextClipMeta = nextClipId
             ? this.scenarios.getClip(ctx.scenario_id, nextClipId) ?? null
             : null;
-        await this.coord.resetSession(session_id, nextClipMeta);
+        await this.coord.resetSession(sessionId, nextClipMeta);
 
         // 8. Notify the client which candidate was selected.
-        sendFn({ type: "clip_selected", session_id, clip_id: nextClipId, clip_score: clipScore });
+        sendFn({ type: "clip_selected", session_id: sessionId, clip_id: nextClipId, clip_score: clipScore });
 
         // 9. Advance or complete.
         if (nextClipId === null) {
-            await this.complete(session_id, sendFn);
+            await this.complete(sessionId, sendFn);
         } else {
-            this.advance(session_id, nextClipId);
+            this.advance(sessionId, nextClipId);
         }
     }
 

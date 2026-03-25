@@ -7,6 +7,7 @@ All business logic lives in TranscriptionService; this file stays thin.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -23,6 +24,12 @@ from transcription_service import TranscriptionService
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# How long to wait for the next message from the App container before treating
+# the connection as dead. Audio chunks arrive approximately every 2 s during
+# active recording. 30 s is generous enough to cover any pause in the scenario,
+# while still recovering slots if the TCP connection dies silently.
+_WS_RECEIVE_TIMEOUT_S = 30.0
 
 
 # ─── Dependency wiring ────────────────────────────────────────────────────────
@@ -69,6 +76,11 @@ def create_app() -> FastAPI:
 
         Accepts AudioChunk messages and streams Transcript messages back.
         Authentication is checked on the handshake headers before accepting.
+
+        The receive loop uses asyncio.wait_for with a generous timeout so that
+        a TCP connection that dies without a WebSocket close frame does not leave
+        the session entry in SessionStore indefinitely. On timeout the loop exits
+        and close_session() is called via the finally block.
         """
         if not await ws_verify_token(websocket, cfg.internal_api_key):
             return   # ws_verify_token already closed the connection
@@ -78,9 +90,19 @@ def create_app() -> FastAPI:
         logger.info("WS connected: session=%s", session_id)
 
         try:
-            # TODO: How do we exit this loop? what if the websocket connection get's dropped without notification?
             while True:
-                raw = await websocket.receive_text()
+                try:
+                    raw = await asyncio.wait_for(
+                        websocket.receive_text(),
+                        timeout=_WS_RECEIVE_TIMEOUT_S,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "WS receive timeout for session=%s — closing silently dropped connection",
+                        session_id,
+                    )
+                    break
+
                 try:
                     msg = json.loads(raw)
                 except json.JSONDecodeError:
@@ -123,7 +145,7 @@ def create_app() -> FastAPI:
     async def reset(session_id: str):
         """
         Clear the per-session VAD buffer between clips.
-        Called by the App container after each ClipReady is dispatched.
+        Called by the App container after each clip transition.
         """
         svc.reset_session(session_id)
         return {"session_id": session_id, "status": "reset"}

@@ -95,10 +95,11 @@ services:
   ollama:
     image: ollama/ollama
     volumes:
-      - ollama_models:/root/.ollama
+      # Bind-mount the repo's models/ directory to Ollama's default storage
+      # path so pulled models are visible on the host and survive container
+      # recreation without needing a separate Docker volume.
+      # Pull models with: docker compose exec ollama ollama pull llama3.2
+      - ./models:/root/.ollama
     expose:
       - "11434"
     restart: unless-stopped
-
-volumes:
-  ollama_models:

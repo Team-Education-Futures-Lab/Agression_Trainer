@@ -1,4 +1,5 @@
 import Fastify from "fastify";
+import { timingSafeEqual } from "node:crypto";
 import { loadConfig } from "./config.js";
 import { StubFeedbackGenerator } from "./stub-feedback-generator.js";
 import { OllamaFeedbackGenerator } from "./ollama-feedback-generator.js";
@@ -8,7 +9,13 @@ import type { Feedback, FeedbackRequest } from "@ar-training/shared";
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
 const config = loadConfig();
-const app    = Fastify({ logger: true });
+const app    = Fastify({
+    logger: {
+        // Redact the Authorization header from all request/response logs so
+        // INTERNAL_API_KEY never appears in log output.
+        redact: ["req.headers.authorization"],
+    },
+});
 
 const generator: FeedbackGeneratorInterface =
     config.generatorImpl === "production"
@@ -17,9 +24,20 @@ const generator: FeedbackGeneratorInterface =
 
 // ─── Auth helper ──────────────────────────────────────────────────────────────
 
+/**
+ * Validates the Authorization header using a timing-safe comparison to prevent
+ * key enumeration via timing attacks.
+ *
+ * Returns false when the header is absent, malformed, or the token does not
+ * match INTERNAL_API_KEY.
+ */
 function isAuthorised(authHeader: string | undefined): boolean {
-    if (!authHeader?.startsWith("Bearer ")) return false;
-    return authHeader?.slice(7) === config.internalApiKey;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) return false;
+    const token    = authHeader.slice(7);
+    const expected = config.internalApiKey;
+    // Length mismatch is non-secret information; early false here is acceptable.
+    if (token.length !== expected.length) return false;
+    return timingSafeEqual(Buffer.from(token), Buffer.from(expected));
 }
 
 // ─── Health ───────────────────────────────────────────────────────────────────
@@ -75,9 +93,10 @@ app.post<{ Body: FeedbackRequest }>("/feedback/generate/stream", async (req, rep
             reply.raw.write(`data: ${JSON.stringify({ type: "token", token })}\n\n`);
         }
 
-        const feedback = assembleFeedback(req.body.session_id, tokens.join(""), config.generatorImpl === "stub"
-            ? await generator.generate(feedbackReq)
-            : undefined);
+        // Assemble the complete Feedback object for the `complete` event.
+        // Both stub and Ollama paths accumulate the full text in `tokens`; the
+        // only difference is how that text is parsed (plain string vs JSON blob).
+        const feedback = assembleFeedback(feedbackReq.session_id, tokens.join(""));
 
         reply.raw.write(`data: ${JSON.stringify({ type: "complete", feedback })}\n\n`);
     } catch (err) {
@@ -91,19 +110,20 @@ app.post<{ Body: FeedbackRequest }>("/feedback/generate/stream", async (req, rep
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
- * Assemble the final Feedback object for the SSE `complete` event.
+ * Assemble the final Feedback object for the SSE `complete` event from the
+ * accumulated token stream.
  *
- * For the stub, the generator produces a deterministic object — pass it
- * directly. For Ollama, the LLM emits a JSON blob as its token stream;
- * parse the accumulated text rather than making a second Ollama call.
+ * For the Ollama (production) path the LLM emits a JSON blob as its token
+ * stream, which is parsed here. For the stub path, generateStream() also
+ * yields the canned advice string which is treated as plain text — the JSON
+ * parse will fail and the fallback wraps it directly as `advice`.
+ *
+ * This unified path avoids making a second generate() call for the stub.
  */
 function assembleFeedback(
     sessionId: string,
     accumulatedText: string,
-    stubResult: Feedback | undefined,
 ): Feedback {
-    if (stubResult !== undefined) return stubResult;
-
     const cleaned = accumulatedText.replace(/```json|```/g, "").trim();
     try {
         const parsed = JSON.parse(cleaned) as {
@@ -118,6 +138,8 @@ function assembleFeedback(
             highlights: parsed.highlights ?? [],
         };
     } catch {
+        // Not valid JSON — treat the whole text as the advice string.
+        // This is the normal path for the stub, whose token stream is plain text.
         return {
             session_id: sessionId,
             advice:     accumulatedText.trim(),

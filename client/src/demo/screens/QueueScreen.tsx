@@ -5,7 +5,6 @@ interface QueueScreenProps {
 }
 
 export function QueueScreen({ queuePos }: QueueScreenProps) {
-    // Animate the three dots
     const [dots, setDots] = useState(".");
     useEffect(() => {
         const id = setInterval(() => {
@@ -57,12 +56,12 @@ const s = {
         marginBottom:   "24px",
     },
     ring: {
-        width:       `${RING_SIZE}px`,
-        height:      `${RING_SIZE}px`,
-        borderRadius: "50%",
-        border:      "4px solid #334155",
+        width:          `${RING_SIZE}px`,
+        height:         `${RING_SIZE}px`,
+        borderRadius:   "50%",
+        border:         "4px solid #334155",
         borderTopColor: "#6366f1",
-        animation:   "spin 0.9s linear infinite",
+        animation:      "spin 0.9s linear infinite",
     },
     title: {
         margin:     "0 0 10px",

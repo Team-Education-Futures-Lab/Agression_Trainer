@@ -35,7 +35,7 @@ cd ar-training
 # 2. Copy the example environment file and fill in INTERNAL_API_KEY
 cp .env.example .env
 
-# 3. Pull the Ollama model (only needed once — persisted in a Docker volume)
+# 3. Pull the Ollama model (only needed once — stored in models/ on the host)
 #    The ollama/ollama image runs a server as its entrypoint, so the pull must
 #    be done by exec-ing into a running container rather than via `run`.
 docker compose up -d ollama
@@ -79,22 +79,24 @@ The Transcription container has a real Whisper implementation (`TRANSCRIPTION_PO
 
 ### App container (`app/.env`)
 
-| Variable             | Default                     | Description                                                                                                                        |
-|----------------------|-----------------------------|------------------------------------------------------------------------------------------------------------------------------------|
-| `INTERNAL_API_KEY`   | _(required)_                | Shared secret for all App→AI service requests. Generate once with `openssl rand -hex 32` and set the same value in all containers. |
-| `EVALUATION_URL`     | `http://evaluation:8001`    | Evaluation instance URL(s). Comma-separated list enables multi-instance load distribution with session pinning.                    |
-| `TRANSCRIPTION_URL`  | `http://transcription:8003` | Transcription instance URL(s). Comma-separated list supported for multi-instance setups.                                           |
-| `FEEDBACK_URL`       | `http://feedback:8002`      | Feedback service URL.                                                                                                              |
-| `SCENARIOS_DIR`      | _(required)_                | Path to the scenarios directory, mounted from the repo root at runtime.                                                            |
-| `BEHAVIOUR_ANALYSER` | `stub`                      | `stub` or `production`                                                                                                             |
-| `FEEDBACK_GENERATOR` | `stub`                      | `stub` or `production`                                                                                                             |
-| `MAX_SESSIONS`       | `32`                        | Maximum concurrent active sessions.                                                                                                |
-| `MAX_QUEUE_SIZE`     | `10`                        | Maximum sessions held in the waiting queue.                                                                                        |
-| `CAPACITY_POLICY`    | `QUEUE`                     | `QUEUE` or `REJECT` when at capacity.                                                                                              |
-| `SESSION_TIMEOUT_MS` | `30000`                     | ms to wait for WebSocket connection before dropping a session.                                                                     |
-| `RECOVERY_WINDOW_MS` | `30000`                     | ms a dropped session can be resumed before expiring.                                                                               |
-| `FEEDBACK_MODEL`     | `llama3.2`                  | Ollama model name used by the Feedback container.                                                                                  |
-| `OLLAMA_HOST`        | `http://ollama:11434`       | Override to use an external Ollama instance.                                                                                       |
+| Variable              | Default                     | Description                                                                                                                                                                                                                       |
+|-----------------------|-----------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `INTERNAL_API_KEY`    | _(required)_                | Shared secret for all App→AI service requests. Generate once with `openssl rand -hex 32` and set the same value in all containers.                                                                                                |
+| `EVALUATION_URL`      | `http://evaluation:8001`    | Evaluation instance URL(s). Comma-separated list enables multi-instance load distribution with session pinning.                                                                                                                   |
+| `TRANSCRIPTION_URL`   | `http://transcription:8003` | Transcription instance URL(s). Comma-separated list supported for multi-instance setups.                                                                                                                                          |
+| `FEEDBACK_URL`        | `http://feedback:8002`      | Feedback service URL.                                                                                                                                                                                                             |
+| `SCENARIOS_DIR`       | _(required)_                | Path to the scenarios directory, mounted from the repo root at runtime.                                                                                                                                                           |
+| `BEHAVIOUR_ANALYSER`  | `stub`                      | `stub` or `production`. Selects the Evaluation container's analyser implementation.                                                                                                                                               |
+| `FEEDBACK_GENERATOR`  | `stub`                      | `stub` or `production`. Selects the Feedback container's generator implementation.                                                                                                                                                |
+| `MAX_SESSIONS`        | `32`                        | Maximum concurrent active sessions.                                                                                                                                                                                               |
+| `MAX_QUEUE_SIZE`      | `10`                        | Maximum sessions held in the waiting queue.                                                                                                                                                                                       |
+| `CAPACITY_POLICY`     | `QUEUE`                     | `QUEUE` or `REJECT` when at capacity.                                                                                                                                                                                             |
+| `SESSION_TIMEOUT_MS`  | `30000`                     | ms to wait for a WebSocket connection + activation before dropping a session.                                                                                                                                                     |
+| `RECOVERY_WINDOW_MS`  | `30000`                     | ms a dropped session can be resumed before it expires.                                                                                                                                                                            |
+| `FEEDBACK_TIMEOUT_MS` | `150000`                    | ms to wait for the full feedback SSE stream before treating it as unavailable. Should exceed the Feedback container's `OLLAMA_TIMEOUT_MS` to allow Ollama to time out first.                                                      |
+| `CORS_ORIGIN`         | _(unset — allows any)_      | When unset, HTTP endpoints accept requests from any origin (correct for single-server classroom use). Set to a specific origin (e.g. `http://localhost:3000`) in multi-host or internet-facing deployments.                       |
+| `ADMIN_API_KEY`       | _(unset)_                   | Optional. When set, `POST /session/create` requests carrying `Authorization: Bearer <value>` create admin sessions that can activate any clip. When unset, admin mode is permanently unavailable. See `admin_and_tooling_api.md`. |
+| `PORT`                | `3000`                      | Internal listen port.                                                                                                                                                                                                             |
 
 ### Transcription container (`transcription/.env`)
 
@@ -108,16 +110,25 @@ The Transcription container has a real Whisper implementation (`TRANSCRIPTION_PO
 | `DEVICE`             | `cpu`        | `cpu` or `cuda`. CUDA requires the NVIDIA Container Toolkit.                         |
 | `PORT`               | `8003`       | Internal listen port.                                                                |
 
+### Evaluation container (`evaluation/.env`)
+
+| Variable             | Default      | Description                                                                                  |
+|----------------------|--------------|----------------------------------------------------------------------------------------------|
+| `INTERNAL_API_KEY`   | _(required)_ | Must match the value in `app/.env`.                                                          |
+| `BEHAVIOUR_ANALYSER` | `stub`       | `stub` — deterministic canned results; `production` — real multimodal classifier.            |
+| `DEVICE`             | `cpu`        | `cpu` or `cuda`. CUDA requires the NVIDIA Container Toolkit.                                 |
+| `PORT`               | `8001`       | Internal listen port.                                                                        |
+
 ### Feedback container (`feedback/.env`)
 
-| Variable             | Default               | Description                                                                                                                        |
-|----------------------|-----------------------|------------------------------------------------------------------------------------------------------------------------------------|
-| `INTERNAL_API_KEY`   | _(required)_          | Must match the value in `app/.env`.                                                                                                |
-| `FEEDBACK_GENERATOR` | `stub`                | `stub` — canned Dutch feedback, no Ollama; `production` — calls Ollama to generate real feedback.                                  |
-| `OLLAMA_HOST`        | `http://ollama:11434` | Base URL of the Ollama instance. Override to use an external Ollama server.                                                        |
-| `OLLAMA_MODEL`       | `llama3.2`            | The Ollama model name to use for generation.                                                                                       |
-| `OLLAMA_TIMEOUT_MS`  | `120000`              | How long to wait for Ollama to respond before treating it as unreachable (ms).                                                     |
-| `PORT`               | `8002`                | Internal listen port.                                                                                                              |
+| Variable             | Default               | Description                                                                                          |
+|----------------------|-----------------------|------------------------------------------------------------------------------------------------------|
+| `INTERNAL_API_KEY`   | _(required)_          | Must match the value in `app/.env`.                                                                  |
+| `FEEDBACK_GENERATOR` | `stub`                | `stub` — canned Dutch feedback, no Ollama; `production` — calls Ollama to generate real feedback.    |
+| `OLLAMA_HOST`        | `http://ollama:11434` | Base URL of the Ollama instance. Override to use an external Ollama server.                          |
+| `OLLAMA_MODEL`       | `llama3.2`            | The Ollama model name to use for generation.                                                         |
+| `OLLAMA_TIMEOUT_MS`  | `120000`              | How long to wait for Ollama to respond before aborting the request (ms).                             |
+| `PORT`               | `8002`                | Internal listen port.                                                                                |
 
 ---
 
@@ -157,14 +168,18 @@ ar-training/
 │   │                             Receives complete clip windows with full transcripts.
 │   │                             GPU-optional, horizontally scalable.
 │   ├── src/
+│   │   └── stubs/              ← StubBehaviourAnalyser
+│   ├── tests/
 │   ├── requirements.txt
 │   ├── Dockerfile
+│   ├── .env                    ← Local env (not committed — copy from .env.example)
 │   ├── README.md
 │   └── .gitignore
 │
 ├── feedback/                   ← Feedback container (TypeScript / Node)
 │   │                             Wraps Ollama to generate end-of-session debrief advice.
 │   ├── src/
+│   ├── tests/
 │   ├── package.json
 │   ├── tsconfig.json
 │   ├── Dockerfile
@@ -202,12 +217,17 @@ ar-training/
 │       ├── metadata.json       ← Clip definitions, transcripts, branch conditions
 │       └── *.mp4
 │
-├── models/                     ← Trained ML model files (not committed)
+├── models/                     ← Ollama model storage and trained ML model files
+│   │                             Bind-mounted into the Ollama container at
+│   │                             /root/.ollama so pulled models are visible on the
+│   │                             host and persist across container recreation.
+│   │                             Also used for classifier.pkl (provided separately).
 │   └── classifier.pkl          ← Provided separately, mounted at runtime
 │
 ├── docs/                       ← Project-level documentation
 │   ├── architecture.md
-│   ├── api_contract.md
+│   ├── api_contract.md         ← Client-facing session and WebSocket API
+│   ├── admin_and_tooling_api.md← Operator endpoints and inter-container APIs
 │   ├── session_lifecycle.md
 │   ├── stub_guide.md
 │   ├── scenario_schema.md
@@ -279,6 +299,10 @@ docker compose up --scale evaluation=3
 # View logs for a specific container
 docker compose logs -f feedback
 
+# Pull an Ollama model (stored in models/ on the host — only needed once)
+docker compose up -d ollama
+docker compose exec ollama ollama pull llama3.2
+
 # Run TypeScript tests (App container)
 docker compose run --rm app npm test
 
@@ -288,13 +312,19 @@ docker compose run --rm feedback npm test
 # Run Python tests (Transcription container)
 docker compose run --rm transcription python -m pytest
 
-# Run Python tests locally (from transcription/ with venv active)
+# Run Python tests (Evaluation container)
+docker compose run --rm evaluation python -m pytest
+
+# Run Python tests locally (from service directory with venv active)
 pytest -v
 
-# Stop everything
+# Stop everything (Ollama models are preserved in models/ on the host)
 docker compose down
 
-# Stop and remove volumes (clears Ollama model cache)
+# Stop and remove all Docker volumes
+# Note: Ollama models are now stored in models/ (a bind mount), not a Docker
+# volume, so they are NOT removed by this command. Use this only to reset
+# other state.
 docker compose down -v
 ```
 
@@ -307,6 +337,7 @@ docker compose down -v
 3. Create `metadata.json` following the schema in `scenario_schema.md`
 4. Verify the branching graph has no dead ends (every non-terminal clip must have conditions covering `-1.0` to `1.0`)
 5. Restart the App container — scenarios are loaded at startup
+6. Verify with `GET /scenarios/{scenario_id}/clips` (see `admin_and_tooling_api.md`) to confirm all clips loaded correctly
 
 ---
 

@@ -62,6 +62,9 @@ export class SessionHandler {
     private sessionId: string | null = null;
     private transport: TransportInterface | null = null;
 
+    // Set to true by disconnect() so subsequent WebSocket close events are ignored.
+    private _clean = false;
+
     // Per-clip counters — reset when a new clip begins
     private frameId       = 0;
     private chunkId       = 0;
@@ -88,6 +91,7 @@ export class SessionHandler {
     async connect(userId = "dev-user", language = "nl"): Promise<void> {
         if (this._state !== "idle") return;
 
+        this._clean = false;
         this._setState("connecting");
 
         let sessionId: string;
@@ -195,9 +199,11 @@ export class SessionHandler {
 
     /**
      * Disconnect intentionally. Calls POST /session/{id}/end, closes the
-     * WebSocket, and returns to idle.
+     * WebSocket, and returns to idle. Subsequent close events from the
+     * WebSocket are ignored via the _clean flag.
      */
     disconnect(): void {
+        this._clean = true;
         this.loopsCancelled = true;
 
         if (this.sessionId) {
@@ -234,7 +240,6 @@ export class SessionHandler {
         // If we are already in the active state (non-queued session), request
         // scenarios immediately. If queued, wait for session_ready.
         if (this._state === "connecting") {
-            this._setState("connecting"); // already set, but be explicit
             this.requestScenarios();
         }
         // state === "queued" → do nothing here; session_ready fires requestScenarios
@@ -282,13 +287,13 @@ export class SessionHandler {
                     if (candidate && this._activeScenarioId) {
                         // Synthesise a ClipData message from the candidate.
                         const clipData: ClipData = {
-                            type:             "clip_data",
-                            session_id:       this.sessionId!,
-                            clip_id:          candidate.clip_id,
-                            scenario_id:      this._activeScenarioId,
-                            video_url:        candidate.video_url,
-                            transcript:       candidate.transcript,
-                            notable_features: candidate.notable_features,
+                            type:              "clip_data",
+                            session_id:        this.sessionId!,
+                            clip_id:           candidate.clip_id,
+                            scenario_id:       this._activeScenarioId,
+                            video_url:         candidate.video_url,
+                            transcript:        candidate.transcript,
+                            notable_features:  candidate.notable_features,
                             branch_conditions: candidate.branch_conditions,
                         };
                         this._lastCandidates = [];
@@ -322,8 +327,17 @@ export class SessionHandler {
     }
 
     private _handleClose(clean: boolean): void {
+        // Ignore close events after an intentional disconnect().
+        if (this._clean) return;
+        // A clean close (normal handshake) does not indicate an unexpected drop.
         if (clean) return;
-        if (this._state === "completed" || this._state === "idle") return;
+        // Do not transition to dropped from terminal or already-idle states.
+        if (
+            this._state === "completed" ||
+            this._state === "idle"      ||
+            this._state === "error"
+        ) return;
+
         this.loopsCancelled = true;
         this._setState("dropped");
     }

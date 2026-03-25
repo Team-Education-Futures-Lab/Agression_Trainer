@@ -4,10 +4,6 @@ interface LandingScreenProps {
 }
 
 export function LandingScreen({ ready, onConnect }: LandingScreenProps) {
-    const handleStart = async () => {
-        await onConnect();
-    };
-
     return (
         <div style={s.root}>
             <div style={s.card}>
@@ -23,7 +19,7 @@ export function LandingScreen({ ready, onConnect }: LandingScreenProps) {
                 <button
                     style={{ ...s.btn, ...(!ready ? s.btnDisabled : {}) }}
                     disabled={!ready}
-                    onClick={() => void handleStart()}
+                    onClick={() => void onConnect()}
                 >
                     {ready ? "Begin sessie" : "Modellen laden…"}
                 </button>
@@ -63,12 +59,12 @@ const s = {
         lineHeight: 1.6,
     },
     hint: {
-        margin:       "0 0 32px",
-        fontSize:     "13px",
-        color:        "#475569",
-        lineHeight:   1.5,
-        borderLeft:   "3px solid #334155",
-        paddingLeft:  "12px",
+        margin:      "0 0 32px",
+        fontSize:    "13px",
+        color:       "#475569",
+        lineHeight:  1.5,
+        borderLeft:  "3px solid #334155",
+        paddingLeft: "12px",
     },
     btn: {
         width:        "100%",

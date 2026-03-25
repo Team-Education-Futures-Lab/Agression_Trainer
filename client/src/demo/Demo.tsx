@@ -12,6 +12,12 @@
 // Every state that depends on a server response has a timeout. If the expected
 // message does not arrive within RESPONSE_TIMEOUT_MS, an inline error is shown
 // with a disconnect button so the user is never stuck indefinitely.
+//
+// Architectural constraint: the single hidden <video ref={videoRef}> element
+// is rendered unconditionally for the full lifetime of this component tree so
+// that CaptureSession.start() never loses its bound element across screen
+// transitions. PlayerScreen receives this same videoRef to display the webcam
+// feed in its right column — it does not unmount or re-create the element.
 // =============================================================================
 
 import { useEffect, useRef, useState } from "react";
@@ -107,7 +113,6 @@ export function Demo() {
     } = useSession(capture, { onMessage: handleMessage });
 
     // ── Timeout conditions ────────────────────────────────────────────────────
-    // Each boolean is true only while we are waiting for a specific response.
     const waitingForScenarios = (state === "connecting" || state === "selecting") && scenarios.length === 0;
     const waitingForClipData  = state === "active" && currentClipData === null;
     const waitingForEval      = state === "paused";
@@ -139,6 +144,8 @@ export function Demo() {
     }, [state, capture]);
 
     // ─── Persistent hidden video element ──────────────────────────────────────
+    // Rendered unconditionally so CaptureSession.start() never loses its element.
+    // PlayerScreen receives this same videoRef to display the webcam feed.
     const hiddenVideo = (
         <video ref={videoRef} muted playsInline
                style={{ position: "fixed", opacity: 0, pointerEvents: "none", width: 1, height: 1, top: 0, left: 0 }}
@@ -199,7 +206,7 @@ export function Demo() {
                 onClipEnded={sendClipEnded}
             />;
         }
-        // clip_data not yet arrived — transitional, timeout guard above handles the hang
+        // clip_data not yet arrived — transitional, timeout guard above handles any hang
         return <>{hiddenVideo}
             <div style={loadingStyle}>
                 <p style={{ color: "#94a3b8", fontFamily: "sans-serif" }}>Clip laden…</p>

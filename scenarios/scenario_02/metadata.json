@@ -1,0 +1,67 @@
+{
+    "scenario_id": "scenario_02",
+    "title": "Agressieve klant",
+    "description": "Een klant is woedend over een product dat kort na aankoop stuk is gegaan en eist luidruchtig een terugbetaling. Oefen met het kalmeren van een opgewonden klant en het vinden van een oplossing zonder de situatie te laten escaleren.",
+    "language": "nl",
+    "entry_clip": "clip_01_intro",
+    "coaching_context": "De student oefent de rol van winkelmedewerker die geconfronteerd wordt met een agressieve klant die een defect product wil retourneren. Het doel is de klant serieus te nemen, kalm te blijven onder druk en tot een praktische oplossing te komen zonder de situatie te laten escaleren.",
+
+    "clips": {
+        "clip_01_intro": {
+            "file": "clip_01_intro.mp4",
+            "transcript": "Dit is een schande! Ik heb dit apparaat drie weken geleden hier gekocht en het doet het al niet meer. Drie weken! Ik wil mijn geld terug, nu meteen. Ik heb geen tijd voor gedoe met formulieren of 'even wachten op de manager'.",
+            "notable_features": ["raised_voice", "aggressive_posture", "pointing_gesture", "direct_eye_contact"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 0.2,  "next_clip": "clip_02_kalmer" },
+                { "min_score":  0.2, "max_score": 1.01, "next_clip": "clip_02_escalatie" }
+            ]
+        },
+
+        "clip_02_kalmer": {
+            "file": "clip_02_kalmer.mp4",
+            "transcript": "Oké, oké. Sorry, ik reageer misschien wat fel. Maar ik ben hier al de derde keer voor hetzelfde probleem. Kunt u me dan tenminste uitleggen wat mijn opties zijn?",
+            "notable_features": ["calm_voice", "crossed_arms", "direct_eye_contact"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 0.25, "next_clip": "clip_03_oplossing_goed" },
+                { "min_score":  0.25, "max_score": 1.01, "next_clip": "clip_03_oplossing_moeizaam" }
+            ]
+        },
+
+        "clip_02_escalatie": {
+            "file": "clip_02_escalatie.mp4",
+            "transcript": "U luistert helemaal niet naar me! Weet u wat, ik ga dit gewoon online zetten. Foto's, naam van de winkel, alles. Dan kunnen uw andere klanten zelf zien hoe jullie met mensen omgaan. Dit pik ik niet.",
+            "notable_features": ["raised_voice", "aggressive_posture", "pointing_gesture"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 0.15, "next_clip": "clip_03_oplossing_moeizaam" },
+                { "min_score":  0.15, "max_score": 1.01, "next_clip": "clip_03_einde_slecht" }
+            ]
+        },
+
+        "clip_03_oplossing_goed": {
+            "file": "clip_03_oplossing_goed.mp4",
+            "transcript": "Dat klinkt redelijk. Als u me de bon geeft, regel ik het voor u. Excuses voor het ongemak — dit had inderdaad sneller moeten kunnen.",
+            "notable_features": ["calm_voice", "open_posture", "backing_away"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
+            ]
+        },
+
+        "clip_03_oplossing_moeizaam": {
+            "file": "clip_03_oplossing_moeizaam.mp4",
+            "transcript": "Ik neem het er niet zomaar bij. Maar goed, als u echt niets anders kunt doen, dan accepteer ik een tegoedbon. Dit is de laatste keer dat ik hier iets koop.",
+            "notable_features": ["crossed_arms", "direct_eye_contact"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
+            ]
+        },
+
+        "clip_03_einde_slecht": {
+            "file": "clip_03_einde_slecht.mp4",
+            "transcript": "Weet u wat, laat maar zitten. Ik ga nu weg en ik post het vanavond nog online. Dan zien jullie wel wat er gebeurt.",
+            "notable_features": ["raised_voice", "aggressive_posture", "backing_away"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
+            ]
+        }
+    }
+}

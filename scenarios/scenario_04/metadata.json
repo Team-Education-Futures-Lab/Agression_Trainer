@@ -1,0 +1,86 @@
+{
+    "scenario_id": "scenario_04",
+    "title": "Conflict tussen collega's",
+    "description": "Een medewerker confronteert u als teamleider met de beschuldiging dat u hem achterstelt ten opzichte van een andere collega. Oefen met het erkennen van frustratie, het bewaken van uw eigen neutraliteit en het de-escaleren van een conflict dat dicht bij huis raakt.",
+    "language": "nl",
+    "entry_clip": "clip_01_intro",
+    "coaching_context": "De student oefent de rol van teamleider die wordt geconfronteerd door een medewerker die hem beschuldigt van voorkeursbehandeling. Het doel is de medewerker serieus te nemen zonder de beschuldiging te bevestigen, de emoties te erkennen en het gesprek naar een constructieve richting te sturen.",
+
+    "clips": {
+        "clip_01_intro": {
+            "file": "clip_01_intro.mp4",
+            "transcript": "Ik wil het hier even over hebben, want ik word er écht moe van. Elke keer als er een interessant project is, gaat het naar Sanne. Elke keer. En ik zie hoe jullie met elkaar omgaan — dat is toch geen toeval? U speelt gewoon favorieten en iedereen ziet het, behalve u blijkbaar.",
+            "notable_features": ["raised_voice", "direct_eye_contact", "aggressive_posture", "pointing_gesture"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 0.2,  "next_clip": "clip_02_gedeeltelijk_kalmer" },
+                { "min_score":  0.2, "max_score": 1.01, "next_clip": "clip_02_verharding" }
+            ]
+        },
+
+        "clip_02_gedeeltelijk_kalmer": {
+            "file": "clip_02_gedeeltelijk_kalmer.mp4",
+            "transcript": "Oké. Misschien heb ik me niet goed laten horen. Maar ik meen het wel. Ik doe mijn best, ik lever goed werk, en ik krijg het gevoel dat het niet gezien wordt. Dat doet wat met je, na een tijdje.",
+            "notable_features": ["calm_voice", "crossed_arms", "direct_eye_contact"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 0.2,  "next_clip": "clip_03_gesprek_open" },
+                { "min_score":  0.2, "max_score": 1.01, "next_clip": "clip_03_gesprek_moeizaam" }
+            ]
+        },
+
+        "clip_02_verharding": {
+            "file": "clip_02_verharding.mp4",
+            "transcript": "U ontkent het gewoon. Dat is precies het probleem — u luistert niet. Ik heb dit al drie keer geprobeerd aan te kaarten en elke keer wordt het weggewoven. Ik ga dit escaleren naar HR als dit zo doorgaat.",
+            "notable_features": ["raised_voice", "aggressive_posture", "pointing_gesture"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 0.15, "next_clip": "clip_03_gesprek_moeizaam" },
+                { "min_score":  0.15, "max_score": 1.01, "next_clip": "clip_03_breuk" }
+            ]
+        },
+
+        "clip_03_gesprek_open": {
+            "file": "clip_03_gesprek_open.mp4",
+            "transcript": "Dat... dat is fijn om te horen, eigenlijk. Ik wilde het even kwijt. Ik wil gewoon weten waar ik aan toe ben. Als er iets is wat ik anders moet doen, zeg het me dan gewoon.",
+            "notable_features": ["calm_voice", "open_posture", "direct_eye_contact"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 0.2,  "next_clip": "clip_04_constructief_einde" },
+                { "min_score":  0.2, "max_score": 1.01, "next_clip": "clip_04_wankelend_einde" }
+            ]
+        },
+
+        "clip_03_gesprek_moeizaam": {
+            "file": "clip_03_gesprek_moeizaam.mp4",
+            "transcript": "Ik geloof u, maar ik geloof u ook niet helemaal. U zegt de juiste dingen, maar ik zie het in de praktijk toch anders. Ik wacht het nog even af. Maar als het volgende project weer naar Sanne gaat, dan is voor mij het bewijs geleverd.",
+            "notable_features": ["crossed_arms", "silence", "direct_eye_contact"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
+            ]
+        },
+
+        "clip_03_breuk": {
+            "file": "clip_03_breuk.mp4",
+            "transcript": "Ik ga dit niet verder met u bespreken. U begrijpt het niet en u wilt het niet begrijpen. Ik heb dit gesprek al te vaak gevoerd. Ik stuur vandaag nog een mail naar HR.",
+            "notable_features": ["raised_voice", "aggressive_posture", "backing_away"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
+            ]
+        },
+
+        "clip_04_constructief_einde": {
+            "file": "clip_04_constructief_einde.mp4",
+            "transcript": "Oké. Ik ga erover nadenken. En ik kom volgende week terug voor dat gesprek. Dank u wel dat u de tijd heeft genomen — dat waardeer ik echt.",
+            "notable_features": ["calm_voice", "open_posture", "backing_away"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
+            ]
+        },
+
+        "clip_04_wankelend_einde": {
+            "file": "clip_04_wankelend_einde.mp4",
+            "transcript": "Misschien. Ik weet het niet. Ik ga er nog even over nadenken. Maar ik heb het gevoel dat ik dit gesprek al eerder heb gehad en dat er nooit iets verandert. We zien wel.",
+            "notable_features": ["silence", "crossed_arms", "backing_away"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
+            ]
+        }
+    }
+}

@@ -1,0 +1,97 @@
+{
+    "scenario_id": "scenario_05",
+    "title": "Overstuur ouder op school",
+    "description": "Een ouder komt onverwacht op school om te klagen over de beoordeling van zijn kind en wordt steeds emotioneler. Oefen met het erkennen van zorgen, het bewaren van professionaliteit en het sturen van het gesprek — ook als de emoties sterk oplopen.",
+    "language": "nl",
+    "entry_clip": "clip_01_intro",
+    "coaching_context": "De student oefent de rol van MBO-docent die wordt geconfronteerd door een ouder die het niet eens is met de beoordeling van zijn kind en emotioneel reageert. Het doel is de ouder serieus te nemen, rustig te blijven en het gesprek constructief te houden zonder de eigen professionele positie te ondermijnen.",
+
+    "clips": {
+        "clip_01_intro": {
+            "file": "clip_01_intro.mp4",
+            "transcript": "Ik wil weten wat hier aan de hand is. Mijn zoon heeft voor uw vak een onvoldoende gekregen en hij heeft echt zijn best gedaan. Hij heeft er nachten voor gewerkt. Ik snap er niets van en ik wil een uitleg.",
+            "notable_features": ["raised_voice", "direct_eye_contact", "aggressive_posture"],
+            "branch_conditions": [
+                { "min_score": -1.0,  "max_score": -0.2, "next_clip": "clip_02_open_gesprek" },
+                { "min_score": -0.2,  "max_score":  0.3, "next_clip": "clip_02_weerstand" },
+                { "min_score":  0.3,  "max_score":  1.01,"next_clip": "clip_02_escalatie" }
+            ]
+        },
+
+        "clip_02_open_gesprek": {
+            "file": "clip_02_open_gesprek.mp4",
+            "transcript": "Goed... dat klinkt eerlijk. Ik ben misschien wat overhaast binnengekomen. Maar u begrijpt toch wel dat ik me zorgen maak? Hij vertelt thuis zo weinig over school. Kunt u me vertellen wat hij precies moet verbeteren?",
+            "notable_features": ["calm_voice", "open_posture", "direct_eye_contact"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score":  0.2, "next_clip": "clip_03_constructief" },
+                { "min_score":  0.2, "max_score":  1.01,"next_clip": "clip_03_lichte_spanning" }
+            ]
+        },
+
+        "clip_02_weerstand": {
+            "file": "clip_02_weerstand.mp4",
+            "transcript": "U zegt dat, maar ik zie het anders. Hij heeft die opdracht echt af gehad. Ik heb het zelf gezien. Misschien heeft u het niet goed nagekeken. Dat kan toch ook?",
+            "notable_features": ["crossed_arms", "direct_eye_contact", "raised_voice"],
+            "branch_conditions": [
+                { "min_score": -1.0,  "max_score": -0.1, "next_clip": "clip_03_lichte_spanning" },
+                { "min_score": -0.1,  "max_score":  0.3, "next_clip": "clip_03_patstelling" },
+                { "min_score":  0.3,  "max_score":  1.01,"next_clip": "clip_03_confrontatie" }
+            ]
+        },
+
+        "clip_02_escalatie": {
+            "file": "clip_02_escalatie.mp4",
+            "transcript": "Dit is echt te gek voor woorden. Ik ga dit melden bij de schoolleiding. Mijn kind wordt hier benadeeld en u staat er gewoon bij. Ik ga niet weg voordat ik de directeur heb gesproken.",
+            "notable_features": ["raised_voice", "aggressive_posture", "pointing_gesture"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score":  0.2, "next_clip": "clip_03_confrontatie" },
+                { "min_score":  0.2, "max_score":  1.01,"next_clip": "clip_03_einde_slecht" }
+            ]
+        },
+
+        "clip_03_constructief": {
+            "file": "clip_03_constructief.mp4",
+            "transcript": "Dat helpt me echt. Ik wist niet dat hij zoveel moeite had met de schrijfopdrachten. Ik zal er thuis met hem over praten. En als hij vastloopt, mag hij dan bij u langskomen?",
+            "notable_features": ["calm_voice", "open_posture", "backing_away"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
+            ]
+        },
+
+        "clip_03_lichte_spanning": {
+            "file": "clip_03_lichte_spanning.mp4",
+            "transcript": "Oké. Ik hoor wat u zegt. Ik ben het er niet helemaal mee eens, maar ik snap dat u uw redenen heeft. Kunt u hem dan in ieder geval een herkansing geven? Hij verdient een eerlijke kans.",
+            "notable_features": ["crossed_arms", "calm_voice", "direct_eye_contact"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
+            ]
+        },
+
+        "clip_03_patstelling": {
+            "file": "clip_03_patstelling.mp4",
+            "transcript": "We draaien in cirkels. U zegt dat hij het niet goed heeft gedaan, ik zeg van wel. Ik weet niet hoe we hieruit komen. Misschien moet er toch iemand anders bij.",
+            "notable_features": ["silence", "crossed_arms", "backing_away"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
+            ]
+        },
+
+        "clip_03_confrontatie": {
+            "file": "clip_03_confrontatie.mp4",
+            "transcript": "U bent de docent, u zou toch professioneel moeten zijn. Ik verwacht dat u dit oplost. Als mijn zoon zakt dit jaar, dan ligt dat aan u.",
+            "notable_features": ["raised_voice", "pointing_gesture", "direct_eye_contact"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
+            ]
+        },
+
+        "clip_03_einde_slecht": {
+            "file": "clip_03_einde_slecht.mp4",
+            "transcript": "Ik ga nu naar de directeur. Dit gesprek heeft geen zin. U luistert toch niet.",
+            "notable_features": ["raised_voice", "aggressive_posture", "backing_away"],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
+            ]
+        }
+    }
+}

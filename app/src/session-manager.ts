@@ -6,7 +6,7 @@ import type {
     SessionManagerConfig,
     SessionState
 } from "./types.js";
-import {randomUUID} from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 
 // ─── Slot-consuming states ────────────────────────────────────────────────────
 
@@ -34,22 +34,22 @@ export class SessionManager {
             this.sessions.set(ctx.session_id, ctx);
             this.activeSlots++;
             this.startConnectionTimer(ctx.session_id);
-            return {status: "active", context: ctx};
+            return { status: "active", context: ctx };
         }
 
         if (this.config.capacityPolicy === "REJECT") {
-            return {status: "at_capacity"};
+            return { status: "at_capacity" };
         }
 
         if (this.queue.length >= this.config.maxQueueSize) {
-            return {status: "at_capacity"};
+            return { status: "at_capacity" };
         }
 
         const pos = this.queue.length + 1;
         const ctx = this.makeContext(userId, language, "QUEUED", isAdmin, pos);
         this.sessions.set(ctx.session_id, ctx);
         this.queue.push(ctx.session_id);
-        return { status: "queued", context: ctx, queue_position: pos};
+        return { status: "queued", context: ctx, queue_position: pos };
     }
 
     resumeSession(sessionId: string): ResumeSessionResult {
@@ -122,6 +122,17 @@ export class SessionManager {
         ctx.current_clip_id = clipId;
     }
 
+    /**
+     * Stores the coaching_context for the session. Called alongside setScenario()
+     * when the first request_clip { activate: true } binds the scenario.
+     * No-op if the scenario is already bound (mirrors setScenario guard).
+     */
+    setCoachingContext(sessionId: string, context: string | null): void {
+        const ctx = this.sessions.get(sessionId);
+        if (!ctx || ctx.scenario_id !== null) return;
+        ctx.coaching_context = context;
+    }
+
     appendTurn(sessionId: string, turn: ConversationTurn): void {
         const ctx = this.sessions.get(sessionId);
         if (!ctx) return;
@@ -132,12 +143,16 @@ export class SessionManager {
     buildFeedbackRequest(sessionId: string): FeedbackRequest | null {
         const ctx = this.sessions.get(sessionId);
         if (!ctx || !ctx.scenario_id) return null;
-        return {
+        const req: FeedbackRequest = {
             session_id:  ctx.session_id,
             scenario_id: ctx.scenario_id,
             language:    ctx.language,
             history:     [...ctx.conversation_history],
         };
+        if (ctx.coaching_context) {
+            req.coaching_context = ctx.coaching_context;
+        }
+        return req;
     }
 
     /**
@@ -151,12 +166,18 @@ export class SessionManager {
     }
 
     /**
-     * Checks whether the provided token is a valid admin key.
+     * Checks whether the provided token is a valid admin key using a
+     * timing-safe comparison to prevent key enumeration via timing attacks.
      * Returns false if ADMIN_API_KEY is unset, making admin mode unavailable.
      */
     isAdminToken(token: string | undefined): boolean {
         if (!this.config.adminApiKey || !token) return false;
-        return token === this.config.adminApiKey;
+        // timingSafeEqual requires equal-length buffers; length mismatch is
+        // itself non-secret information, so an early false here is acceptable.
+        const a = Buffer.from(token);
+        const b = Buffer.from(this.config.adminApiKey);
+        if (a.length !== b.length) return false;
+        return timingSafeEqual(a, b);
     }
 
     // ── Internal ──────────────────────────────────────────────────────────────
@@ -179,6 +200,7 @@ export class SessionManager {
             turn_count:           0,
             queue_position:       queuePos,
             is_admin:             isAdmin,
+            coaching_context:     null,
         };
     }
 

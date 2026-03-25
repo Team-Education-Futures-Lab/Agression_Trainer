@@ -18,16 +18,16 @@ export function EvaluatingScreen() {
 
     return (
         <div style={s.root}>
-        <div style={s.card}>
-        <div style={s.bars}>
-            {[0, 1, 2, 3].map(i => (
-        <div key={i} style={{ ...s.bar, animationDelay: `${i * 0.15}s` }} />
-))}
-    </div>
-    <p style={s.step}>{STEPS[step]}</p>
+            <div style={s.card}>
+                <div style={s.bars}>
+                    {[0, 1, 2, 3].map(i => (
+                        <div key={i} style={{ ...s.bar, animationDelay: `${i * 0.15}s` }} />
+                    ))}
+                </div>
+                <p style={s.step}>{STEPS[step]}</p>
+            </div>
         </div>
-        </div>
-);
+    );
 }
 
 const s = {
@@ -56,10 +56,10 @@ const s = {
         marginBottom:   "20px",
     },
     bar: {
-        width:           "6px",
-        borderRadius:    "3px",
-        background:      "#6366f1",
-        animation:       "bounce 0.7s ease-in-out infinite alternate",
+        width:        "6px",
+        borderRadius: "3px",
+        background:   "#6366f1",
+        animation:    "bounce 0.7s ease-in-out infinite alternate",
     },
     step: {
         margin:   0,

@@ -139,14 +139,20 @@ export type ClientMessage = VideoFrame | AudioChunk | ClipEnded | RequestClip | 
  * Intended for development and debugging — the client may choose not to
  * display this to students in production.
  *
- * `queue_position` is non-null only while the session is in the QUEUED state.
+ * `queue_position`: the App container always sends `null` here. Queue
+ * position is communicated via `session_ready` (on promotion) and the
+ * `GET /session/{id}/queue` polling endpoint. The field is typed as
+ * `number | null` rather than `null` because the client constructs
+ * synthetic `SessionUpdate` messages internally (e.g. to surface the
+ * initial queue position from the HTTP create response) and needs to
+ * populate this field with a non-null value.
  */
 export interface SessionUpdate {
     type: "session_update";
     session_id: string;
     /** Accumulated transcript for the current clip so far. */
     transcript: string;
-    /** Position in the waiting queue, or null if the session is active. */
+    /** Always null when sent by the server. May be non-null in client-constructed messages. */
     queue_position: number | null;
 }
 
@@ -491,15 +497,16 @@ export interface FeedbackRequest {
     language: string;
     history: ConversationTurn[];
     /**
-     * Scenario-specific description of the professional role and context
-     * the student is practising. Used by the Feedback container to frame
-     * its coaching prompt appropriately for the scenario.
+     * Optional scenario-specific description of the professional role and
+     * context the student is practising. Used by the Feedback container to
+     * frame its coaching prompt for the scenario.
      *
-     * e.g. "De student oefent het de-escaleren van een boze persoon in de
-     * rol van docent in het MBO."
+     * e.g. `"De student oefent het de-escaleren van een boze persoon in de
+     * rol van docent in het MBO."`
      *
-     * Optional — when absent the Feedback container falls back to a generic
-     * de-escalation training description.
+     * When absent the Feedback container falls back to a generic Dutch
+     * de-escalation training description. Populated from the scenario's
+     * `coaching_context` metadata field when present.
      */
     coaching_context?: string;
 }

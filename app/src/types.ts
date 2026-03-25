@@ -53,6 +53,16 @@ export interface SessionContext {
      * token lookup; nothing downstream changes.
      */
     is_admin:             boolean;
+    /**
+     * Optional scenario-specific coaching context, read from the scenario's
+     * metadata.json `coaching_context` field and bound alongside the scenario
+     * when request_clip { activate: true } is first received.
+     *
+     * Forwarded to the Feedback container in FeedbackRequest.coaching_context
+     * so the LLM can frame its debrief for the specific professional context
+     * being practised. Null when the scenario metadata omits the field.
+     */
+    coaching_context:     string | null;
 }
 
 // ─── Coordinator config ───────────────────────────────────────────────────────
@@ -90,12 +100,7 @@ export interface SessionManagerConfig {
     /**
      * Optional admin API key. When set, POST /session/create requests carrying
      * Authorization: Bearer <adminApiKey> create admin sessions.
-     * When unset (undefined or empty string), admin mode is permanently unavailable.
-     */
-    /**
-     * Optional admin API key. When set, POST /session/create requests carrying
-     * Authorization: Bearer <adminApiKey> create admin sessions.
-     * When unset (undefined or empty string), admin mode is permanently unavailable.
+     * When unset (undefined), admin mode is permanently unavailable.
      */
     adminApiKey:      string | undefined;
 }

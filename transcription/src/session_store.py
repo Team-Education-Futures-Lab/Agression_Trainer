@@ -13,8 +13,17 @@ connection per session_id.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from fastapi import WebSocket
+
+logger = logging.getLogger(__name__)
+
+# Maximum PCM buffer size per session (bytes).
+# At 16kHz s16le (2 bytes/sample) a 120-second clip produces 3,840,000 bytes.
+# 4 MB = 4,194,304 bytes — roughly 2× a legitimate 60-second clip, giving
+# ample headroom while capping runaway growth from a misbehaving client.
+_MAX_PCM_BUFFER_BYTES = 4 * 1024 * 1024
 
 
 # ─── Per-session state ────────────────────────────────────────────────────────
@@ -69,9 +78,28 @@ class SessionStore:
             entry.window_seq = 0
 
     def append_pcm(self, session_id: str, pcm: bytes) -> None:
-        """Append raw PCM bytes to the session's accumulation buffer."""
+        """
+        Append raw PCM bytes to the session's accumulation buffer.
+
+        Bytes that would push the buffer past _MAX_PCM_BUFFER_BYTES are
+        silently dropped. This is a denial-of-service defence — a legitimate
+        clip produces at most ~2 MB; anything larger indicates a misbehaving
+        or malicious client.
+        """
         entry = self._sessions.get(session_id)
-        if entry is not None:
+        if entry is None:
+            return
+        available = _MAX_PCM_BUFFER_BYTES - len(entry.pcm_buffer)
+        if available <= 0:
+            logger.warning("PCM buffer cap reached for session %s — dropping %d bytes", session_id, len(pcm))
+            return
+        if len(pcm) > available:
+            logger.warning(
+                "PCM buffer cap reached for session %s — truncating chunk from %d to %d bytes",
+                session_id, len(pcm), available,
+            )
+            entry.pcm_buffer.extend(pcm[:available])
+        else:
             entry.pcm_buffer.extend(pcm)
 
     def next_seq(self, session_id: str) -> int:

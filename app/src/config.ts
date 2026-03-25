@@ -28,8 +28,14 @@ function enumEnv<T extends string>(key: string, allowed: T[], fallback: T): T {
 function secretEnv(key: string, knownBadValue: string = "CHANGE_ME"): string {
     const value = requireEnv(key);
     if (value === knownBadValue) {
-        console.warn(`[WARN] ${key} is set to the default placeholder value. ` +
-            "Generate a secure key with: openssl rand -hex 32");
+        // Use the structured logger-compatible approach: log after Fastify
+        // bootstraps. For config-time warnings (before Fastify starts) we
+        // have no choice but to write to stderr directly. The key itself is
+        // never included in the message.
+        process.stderr.write(
+            `[WARN] ${key} is set to the default placeholder value. ` +
+            "Generate a secure key with: openssl rand -hex 32\n"
+        );
     }
     return value;
 }
@@ -43,20 +49,39 @@ function parseStringList(key: string): string[] {
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 export interface AppConfig {
-    port:              number;
-    evaluationUrls:    string[];
-    transcriptionUrls: string[];
-    feedbackUrl:       string;
-    scenariosDir:      string;
-    internalApiKey:    string;
-    coordinator:       CoordinatorConfig;
-    sessionManager:    SessionManagerConfig;
+    port:               number;
+    evaluationUrls:     string[];
+    transcriptionUrls:  string[];
+    feedbackUrl:        string;
+    scenariosDir:       string;
+    internalApiKey:     string;
+    /**
+     * Allowed CORS origin for HTTP endpoints.
+     * `true`   — reflect any origin (default; correct for single-server classroom use).
+     * `string` — restrict to this exact origin (e.g. "http://localhost:3000").
+     * Set via CORS_ORIGIN environment variable.
+     */
+    corsOrigin:         string | true;
+    /**
+     * Timeout in ms for the full feedback SSE stream from the Feedback container.
+     * Should be set slightly above the Feedback container's OLLAMA_TIMEOUT_MS
+     * to allow Ollama to finish and the container to write the final SSE event.
+     * Default: 150 000 ms (150 s).
+     */
+    feedbackTimeoutMs:  number;
+    coordinator:        CoordinatorConfig;
+    sessionManager:     SessionManagerConfig;
 }
 
 export function loadConfig(): AppConfig {
     const internalApiKey    = secretEnv("INTERNAL_API_KEY", "CHANGE_ME");
     const evaluationUrls    = parseStringList("EVALUATION_URL");
     const transcriptionUrls = parseStringList("TRANSCRIPTION_URL");
+
+    // CORS_ORIGIN: if unset, default to true (allow any origin).
+    // If set, use the provided string as the exact allowed origin.
+    const corsOriginEnv = process.env["CORS_ORIGIN"];
+    const corsOrigin: string | true = corsOriginEnv ? corsOriginEnv : true;
 
     return {
         port:              intEnv("PORT", 3000),
@@ -65,6 +90,8 @@ export function loadConfig(): AppConfig {
         feedbackUrl:       requireEnv("FEEDBACK_URL"),
         scenariosDir:      requireEnv("SCENARIOS_DIR"),
         internalApiKey,
+        corsOrigin,
+        feedbackTimeoutMs: intEnv("FEEDBACK_TIMEOUT_MS", 150_000),
         coordinator: {
             evaluationUrls,
             transcriptionUrls,
