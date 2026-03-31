@@ -7,9 +7,9 @@ The Transcription container receives a continuous stream of raw audio from the A
 ## Responsibilities
 
 - **Audio ingestion** — accepts a persistent WebSocket connection per clip from the App container, receives `AudioChunk` messages containing base64-encoded s16le PCM at 16 kHz, and accumulates audio into a per-session buffer
-- **Rolling transcription** — once the buffer exceeds a minimum threshold (~2 s), dispatches a window to the Whisper pool and streams a partial `Transcript` message back over the WebSocket
+- **Rolling transcription** — once the buffer exceeds a minimum threshold (~6 s), gates the window against a silence check, and if speech is present dispatches the window to the Whisper pool and emits a partial `Transcript` message back over the WebSocket
 - **Finalisation** — on `POST /transcription/finalise/{session_id}`, transcribes any remaining buffered audio and emits a final `Transcript` message (`is_final: true`), which signals the App container that the clip transcript is complete
-- **Buffer reset** — on `POST /transcription/reset/{session_id}`, clears the per-session PCM buffer between clips
+- **Buffer reset** — on `POST /transcription/reset/{session_id}`, clears the per-session PCM buffer and initial-prompt cache between clips
 - **Health reporting** — `GET /transcription/health` reports total and available Whisper workers and the inference device
 
 ---
@@ -18,29 +18,36 @@ The Transcription container receives a continuous stream of raw audio from the A
 
 ### Classes
 
-**`TranscriptionService`** — the orchestration layer. Owns all per-session logic: PCM accumulation, rolling window dispatch, finalisation, and `Transcript` emission. Holds a `SessionStore` reference and delegates inference to the injected `TranscriptionPoolInterface`. Route handlers in `main.py` are thin — they call `TranscriptionService` methods and translate the results into HTTP responses or WebSocket messages.
+**`TranscriptionService`** — the orchestration layer. Owns all per-session logic: PCM accumulation, silence gating, rolling window dispatch, initial-prompt threading, finalisation, and `Transcript` emission. Holds a `SessionStore` reference and delegates inference to the injected `TranscriptionPoolInterface`. Route handlers in `main.py` are thin — they call `TranscriptionService` methods and translate the results into HTTP responses or WebSocket messages.
 
-**`SessionStore`** — in-memory registry of active sessions. Each entry holds the live WebSocket reference, the raw PCM accumulation buffer, and a monotonically increasing `window_seq` counter. Keyed by `session_id`. The App container pins each session to a single container instance so entries are never shared across processes.
+**`SessionStore`** — in-memory registry of active sessions. Each entry holds the live WebSocket reference, the raw PCM accumulation buffer, a monotonically increasing `window_seq` counter, a `flush_lock` that serialises concurrent buffer access between rolling windows and finalisation, and the per-session `language` code supplied at connection time. Keyed by `session_id`. The App container pins each session to a single container instance so entries are never shared across processes.
 
-**`WhisperPool`** — real faster-whisper implementation of `TranscriptionPoolInterface`. Maintains a fixed pool of `WhisperModel` instances (one per worker). Each `transcribe()` call acquires a free model via an `asyncio.Semaphore`, runs inference in a `ThreadPoolExecutor` (so the event loop is never blocked), and releases the model back to the pool. Silero VAD (`vad_filter=True`) runs as a pre-pass on each audio buffer so silence is automatically skipped without manual windowing. All models load at startup — the container fails fast if the model name or device is misconfigured.
+**`WhisperPool`** — real faster-whisper implementation of `TranscriptionPoolInterface`. Maintains a fixed pool of `WhisperModel` instances (one per worker). Each `transcribe()` call acquires a free model via an `asyncio.Semaphore`, runs inference in a `ThreadPoolExecutor` (so the event loop is never blocked), and releases the model back to the pool. Accepts a per-call `language` override and an `initial_prompt` to seed Whisper's decoder from prior transcript text, reducing hallucination on short windows. If inference raises, the model instance is discarded rather than returned to the pool to prevent a corrupt model from affecting future requests. Silero VAD (`vad_filter=True`) runs as a pre-pass on each audio buffer so any remaining silence is automatically skipped.
 
 **`StubTranscriptionPool`** — development stub. Returns a fixed Dutch placeholder string without calling Whisper. Used when `TRANSCRIPTION_POOL=stub`. See `docs/stub_guide.md`.
 
-**`SessionEntry`** — dataclass holding per-session state: WebSocket reference, PCM bytearray buffer, and `window_seq` counter. Created by `SessionStore.open()` on each new WebSocket connection, discarded on disconnect.
+**`SessionEntry`** — dataclass holding per-session state: WebSocket reference, PCM bytearray buffer, `window_seq` counter, `flush_lock`, and the per-session `language` code. Created by `SessionStore.open()` on each new WebSocket connection, discarded on disconnect.
 
 ### Audio pipeline
 
 ```
 App container (ClipSession)
-    │  AudioChunk messages (base64 PCM) over WebSocket
+    │  WebSocket /ws/{session_id}?language=nl  (opened once per clip)
+    │  AudioChunk messages (base64 PCM) over the connection
     ▼
 TranscriptionService.on_audio_chunk()
     │  decode base64 → append to pcm_buffer
-    │  if buffer ≥ _MIN_BUFFER_BYTES (2s):
+    │  if buffer ≥ _MIN_BUFFER_BYTES (6 s):
+    ▼
+_is_silent(pcm)?  ──yes──► discard window, no message emitted
+    │ no
     ▼
 TranscriptionService._transcribe_window(is_final=False)
+    │  acquire flush_lock
     │  snapshot + clear buffer
-    │  pool.transcribe(pcm) → TranscriptSegment
+    │  pool.transcribe(pcm, language=entry.language, initial_prompt=last_text)
+    │  → TranscriptSegment
+    │  update last_text cache
     ▼
 Transcript message (is_final=False) → WebSocket → ClipSession
 
@@ -49,8 +56,11 @@ Transcript message (is_final=False) → WebSocket → ClipSession
 POST /transcription/finalise/{session_id}
     ▼
 TranscriptionService.finalise()
+    │  acquire flush_lock
     │  snapshot + clear buffer
-    │  pool.transcribe(pcm) → TranscriptSegment  (or empty if buffer empty)
+    │  silence check → skip pool if silent, emit empty final
+    │  pool.transcribe(pcm, language=entry.language, initial_prompt=last_text)
+    │  → TranscriptSegment
     ▼
 Transcript message (is_final=True) → WebSocket → ClipSession resolves
 ```
@@ -65,12 +75,12 @@ See `docs/api_contract.md` for the full wire format.
 
 All endpoints except `/transcription/health` require `Authorization: Bearer <INTERNAL_API_KEY>`.
 
-| Method | Path                                    | Auth     | Description                                                               |
-|--------|-----------------------------------------|----------|---------------------------------------------------------------------------|
-| `WS`   | `/ws/{session_id}`                      | Required | Persistent audio stream per clip. Accepts `AudioChunk`, emits `Transcript`|
-| `POST` | `/transcription/finalise/{session_id}`  | Required | Flush remaining audio and emit final `Transcript`. Returns 404 if session unknown |
-| `POST` | `/transcription/reset/{session_id}`     | Required | Clear PCM buffer between clips                                            |
-| `GET`  | `/transcription/health`                 | None     | Worker pool status and inference device                                   |
+| Method | Path                                   | Auth     | Description                                                                                                                                                                                     |
+|--------|----------------------------------------|----------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `WS`   | `/ws/{session_id}?language={code}`     | Required | Persistent audio stream per clip. `language` is an optional ISO 639-1 query param (e.g. `nl`, `en`). Overrides the container default for this session. Accepts `AudioChunk`, emits `Transcript` |
+| `POST` | `/transcription/finalise/{session_id}` | Required | Flush remaining audio and emit final `Transcript`. Returns 404 if session unknown                                                                                                               |
+| `POST` | `/transcription/reset/{session_id}`    | Required | Clear PCM buffer and initial-prompt cache between clips                                                                                                                                         |
+| `GET`  | `/transcription/health`                | None     | Worker pool status and inference device                                                                                                                                                         |
 
 ### WebSocket message types
 
@@ -85,25 +95,25 @@ All endpoints except `/transcription/health` require `Authorization: Bearer <INT
 
 Copy `.env.example` to `.env` and set `INTERNAL_API_KEY`. All other variables have defaults.
 
-| Variable             | Default        | Description                                                                                         |
-|----------------------|----------------|-----------------------------------------------------------------------------------------------------|
-| `INTERNAL_API_KEY`   | _(required)_   | Shared secret validated on all authenticated requests. Must match the value in the App container. Generate with `openssl rand -hex 32` |
-| `TRANSCRIPTION_POOL` | `stub`         | `stub` — canned responses, no Whisper; `production` — real WhisperPool                             |
-| `WHISPER_MODEL`      | `base`         | faster-whisper model size: `tiny`, `base`, `small`, `medium`, `large-v3`                           |
-| `WHISPER_LANGUAGE`   | `nl`           | ISO 639-1 language code passed to Whisper                                                           |
-| `WHISPER_WORKERS`    | `4`            | Number of `WhisperModel` instances in the pool — controls transcription parallelism                 |
-| `DEVICE`             | `cpu`          | `cpu` or `cuda`. CUDA requires the NVIDIA Container Toolkit                                         |
-| `PORT`               | `8003`         | Internal listen port                                                                                |
+| Variable             | Default      | Description                                                                                                                                                                                                      |
+|----------------------|--------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `INTERNAL_API_KEY`   | _(required)_ | Shared secret validated on all authenticated requests. Must match the value in the App container. Generate with `openssl rand -hex 32`                                                                           |
+| `TRANSCRIPTION_POOL` | `stub`       | `stub` — canned responses, no Whisper; `production` — real WhisperPool                                                                                                                                           |
+| `WHISPER_MODEL`      | `base`       | faster-whisper model size: `tiny`, `base`, `small`, `medium`, `large-v3`                                                                                                                                         |
+| `WHISPER_LANGUAGE`   | `nl`         | Fallback ISO 639-1 language code used when the App container does not supply a `language` query parameter on the WebSocket URL. Override per-session by passing `?language=<code>` — no container restart needed |
+| `WHISPER_WORKERS`    | `4`          | Number of `WhisperModel` instances in the pool — controls transcription parallelism                                                                                                                              |
+| `DEVICE`             | `cpu`        | `cpu` or `cuda`. CUDA requires the NVIDIA Container Toolkit                                                                                                                                                      |
+| `PORT`               | `8003`       | Internal listen port                                                                                                                                                                                             |
 
 ### Model size trade-offs
 
-| Model      | Speed (CPU) | Accuracy | Recommended for              |
-|------------|-------------|----------|------------------------------|
-| `tiny`     | Fastest     | Low      | Rapid prototyping only       |
+| Model      | Speed (CPU) | Accuracy | Recommended for                         |
+|------------|-------------|----------|-----------------------------------------|
+| `tiny`     | Fastest     | Low      | Rapid prototyping only                  |
 | `base`     | Fast        | Good     | Default — development and MBO classroom |
-| `small`    | Moderate    | Better   | Higher accuracy requirement  |
-| `medium`   | Slow        | High     | GPU deployment               |
-| `large-v3` | Slowest     | Highest  | GPU deployment, best quality |
+| `small`    | Moderate    | Better   | Higher accuracy requirement             |
+| `medium`   | Slow        | High     | GPU deployment                          |
+| `large-v3` | Slowest     | Highest  | GPU deployment, best quality            |
 
 For CPU-only classroom deployments `base` with `WHISPER_WORKERS=4` is the recommended starting point. Each worker occupies approximately 500 MB of RAM at `base` size.
 
@@ -141,12 +151,12 @@ Set `TRANSCRIPTION_POOL=stub` (the default) during development so tests and loca
 
 Tests live in `tests/` and use pytest with pytest-asyncio. Run the full suite with `pytest`.
 
-| File                                  | Coverage                                                                                         |
-|---------------------------------------|--------------------------------------------------------------------------------------------------|
-| `tests/test_session_store.py`         | Open/close/reset lifecycle, PCM accumulation, sequence counter, isolation between sessions       |
-| `tests/test_stub_transcription_pool.py` | Stub contract: fixed text, full confidence, pool properties                                    |
-| `tests/test_transcription_service.py` | PCM buffering, rolling window trigger and dispatch, finalisation, empty-buffer path, window_seq, send failure handling |
-| `tests/test_routes.py`                | Auth enforcement on all endpoints, HTTP response shapes, WebSocket lifecycle, message routing    |
+| File                                    | Coverage                                                                                                                                                                                 |
+|-----------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `tests/test_session_store.py`           | Open/close/reset lifecycle, PCM accumulation, sequence counter, isolation between sessions                                                                                               |
+| `tests/test_stub_transcription_pool.py` | Stub contract: fixed text, full confidence, pool properties                                                                                                                              |
+| `tests/test_transcription_service.py`   | PCM buffering, rolling window trigger and dispatch, silence gating, initial-prompt threading, Whisper error handling, finalisation, empty-buffer path, window_seq, send failure handling |
+| `tests/test_routes.py`                  | Auth enforcement on all endpoints, HTTP response shapes, WebSocket lifecycle, message routing                                                                                            |
 
 ---
 

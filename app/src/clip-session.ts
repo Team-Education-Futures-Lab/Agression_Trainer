@@ -30,13 +30,9 @@ export const defaultWsFactory: WsFactory = (url, opts) => new WebSocket(url, opt
 export type TranscriptUpdateCallback = (sessionId: string, transcript: string) => void;
 
 // Maximum frames buffered per clip. Matches MAX_FRAMES_PER_CLIP in main.ts.
-// The WebSocket handler enforces this first; this cap is a belt-and-suspenders
-// defence in case ClipSession is used outside the standard handler path.
 const MAX_FRAMES = 3_600;
 
 // Maximum audio chunks queued while the Transcription WebSocket is connecting.
-// In normal operation the socket opens within milliseconds; this only applies
-// to chunks that arrive before the open event fires.
 const MAX_AUDIO_QUEUE = 120;
 
 
@@ -86,6 +82,8 @@ export class ClipSession {
         wsFactory:           WsFactory,
         sequence:            number = 1,
         onTranscriptUpdate?: TranscriptUpdateCallback,
+        /** ISO 639-1 language code for this session, e.g. "nl" or "en". */
+        language:            string = "",
     ) {
         this.sessionId          = sessionId;
         this.clip               = clip;
@@ -96,17 +94,22 @@ export class ClipSession {
 
         this.promise = new Promise(res => { this.resolve = res; });
 
-        const wsUrl = transcriptionUrl
+        const baseUrl = transcriptionUrl
             .replace(/^http:\/\//, "ws://")
             .replace(/^https:\/\//, "wss://")
             .replace(/\/+$/, "");
 
-        this.ws = wsFactory(`${wsUrl}/ws/${sessionId}`, {
+        // Append the per-session language as a query parameter so the
+        // Transcription container can use the correct Whisper language
+        // for this session regardless of its container-level default.
+        const langParam = language ? `?language=${encodeURIComponent(language)}` : "";
+        const wsUrl     = `${baseUrl}/ws/${sessionId}${langParam}`;
+
+        this.ws = wsFactory(wsUrl, {
             headers: { "Authorization": authHeader },
         });
 
         this.ws.on("open", () => {
-            // Drain any audio queued during the CONNECTING phase
             for (const payload of this.audioQueue) {
                 this.ws.send(payload);
             }
@@ -137,7 +140,6 @@ export class ClipSession {
 
         this.ws.on("error", () => {
             // Non-fatal — transcription loss does not end the session.
-            // The clip will proceed with whatever transcript has been accumulated.
         });
 
         this.ws.on("close", () => { /* no-op */ });
@@ -145,10 +147,6 @@ export class ClipSession {
 
     // ── Thenable protocol ─────────────────────────────────────────────────────
 
-    /**
-     * Makes `await clipSession` work without subclassing Promise.
-     * Resolves with the complete AnalysisWindow for this clip.
-     */
     then<TResult1 = AnalysisWindow, TResult2 = never>(
         onFulfilled?: ((value: AnalysisWindow) => TResult1 | PromiseLike<TResult1>) | null,
         onRejected?:  ((reason: unknown)       => TResult2 | PromiseLike<TResult2>) | null,
@@ -164,21 +162,7 @@ export class ClipSession {
         }
     }
 
-    /**
-     * Forwards the audio chunk to the Transcription service.
-     * Queues the chunk if the WebSocket is still connecting.
-     * Drops the chunk silently if the socket is closed.
-     *
-     * `sessionId` is the authoritative session ID from the WebSocket URL path,
-     * passed down from the Coordinator. The chunk is re-stamped with this value
-     * before being forwarded so the Transcription container always keys its
-     * per-session buffer on the real session ID, regardless of what the client
-     * originally sent in the message body.
-     */
     onAudio(sessionId: string, chunk: AudioChunk): void {
-        // Re-stamp session_id with the authoritative value before forwarding.
-        // This prevents a client that sends a mismatched session_id in the
-        // message body from polluting another session's transcription buffer.
         const sanitised = chunk.session_id === sessionId
             ? chunk
             : { ...chunk, session_id: sessionId };
@@ -191,29 +175,18 @@ export class ClipSession {
                 this.audioQueue.push(payload);
             }
         }
-        // CLOSING or CLOSED — drop silently
         this.mfccs.push(chunk.mfccs);
     }
 
     // ── Clip end ──────────────────────────────────────────────────────────────
 
-    /**
-     * Signals the Transcription service to flush any in-flight audio and emit
-     * a final Transcript message, then resolves the ClipSession thenable with
-     * the complete AnalysisWindow. If the final segment already arrived before
-     * this was called, resolves immediately.
-     *
-     * Fire-and-forget — await the ClipSession itself to receive the window.
-     */
     flush(): void {
         this.flushed = true;
 
-        // If is_final already arrived before flush() was called, resolve now.
         if (this.finalReceived) {
             this.resolveWindow();
         }
 
-        // Fire-and-forget — non-fatal if this fails
         fetch(`${this.transcriptionUrl}/transcription/finalise/${this.sessionId}`, {
             method:  "POST",
             headers: { "Authorization": this.authHeader },
@@ -222,10 +195,6 @@ export class ClipSession {
 
     // ── Cleanup ───────────────────────────────────────────────────────────────
 
-    /**
-     * Terminates the WebSocket connection. Call this when the clip is done
-     * and the ClipSession is being discarded.
-     */
     close(): void {
         this.ws.terminate();
         this.audioQueue.length = 0;

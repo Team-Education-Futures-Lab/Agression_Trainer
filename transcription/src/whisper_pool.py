@@ -25,6 +25,16 @@ from interfaces import TranscriptionPoolInterface, TranscriptSegment
 logger = logging.getLogger(__name__)
 
 
+class TranscriptionError(Exception):
+    """
+    Raised by WhisperPool.transcribe() when inference fails.
+
+    The model instance that raised is discarded from the pool rather than
+    returned, preventing a potentially corrupt model from affecting future
+    requests. The pool degrades gracefully: worker_count decrements by one.
+    """
+
+
 class WhisperPool(TranscriptionPoolInterface):
     """
     Pool of faster-whisper WhisperModel instances.
@@ -56,8 +66,8 @@ class WhisperPool(TranscriptionPoolInterface):
         for _ in range(cfg.whisper_workers):
             model = WhisperModel(
                 cfg.whisper_model,
-                device          = cfg.device,
-                compute_type    = "int8" if cfg.device == "cpu" else "float16",
+                device       = cfg.device,
+                compute_type = "int8" if cfg.device == "cpu" else "float16",
             )
             self._models.put(model)
 
@@ -75,9 +85,11 @@ class WhisperPool(TranscriptionPoolInterface):
 
     async def transcribe(
         self,
-        pcm:         bytes,
-        sample_rate: int,
-        session_id:  str,
+        pcm:            bytes,
+        sample_rate:    int,
+        session_id:     str,
+        initial_prompt: str = "",
+        language:       str = "",
     ) -> TranscriptSegment:
         """
         Transcribe a buffer of s16le PCM audio.
@@ -87,12 +99,28 @@ class WhisperPool(TranscriptionPoolInterface):
 
         If the audio is entirely silence (VAD filters everything), returns an
         empty TranscriptSegment rather than raising.
+
+        On inference failure the model instance is discarded from the pool
+        (to avoid reusing a potentially corrupt model) and TranscriptionError
+        is raised. The caller is responsible for handling the error gracefully.
+
+        Args:
+            initial_prompt: Optional prior transcript text used to seed
+                            Whisper's decoder, reducing hallucination on
+                            short or context-sparse windows.
+            language:       ISO 639-1 language code for this session (e.g. "nl").
+                            When provided, overrides the pool-level default so
+                            each session can transcribe in its own language.
+                            Falls back to the pool's configured language when
+                            empty.
         """
-        audio = _pcm_to_float32(pcm)
+        audio     = _pcm_to_float32(pcm)
+        effective_language = language or self._language
 
         async with self._semaphore:
             self._available -= 1
             model = self._models.get()
+            discard = False
             try:
                 loop   = asyncio.get_running_loop()
                 result = await loop.run_in_executor(
@@ -100,10 +128,28 @@ class WhisperPool(TranscriptionPoolInterface):
                     _run_transcription,
                     model,
                     audio,
-                    self._language,
+                    effective_language,
+                    initial_prompt,
                 )
+            except Exception as exc:
+                discard = True
+                logger.critical(
+                    "Whisper inference failed for session=%s — discarding model instance: %s",
+                    session_id, exc,
+                )
+                raise TranscriptionError(str(exc)) from exc
             finally:
-                self._models.put(model)
+                if discard:
+                    # Do not return a potentially corrupt model to the pool.
+                    # Decrement the worker count so health reporting reflects
+                    # the reduced capacity.
+                    self._worker_count -= 1
+                    logger.warning(
+                        "Worker count reduced to %d after model discard",
+                        self._worker_count,
+                    )
+                else:
+                    self._models.put(model)
                 self._available += 1
 
         logger.debug(
@@ -136,9 +182,10 @@ def _pcm_to_float32(pcm: bytes) -> np.ndarray:
 
 
 def _run_transcription(
-    model:    WhisperModel,
-    audio:    np.ndarray,
-    language: str,
+    model:          WhisperModel,
+    audio:          np.ndarray,
+    language:       str,
+    initial_prompt: str = "",
 ) -> TranscriptSegment:
     """
     Synchronous transcription call — runs inside a thread executor.
@@ -149,13 +196,20 @@ def _run_transcription(
 
     VAD is enabled via vad_filter=True so silence is skipped automatically
     without manual buffer windowing in the service layer.
+
+    Any exception raised here propagates back to WhisperPool.transcribe(),
+    which catches it, discards the model instance, and re-raises as
+    TranscriptionError.
     """
-    segments_gen, info = model.transcribe(
-        audio,
-        language         = language,
-        vad_filter       = True,
-        beam_size        = 5,
+    kwargs: dict = dict(
+        language   = language,
+        vad_filter = True,
+        beam_size  = 5,
     )
+    if initial_prompt:
+        kwargs["initial_prompt"] = initial_prompt
+
+    segments_gen, _info = model.transcribe(audio, **kwargs)
 
     # Materialise the lazy generator completely inside this thread.
     segments = list(segments_gen)
@@ -167,7 +221,7 @@ def _run_transcription(
 
     # faster-whisper provides per-segment avg_logprob. Convert to a 0–1
     # confidence proxy: logprob of 0 → 1.0, logprob of -1 → ~0.37.
-    avg_logprob  = sum(s.avg_logprob for s in segments) / len(segments)
-    confidence   = float(min(1.0, max(0.0, 1.0 + avg_logprob)))
+    avg_logprob = sum(s.avg_logprob for s in segments) / len(segments)
+    confidence  = float(min(1.0, max(0.0, 1.0 + avg_logprob)))
 
     return TranscriptSegment(text=text, confidence=confidence)

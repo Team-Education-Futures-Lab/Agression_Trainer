@@ -81,15 +81,16 @@ class TranscriptionPoolInterface(ABC):
 
     Implementations:
       - StubTranscriptionPool  (stubs/stub_transcription_pool.py)
-      - WhisperPool            (whisper_pool.py)  [Phase 2]
+      - WhisperPool            (whisper_pool.py)
     """
 
     @abstractmethod
     async def transcribe(
         self,
-        pcm:         bytes,
-        sample_rate: int,
-        session_id:  str,
+        pcm:            bytes,
+        sample_rate:    int,
+        session_id:     str,
+        initial_prompt: str = "",
     ) -> TranscriptSegment:
         """
         Transcribe a contiguous buffer of s16le PCM audio.
@@ -98,9 +99,12 @@ class TranscriptionPoolInterface(ABC):
         not block the asyncio event loop (use run_in_executor for sync libs).
 
         Args:
-            pcm:         Raw s16le PCM bytes at the given sample_rate.
-            sample_rate: Hz — always 16000 in this system.
-            session_id:  Used for logging and tracing only; no state is kept.
+            pcm:            Raw s16le PCM bytes at the given sample_rate.
+            sample_rate:    Hz — always 16000 in this system.
+            session_id:     Used for logging and tracing only; no state is kept.
+            initial_prompt: Optional prior transcript text used to seed the
+                            decoder's attention. Reduces hallucination on short
+                            or context-sparse windows. Ignored by the stub.
 
         Returns:
             A TranscriptSegment with the recognised text and confidence score.

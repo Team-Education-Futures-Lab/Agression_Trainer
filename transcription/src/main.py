@@ -13,7 +13,7 @@ import logging
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 from auth import make_verify_token, ws_verify_token
@@ -59,8 +59,8 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         logger.info(
-            "Transcription container starting — pool=%s device=%s workers=%d",
-            cfg.pool_impl, cfg.device, pool.worker_count,
+            "Transcription container starting — pool=%s device=%s workers=%d default_language=%s",
+            cfg.pool_impl, cfg.device, pool.worker_count, cfg.whisper_language,
         )
         yield
         logger.info("Transcription container shutting down")
@@ -77,6 +77,13 @@ def create_app() -> FastAPI:
         Accepts AudioChunk messages and streams Transcript messages back.
         Authentication is checked on the handshake headers before accepting.
 
+        The per-session transcription language is read from the `language`
+        query parameter (e.g. /ws/{session_id}?language=nl). When absent,
+        the container-level WHISPER_LANGUAGE default is used. This allows the
+        App container to control the transcription language per session so
+        different scenarios can use different languages without restarting the
+        container or changing the .env file.
+
         The receive loop uses asyncio.wait_for with a generous timeout so that
         a TCP connection that dies without a WebSocket close frame does not leave
         the session entry in SessionStore indefinitely. On timeout the loop exits
@@ -85,9 +92,21 @@ def create_app() -> FastAPI:
         if not await ws_verify_token(websocket, cfg.internal_api_key):
             return   # ws_verify_token already closed the connection
 
+        # Read the per-session language from the query string.
+        # Fall back to the container default when the param is absent or empty.
+        language: str = websocket.query_params.get("language", "").strip()
+        if not language:
+            language = cfg.whisper_language
+            logger.debug(
+                "WS %s: no language param — using container default '%s'",
+                session_id, language,
+            )
+        else:
+            logger.debug("WS %s: language='%s'", session_id, language)
+
         await websocket.accept()
-        svc.open_session(session_id, websocket)
-        logger.info("WS connected: session=%s", session_id)
+        svc.open_session(session_id, websocket, language)
+        logger.info("WS connected: session=%s language=%s", session_id, language)
 
         try:
             while True:

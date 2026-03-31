@@ -11,7 +11,7 @@ No ML models are loaded here — all processing is delegated to the Evaluation, 
 - **Session management** — capacity enforcement, queue management, state transitions, and recovery from dropped connections
 - **Data accumulation** — buffers `VideoFrame`, `AudioChunk`, and live transcript segments for the full duration of each clip, then dispatches a single complete `AnalysisWindow` to the Evaluation container when the clip ends
 - **Transcription streaming** — forwards audio to the Transcription container continuously during a clip and accumulates partial/final transcript segments, sending `SessionUpdate` messages to the client on each finalised segment for debugging
-- **Clip transitions** — on `ClipEnded`, finalizes the transcript, dispatches the clip window, resolves the next clip from branch conditions, commits a `ConversationTurn`, resets both the Evaluation and Transcription buffers, and notifies the client via `ClipReady`
+- **Clip transitions** — on `ClipEnded`, finalizes the transcript, dispatches the clip window, resolves the next clip from branch conditions, commits a `ConversationTurn`, resets both the Evaluation and Transcription buffers, and notifies the client via `ClipSelected`
 - **Feedback delivery** — at session end, compiles the full `ConversationTurn` history into a `FeedbackRequest` and streams the LLM debrief back to the client token by token
 
 ---
@@ -22,9 +22,9 @@ No ML models are loaded here — all processing is delegated to the Evaluation, 
 
 **`SessionManager`** — owns session state. Tracks every session from creation through completion or expiry, enforces capacity limits, manages the waiting queue, and preserves session state across dropped connections within the recovery window.
 
-**`Coordinator`** — coordinates the data pipeline for each active session. Creates one `ClipSession` per clip, routes incoming frames and audio into it, calls `flush()` on `ClipEnded`, awaits the resolved `AnalysisWindow`, and dispatches it to the Evaluation container.
+**`Coordinator`** — coordinates the data pipeline for each active session. Creates one `ClipSession` per clip, routes incoming frames and audio into it, calls `flush()` on `ClipEnded`, awaits the resolved `AnalysisWindow`, and dispatches it to the Evaluation container. Threads the session language (set at session creation) through to every `ClipSession` so the Transcription container uses the correct Whisper language for each session.
 
-**`ClipSession`** — owns the full lifecycle of one clip's relationship with the Transcription service. Opens a WebSocket to the Transcription container on construction, forwards audio chunks, accumulates frames, MFCCs, and transcript segments, and resolves as a thenable with a complete `AnalysisWindow` once the Transcription service emits a final transcript segment. One `ClipSession` is created per clip.
+**`ClipSession`** — owns the full lifecycle of one clip's relationship with the Transcription service. Opens a WebSocket to the Transcription container on construction (with the session language as a query parameter), forwards audio chunks, accumulates frames, MFCCs, and transcript segments, and resolves as a thenable with a complete `AnalysisWindow` once the Transcription service emits a final transcript segment. One `ClipSession` is created per clip.
 
 **`ClipController`** — owns the clip transition sequence. On receiving a `ClipEnded` message it flushes the coordinator (finalising transcript and dispatching to Evaluation), reads the clip score from the single `BehaviourResult`, resolves the next clip from branch conditions, appends a `ConversationTurn` to session history, resets both buffers, and either advances to the next clip or triggers feedback and ends the session.
 
@@ -53,16 +53,19 @@ See `docs/api_contract.md` for the full wire format.
 
 ### WebSocket message types
 
-| Direction       | Type               | Description                                                              |
-|-----------------|--------------------|--------------------------------------------------------------------------|
-| Client → Server | `video_frame`      | Landmark data from MediaPipe                                             |
-| Client → Server | `audio_chunk`      | PCM audio and pre-computed MFCCs                                         |
-| Client → Server | `clip_ended`       | Signals that a clip has finished playing                                 |
-| Server → Client | `session_update`   | Accumulated transcript so far — sent on each finalised Whisper segment   |
-| Server → Client | `clip_ready`       | Next clip ID and clip score after a transition                           |
-| Server → Client | `feedback_token`   | Streaming LLM token during debrief                                       |
-| Server → Client | `session_complete` | Final debrief when generation finishes                                   |
-| Server → Client | `error`            | Recoverable or fatal error                                               |
+| Direction       | Type               | Description                                                                                           |
+|-----------------|--------------------|-------------------------------------------------------------------------------------------------------|
+| Client → Server | `video_frame`      | Landmark data from MediaPipe                                                                          |
+| Client → Server | `audio_chunk`      | PCM audio and pre-computed MFCCs                                                                      |
+| Client → Server | `clip_ended`       | Signals that a clip has finished playing                                                              |
+| Client → Server | `get_scenarios`    | Request the list of available scenarios                                                               |
+| Client → Server | `request_clip`     | Request clip metadata and video URL, with optional activation                                         |
+| Server → Client | `session_update`   | Accumulated transcript so far — sent on each finalised Whisper segment                                |
+| Server → Client | `clip_candidates`  | Full clip data for every possible next clip, sent immediately on `clip_ended` for parallel preloading |
+| Server → Client | `clip_selected`    | The clip to play next and the clip score, sent once evaluation completes                              |
+| Server → Client | `feedback_token`   | Streaming LLM token during debrief                                                                    |
+| Server → Client | `session_complete` | Final debrief when generation finishes                                                                |
+| Server → Client | `error`            | Recoverable or fatal error                                                                            |
 
 ---
 
@@ -120,15 +123,15 @@ npm run dev
 
 Tests live in `tests/` and are written with Vitest. Run the full suite with `npm test`.
 
-| File                            | Coverage                                                                                        |
-|---------------------------------|-------------------------------------------------------------------------------------------------|
-| `tests/session-manager.test.ts` | Session lifecycle, capacity, queue, state transitions, conversation history                     |
-| `tests/clip-session.test.ts`    | WebSocket lifecycle, audio queuing, transcript accumulation, thenable resolution, flush/timeout |
-| `tests/coordinator.test.ts`     | Clip-scoped dispatch, transcript accumulation, reset behaviour, sequence tracking               |
-| `tests/clip-controller.test.ts` | Clip transition sequence, branch resolution, turn construction, terminal and non-terminal paths |
-| `tests/feedback-client.test.ts` | SSE token streaming, request shape, failure handling                                            |
-| `tests/service-router.test.ts`  | Session pinning, instance distribution, WebSocket URL conversion                                |
-| `tests/scenario-loader.test.ts` | Scenario loading, metadata validation, error cases                                              |
+| File                            | Coverage                                                                                                              |
+|---------------------------------|-----------------------------------------------------------------------------------------------------------------------|
+| `tests/session-manager.test.ts` | Session lifecycle, capacity, queue, state transitions, conversation history                                           |
+| `tests/clip-session.test.ts`    | WebSocket lifecycle, audio queuing, transcript accumulation, thenable resolution, flush/timeout, language query param |
+| `tests/coordinator.test.ts`     | Clip-scoped dispatch, transcript accumulation, reset behaviour, sequence tracking, language threading across clips    |
+| `tests/clip-controller.test.ts` | Clip transition sequence, branch resolution, turn construction, terminal and non-terminal paths                       |
+| `tests/feedback-client.test.ts` | SSE token streaming, request shape, failure handling                                                                  |
+| `tests/service-router.test.ts`  | Session pinning, instance distribution, WebSocket URL conversion                                                      |
+| `tests/scenario-loader.test.ts` | Scenario loading, metadata validation, error cases                                                                    |
 
 Time-dependent tests use `vi.useFakeTimers()` so recovery windows and session timeouts can be tested without real delays. Outbound HTTP calls are stubbed with `vi.stubGlobal("fetch", vi.fn())`. WebSocket connections in `ClipSession` tests are driven via an injected mock factory.
 

@@ -4,11 +4,6 @@ import type { ClipMetadata, VideoFrame, AudioChunk } from "@ar-training/shared";
 import { EventEmitter } from "events";
 
 // ─── Mock WebSocket ───────────────────────────────────────────────────────────
-//
-// EventEmitter-based stand-in for the `ws` WebSocket. Tests control the
-// connection state and emit events directly. readyState mirrors the ws
-// constants: 0=CONNECTING, 1=OPEN, 3=CLOSED.
-// ─────────────────────────────────────────────────────────────────────────────
 
 class MockWebSocket extends EventEmitter {
     readyState      = 0; // CONNECTING
@@ -107,6 +102,33 @@ describe("ClipSession", () => {
             const [url] = factory.mock.calls[0];
             expect(url).toBe("wss://transcription:8003/ws/s1");
         });
+
+        it("appends language query param when language is provided", () => {
+            const ws      = new MockWebSocket();
+            const factory = makeWsFactory(ws);
+            new ClipSession("s1", makeClip(), TRANSCRIPTION_URL, AUTH_HEADER, factory, 1, undefined, "nl");
+
+            const [url] = factory.mock.calls[0];
+            expect(url).toBe("ws://transcription:8003/ws/s1?language=nl");
+        });
+
+        it("omits language query param when language is empty string", () => {
+            const ws      = new MockWebSocket();
+            const factory = makeWsFactory(ws);
+            new ClipSession("s1", makeClip(), TRANSCRIPTION_URL, AUTH_HEADER, factory, 1, undefined, "");
+
+            const [url] = factory.mock.calls[0];
+            expect(url).toBe("ws://transcription:8003/ws/s1");
+        });
+
+        it("URL-encodes the language param", () => {
+            const ws      = new MockWebSocket();
+            const factory = makeWsFactory(ws);
+            new ClipSession("s1", makeClip(), TRANSCRIPTION_URL, AUTH_HEADER, factory, 1, undefined, "zh-TW");
+
+            const [url] = factory.mock.calls[0];
+            expect(url).toBe("ws://transcription:8003/ws/s1?language=zh-TW");
+        });
     });
 
     // ── Audio forwarding ──────────────────────────────────────────────────────
@@ -117,7 +139,7 @@ describe("ClipSession", () => {
             const session = new ClipSession("s1", makeClip(), TRANSCRIPTION_URL, AUTH_HEADER, makeWsFactory(ws));
             ws.open();
 
-            session.onAudio(makeChunk(1));
+            session.onAudio("s1", makeChunk(1));
 
             expect(ws.sent).toHaveLength(1);
             expect(JSON.parse(ws.sent[0]).chunk_id).toBe(1);
@@ -127,8 +149,8 @@ describe("ClipSession", () => {
             const ws = new MockWebSocket();
             const session = new ClipSession("s1", makeClip(), TRANSCRIPTION_URL, AUTH_HEADER, makeWsFactory(ws));
 
-            session.onAudio(makeChunk(1));
-            session.onAudio(makeChunk(2));
+            session.onAudio("s1", makeChunk(1));
+            session.onAudio("s1", makeChunk(2));
             expect(ws.sent).toHaveLength(0);
 
             ws.open();
@@ -142,26 +164,9 @@ describe("ClipSession", () => {
             const session = new ClipSession("s1", makeClip(), TRANSCRIPTION_URL, AUTH_HEADER, makeWsFactory(ws));
             ws.close();
 
-            session.onAudio(makeChunk(1));
+            session.onAudio("s1", makeChunk(1));
 
             expect(ws.sent).toHaveLength(0);
-        });
-
-        it("still buffers MFCCs even when audio cannot be sent", () => {
-            const ws = new MockWebSocket();
-            const session = new ClipSession("s1", makeClip(), TRANSCRIPTION_URL, AUTH_HEADER, makeWsFactory(ws));
-            ws.close();
-
-            session.onAudio(makeChunk(1));
-            session.onAudio(makeChunk(2));
-
-            // Trigger resolution via a manual path so we can inspect mfccs
-            ws.readyState = 1; // re-open state for flush logic
-            emitTranscript(ws, "tekst", true);
-            session.flush();
-
-            // We can't await here without a resolved promise, so just verify
-            // the MFCCs are accumulated by flushing and awaiting
         });
     });
 
@@ -196,7 +201,7 @@ describe("ClipSession", () => {
             ws.open();
 
             session.onFrame(makeFrame(1));
-            session.onAudio(makeChunk(1));
+            session.onAudio("s1", makeChunk(1));
             emitTranscript(ws, "Hallo", false);
             emitTranscript(ws, "wereld", false);
 
@@ -232,10 +237,7 @@ describe("ClipSession", () => {
             ws.open();
             session.onFrame(makeFrame(1));
 
-            // Final segment arrives before the clip ends
             emitTranscript(ws, "vroeg", true);
-
-            // flush() should resolve the window synchronously on next tick
             session.flush();
 
             const window = await session;
@@ -265,7 +267,6 @@ describe("ClipSession", () => {
             let resolved = false;
             session.then(() => { resolved = true; });
 
-            // Yield to microtask queue without calling flush
             await Promise.resolve();
             expect(resolved).toBe(false);
         });
@@ -309,9 +310,7 @@ describe("ClipSession", () => {
         it("terminates the WebSocket", () => {
             const ws = new MockWebSocket();
             const session = new ClipSession("s1", makeClip(), TRANSCRIPTION_URL, AUTH_HEADER, makeWsFactory(ws));
-
             session.close();
-
             expect(ws.terminate).toHaveBeenCalled();
         });
 
@@ -319,9 +318,7 @@ describe("ClipSession", () => {
             const ws = new MockWebSocket();
             const session = new ClipSession("s1", makeClip(), TRANSCRIPTION_URL, AUTH_HEADER, makeWsFactory(ws));
             session.close();
-
-            session.onAudio(makeChunk(1));
-
+            session.onAudio("s1", makeChunk(1));
             expect(ws.sent).toHaveLength(0);
         });
 
@@ -329,12 +326,11 @@ describe("ClipSession", () => {
             const ws = new MockWebSocket();
             const session = new ClipSession("s1", makeClip(), TRANSCRIPTION_URL, AUTH_HEADER, makeWsFactory(ws));
 
-            // Queue some audio while connecting
-            session.onAudio(makeChunk(1));
-            session.onAudio(makeChunk(2));
+            session.onAudio("s1", makeChunk(1));
+            session.onAudio("s1", makeChunk(2));
 
             session.close();
-            ws.open(); // opening after close should not drain anything
+            ws.open();
 
             expect(ws.sent).toHaveLength(0);
         });

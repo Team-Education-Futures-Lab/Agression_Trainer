@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from interfaces import TranscriptionPoolInterface, TranscriptSegment
 
-
 class StubTranscriptionPool(TranscriptionPoolInterface):
     """
     Returns hardcoded transcript text without calling Whisper.
@@ -21,12 +20,13 @@ class StubTranscriptionPool(TranscriptionPoolInterface):
 
     async def transcribe(
         self,
-        pcm:         bytes,
-        sample_rate: int,
-        session_id:  str,
+        pcm:            bytes,
+        sample_rate:    int,
+        session_id:     str,
+        initial_prompt: str = "",
     ) -> TranscriptSegment:
-        # Return a fixed Dutch placeholder so downstream containers
-        # (Evaluation, Feedback) receive non-empty transcript data.
+        # initial_prompt is accepted to satisfy the interface but intentionally
+        # ignored — the stub always returns the same canned response.
         return TranscriptSegment(
             text="[stub] dit is een teststranscriptie.",
             confidence=1.0,

@@ -8,8 +8,10 @@ without any real I/O or inference.
 
 import base64
 import json
+import math
+import struct
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call
 
 import sys
 import os
@@ -18,6 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../src"))
 from interfaces import TranscriptSegment
 from session_store import SessionStore
 from transcription_service import TranscriptionService
+from whisper_pool import TranscriptionError
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -57,6 +60,24 @@ def sent_messages(ws: MagicMock) -> list[dict]:
     ]
 
 
+def make_speech_pcm(n_bytes: int) -> bytes:
+    """
+    Generate s16le PCM bytes whose RMS is well above the silence threshold.
+    Uses a simple sine-like pattern with amplitude ~8000 (well above 200).
+    """
+    n_samples = n_bytes // 2
+    samples = []
+    for i in range(n_samples):
+        # Alternating +8000 / -8000 to guarantee high RMS
+        samples.append(8000 if i % 2 == 0 else -8000)
+    return struct.pack(f"<{n_samples}h", *samples)
+
+
+def make_silent_pcm(n_bytes: int) -> bytes:
+    """Generate s16le PCM bytes that are all-zero (RMS = 0, always silent)."""
+    return b"\x00" * n_bytes
+
+
 # ─── Session lifecycle ────────────────────────────────────────────────────────
 
 class TestSessionLifecycle:
@@ -86,6 +107,14 @@ class TestSessionLifecycle:
         svc.reset_session("s1")
         assert "s1" in store
         assert len(store.get("s1").pcm_buffer) == 0
+
+    def test_reset_clears_last_text_cache(self):
+        store = SessionStore()
+        svc   = TranscriptionService(make_pool("hallo"), store)
+        svc.open_session("s1", make_ws())
+        svc._last_text["s1"] = "hallo"
+        svc.reset_session("s1")
+        assert "s1" not in svc._last_text
 
 
 # ─── on_audio_chunk ───────────────────────────────────────────────────────────
@@ -181,7 +210,7 @@ class TestFinalise:
         svc   = TranscriptionService(pool, store)
         svc.open_session("s1", make_ws())
 
-        pcm = b"\x01\x02" * 50
+        pcm = make_speech_pcm(100)
         await svc.on_audio_chunk("s1", make_audio_msg(pcm))
         await svc.finalise("s1")
 
@@ -207,7 +236,7 @@ class TestFinalise:
         svc   = TranscriptionService(make_pool("hallo"), store)
         svc.open_session("s1", ws)
 
-        await svc.on_audio_chunk("s1", make_audio_msg())
+        await svc.on_audio_chunk("s1", make_audio_msg(make_speech_pcm(100)))
         await svc.finalise("s1")
 
         msgs = sent_messages(ws)
@@ -249,7 +278,7 @@ class TestFinalise:
         svc   = TranscriptionService(make_pool(confidence=0.75), store)
         svc.open_session("s1", ws)
 
-        await svc.on_audio_chunk("s1", make_audio_msg())
+        await svc.on_audio_chunk("s1", make_audio_msg(make_speech_pcm(100)))
         await svc.finalise("s1")
 
         msgs = sent_messages(ws)
@@ -266,14 +295,14 @@ class TestFinalise:
         # Clip 1
         ws1 = make_ws()
         svc.open_session("s1", ws1)
-        await svc.on_audio_chunk("s1", make_audio_msg())
+        await svc.on_audio_chunk("s1", make_audio_msg(make_speech_pcm(100)))
         await svc.finalise("s1")
         svc.close_session("s1")
 
         # Clip 2 — new WebSocket, new SessionEntry
         ws2 = make_ws()
         svc.open_session("s1", ws2)
-        await svc.on_audio_chunk("s1", make_audio_msg())
+        await svc.on_audio_chunk("s1", make_audio_msg(make_speech_pcm(100)))
         await svc.finalise("s1")
 
         assert sent_messages(ws1)[0]["window_seq"] == 1
@@ -282,16 +311,16 @@ class TestFinalise:
     @pytest.mark.asyncio
     async def test_window_seq_increments_within_one_connection(self):
         # If _transcribe_window is called multiple times on the same connection
-        # (Phase 3 partials), window_seq should increment monotonically.
+        # (rolling partials), window_seq should increment monotonically.
         store = SessionStore()
         ws    = make_ws()
         svc   = TranscriptionService(make_pool(), store)
         svc.open_session("s1", ws)
 
         # Manually call _transcribe_window twice to simulate two partial windows
-        store.append_pcm("s1", b"\x00" * 64)
+        store.append_pcm("s1", make_speech_pcm(64))
         await svc._transcribe_window("s1", is_final=False)
-        store.append_pcm("s1", b"\x00" * 64)
+        store.append_pcm("s1", make_speech_pcm(64))
         await svc._transcribe_window("s1", is_final=True)
 
         msgs = sent_messages(ws)
@@ -304,7 +333,7 @@ class TestFinalise:
         svc   = TranscriptionService(make_pool(), store)
         svc.open_session("s1", make_ws())
 
-        await svc.on_audio_chunk("s1", make_audio_msg(b"\x01\x02" * 50))
+        await svc.on_audio_chunk("s1", make_audio_msg(make_speech_pcm(100)))
         await svc.finalise("s1")
 
         assert len(store.get("s1").pcm_buffer) == 0
@@ -316,7 +345,7 @@ class TestFinalise:
         svc   = TranscriptionService(pool, store)
         svc.open_session("s1", make_ws())
 
-        await svc.on_audio_chunk("s1", make_audio_msg())
+        await svc.on_audio_chunk("s1", make_audio_msg(make_speech_pcm(100)))
         await svc.finalise("s1")   # clears buffer, calls pool once
         await svc.finalise("s1")   # buffer is empty — pool should not be called again
 
@@ -331,19 +360,41 @@ class TestFinalise:
         svc.open_session("s1", ws)
 
         # Should not raise
-        await svc.on_audio_chunk("s1", make_audio_msg())
+        await svc.on_audio_chunk("s1", make_audio_msg(make_speech_pcm(100)))
         await svc.finalise("s1")
 
+    @pytest.mark.asyncio
+    async def test_whisper_error_in_finalise_does_not_propagate(self):
+        """A TranscriptionError raised by the pool must not propagate out of finalise."""
+        pool  = make_pool()
+        pool.transcribe = AsyncMock(side_effect=TranscriptionError("model OOM"))
+        store = SessionStore()
+        ws    = make_ws()
+        svc   = TranscriptionService(pool, store)
+        svc.open_session("s1", ws)
 
-# ─── Rolling window (Phase 3) ─────────────────────────────────────────────────
+        await svc.on_audio_chunk("s1", make_audio_msg(make_speech_pcm(100)))
+        result = await svc.finalise("s1")  # must not raise
 
-# Constants mirrored from transcription_service.py so tests don't import them.
-_MIN_BUFFER_BYTES = 64_000
+        assert result is True
+        msgs = sent_messages(ws)
+        # An empty final segment must still be emitted so ClipSession can resolve
+        assert len(msgs) == 1
+        assert msgs[0]["is_final"] is True
+        assert msgs[0]["text"] == ""
 
 
-def make_audio_msg_of_size(n_bytes: int) -> dict:
+# ─── Rolling window ───────────────────────────────────────────────────────────
+
+# Mirrors _MIN_BUFFER_BYTES from transcription_service.py.
+# Update here whenever the constant changes.
+_MIN_BUFFER_BYTES = 192_000
+
+
+def make_audio_msg_of_size(n_bytes: int, silent: bool = False) -> dict:
     """Audio chunk whose decoded PCM is exactly n_bytes long."""
-    return make_audio_msg(b"\x00\x01" * (n_bytes // 2))
+    pcm = make_silent_pcm(n_bytes) if silent else make_speech_pcm(n_bytes)
+    return make_audio_msg(pcm)
 
 
 class TestRollingWindow:
@@ -396,20 +447,19 @@ class TestRollingWindow:
 
     @pytest.mark.asyncio
     async def test_multiple_rolling_windows_each_emit_partial(self):
+        """
+        Two chunks each at the threshold size produce two rolling windows.
+        Each chunk fills a freshly cleared buffer to exactly the threshold,
+        so a window fires on each chunk independently.
+        """
         pool  = make_pool()
         store = SessionStore()
         ws    = make_ws()
         svc   = TranscriptionService(pool, store)
         svc.open_session("s1", ws)
 
-        # Each chunk pushes the buffer past the threshold from a clean tail,
-        # so we get one window per chunk once the first has fired.
-        # Send enough for two full windows: threshold + tail + threshold
-        chunk_size = _MIN_BUFFER_BYTES
-        await svc.on_audio_chunk("s1", make_audio_msg_of_size(chunk_size))
-        # Buffer now has _TAIL_OVERLAP_BYTES remaining
-        # Send enough to push past threshold again
-        await svc.on_audio_chunk("s1", make_audio_msg_of_size(chunk_size))
+        await svc.on_audio_chunk("s1", make_audio_msg_of_size(_MIN_BUFFER_BYTES))
+        await svc.on_audio_chunk("s1", make_audio_msg_of_size(_MIN_BUFFER_BYTES))
 
         assert pool.transcribe.call_count == 2
         msgs = sent_messages(ws)
@@ -460,3 +510,56 @@ class TestRollingWindow:
         # The store will silently ignore the append, so threshold never triggers
         await svc.on_audio_chunk("unknown", make_audio_msg_of_size(_MIN_BUFFER_BYTES))
         pool.transcribe.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_whisper_error_in_rolling_window_does_not_propagate(self):
+        """A TranscriptionError raised by the pool must not crash the receive loop."""
+        pool  = make_pool()
+        pool.transcribe = AsyncMock(side_effect=TranscriptionError("model OOM"))
+        store = SessionStore()
+        ws    = make_ws()
+        svc   = TranscriptionService(pool, store)
+        svc.open_session("s1", ws)
+
+        # Must not raise
+        await svc._transcribe_window("s1", is_final=False)
+
+    @pytest.mark.asyncio
+    async def test_silent_buffer_does_not_call_pool(self):
+        """A rolling window containing only silence must not dispatch to the pool."""
+        pool  = make_pool()
+        store = SessionStore()
+        ws    = make_ws()
+        svc   = TranscriptionService(pool, store)
+        svc.open_session("s1", ws)
+
+        await svc.on_audio_chunk("s1", make_audio_msg_of_size(_MIN_BUFFER_BYTES, silent=True))
+
+        pool.transcribe.assert_not_called()
+        # No partial message should be emitted for a silent window
+        assert len(sent_messages(ws)) == 0
+
+    @pytest.mark.asyncio
+    async def test_initial_prompt_passed_from_previous_transcript(self):
+        """
+        After a successful transcription, the emitted text is passed as
+        initial_prompt on the next pool call to seed Whisper's decoder.
+        """
+        pool  = make_pool("eerste zin")
+        store = SessionStore()
+        svc   = TranscriptionService(pool, store)
+        svc.open_session("s1", make_ws())
+
+        # First window — no prior text, so initial_prompt should be empty
+        store.append_pcm("s1", make_speech_pcm(64))
+        await svc._transcribe_window("s1", is_final=False)
+
+        first_call = pool.transcribe.call_args_list[0]
+        assert first_call.kwargs.get("initial_prompt", "") == ""
+
+        # Second window — initial_prompt should carry the previous segment's text
+        store.append_pcm("s1", make_speech_pcm(64))
+        await svc._transcribe_window("s1", is_final=False)
+
+        second_call = pool.transcribe.call_args_list[1]
+        assert second_call.kwargs.get("initial_prompt") == "eerste zin"

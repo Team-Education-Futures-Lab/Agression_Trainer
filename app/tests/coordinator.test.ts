@@ -5,10 +5,6 @@ import type { CoordinatorConfig } from "../src/types.js";
 import { EventEmitter } from "events";
 
 // ─── Mock WebSocket ───────────────────────────────────────────────────────────
-//
-// An EventEmitter-based stand-in that lets tests drive connection state and
-// emit Transcription service messages without a real WebSocket.
-// ─────────────────────────────────────────────────────────────────────────────
 
 class MockWebSocket extends EventEmitter {
     readyState      = 0; // CONNECTING
@@ -132,7 +128,7 @@ describe("Coordinator", () => {
             const ws = new MockWebSocket();
             const { coord, factory } = makeCoord(ws);
 
-            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "nl");
 
             expect(factory).toHaveBeenCalledOnce();
         });
@@ -141,7 +137,7 @@ describe("Coordinator", () => {
             const ws = new MockWebSocket();
             const { coord } = makeCoord(ws);
 
-            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "nl");
             coord.deregisterSession("s1");
 
             expect(ws.terminate).toHaveBeenCalled();
@@ -151,7 +147,27 @@ describe("Coordinator", () => {
             const ws = new MockWebSocket();
             const { coord } = makeCoord(ws);
 
-            expect(() => coord.onFrame(makeFrame("unknown", 1))).not.toThrow();
+            expect(() => coord.onFrame("unknown", makeFrame("unknown", 1))).not.toThrow();
+        });
+
+        it("passes language as a query param in the WebSocket URL", () => {
+            const ws = new MockWebSocket();
+            const { coord, factory } = makeCoord(ws);
+
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "en");
+
+            const [url] = factory.mock.calls[0];
+            expect(url).toContain("?language=en");
+        });
+
+        it("omits the language query param when language is empty", () => {
+            const ws = new MockWebSocket();
+            const { coord, factory } = makeCoord(ws);
+
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "");
+
+            const [url] = factory.mock.calls[0];
+            expect(url).not.toContain("language");
         });
     });
 
@@ -161,9 +177,9 @@ describe("Coordinator", () => {
         it("does not dispatch to evaluation before flushSession is called", () => {
             const ws = new MockWebSocket();
             const { coord } = makeCoord(ws);
-            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "nl");
 
-            for (let i = 0; i < 30; i++) coord.onFrame(makeFrame("s1", i));
+            for (let i = 0; i < 30; i++) coord.onFrame("s1", makeFrame("s1", i));
 
             expect(fetch as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
         });
@@ -171,10 +187,10 @@ describe("Coordinator", () => {
         it("forwards audio chunks to the ClipSession WebSocket", () => {
             const ws = new MockWebSocket();
             const { coord } = makeCoord(ws);
-            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "nl");
 
             ws.open();
-            coord.onAudio(makeChunk("s1", 1));
+            coord.onAudio("s1", makeChunk("s1", 1));
 
             expect(ws.sent).toHaveLength(1);
             expect(JSON.parse(ws.sent[0]).chunk_id).toBe(1);
@@ -189,9 +205,9 @@ describe("Coordinator", () => {
             const { coord } = makeCoord(ws);
             mockFetchSuccess(makeBehaviourResult("s1", "s1:1", 0.2));
 
-            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "nl");
             ws.open();
-            for (let i = 0; i < 5; i++) coord.onFrame(makeFrame("s1", i));
+            for (let i = 0; i < 5; i++) coord.onFrame("s1", makeFrame("s1", i));
 
             const flush = coord.flushSession("s1");
             emitTranscript(ws, "tekst", true);
@@ -215,9 +231,9 @@ describe("Coordinator", () => {
             const { coord } = makeCoord(ws);
             mockFetchSuccess(makeBehaviourResult("s1", "s1:1", 0.0));
 
-            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "nl");
             ws.open();
-            for (let i = 0; i < 5; i++) coord.onFrame(makeFrame("s1", i));
+            for (let i = 0; i < 5; i++) coord.onFrame("s1", makeFrame("s1", i));
 
             emitTranscript(ws, "Goed", false);
 
@@ -236,11 +252,11 @@ describe("Coordinator", () => {
             const { coord } = makeCoord(ws);
             mockFetchSuccess(makeBehaviourResult("s1", "s1:1", 0.0));
 
-            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "nl");
             ws.open();
-            coord.onAudio(makeChunk("s1", 1));
-            coord.onAudio(makeChunk("s1", 2));
-            for (let i = 0; i < 5; i++) coord.onFrame(makeFrame("s1", i));
+            coord.onAudio("s1", makeChunk("s1", 1));
+            coord.onAudio("s1", makeChunk("s1", 2));
+            for (let i = 0; i < 5; i++) coord.onFrame("s1", makeFrame("s1", i));
 
             const flush = coord.flushSession("s1");
             emitTranscript(ws, "tekst", true);
@@ -258,9 +274,9 @@ describe("Coordinator", () => {
             const clip = makeClip("clip_01");
             mockFetchSuccess(makeBehaviourResult("s1", "s1:1", 0.0));
 
-            coord.registerSession("s1", clip, vi.fn());
+            coord.registerSession("s1", clip, vi.fn(), "nl");
             ws.open();
-            for (let i = 0; i < 5; i++) coord.onFrame(makeFrame("s1", i));
+            for (let i = 0; i < 5; i++) coord.onFrame("s1", makeFrame("s1", i));
 
             const flush = coord.flushSession("s1");
             emitTranscript(ws, "tekst", true);
@@ -280,9 +296,9 @@ describe("Coordinator", () => {
             const result = makeBehaviourResult("s1", "s1:1", 0.4);
             mockFetchSuccess(result);
 
-            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "nl");
             ws.open();
-            for (let i = 0; i < 5; i++) coord.onFrame(makeFrame("s1", i));
+            for (let i = 0; i < 5; i++) coord.onFrame("s1", makeFrame("s1", i));
 
             const flush = coord.flushSession("s1");
             emitTranscript(ws, "tekst", true);
@@ -296,9 +312,9 @@ describe("Coordinator", () => {
             const { coord } = makeCoord(ws);
             mockFetchFailure();
 
-            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "nl");
             ws.open();
-            for (let i = 0; i < 5; i++) coord.onFrame(makeFrame("s1", i));
+            for (let i = 0; i < 5; i++) coord.onFrame("s1", makeFrame("s1", i));
 
             const flush = coord.flushSession("s1");
             emitTranscript(ws, "tekst", true);
@@ -313,9 +329,9 @@ describe("Coordinator", () => {
                 .mockResolvedValue({ ok: true, json: () => Promise.resolve(makeBehaviourResult("s1", "s1:1", 0.1)) }),
             );
 
-            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "nl");
             ws.open();
-            for (let i = 0; i < 5; i++) coord.onFrame(makeFrame("s1", i));
+            for (let i = 0; i < 5; i++) coord.onFrame("s1", makeFrame("s1", i));
 
             const flush1 = coord.flushSession("s1");
             emitTranscript(ws, "eerste clip", true);
@@ -324,7 +340,7 @@ describe("Coordinator", () => {
             await coord.resetSession("s1", makeClip("clip_02"));
             ws.open();
 
-            for (let i = 0; i < 5; i++) coord.onFrame(makeFrame("s1", i));
+            for (let i = 0; i < 5; i++) coord.onFrame("s1", makeFrame("s1", i));
             const flush2 = coord.flushSession("s1");
             emitTranscript(ws, "tweede clip", true);
             await flush2;
@@ -341,9 +357,9 @@ describe("Coordinator", () => {
             const ws = new MockWebSocket();
             const { coord } = makeCoord(ws);
 
-            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "nl");
             ws.open();
-            for (let i = 0; i < 5; i++) coord.onFrame(makeFrame("s1", i));
+            for (let i = 0; i < 5; i++) coord.onFrame("s1", makeFrame("s1", i));
 
             const flush = coord.flushSession("s1");
             vi.advanceTimersByTime(5_000);
@@ -361,7 +377,7 @@ describe("Coordinator", () => {
             const ws = new MockWebSocket();
             const { coord } = makeCoord(ws);
 
-            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "nl");
             await coord.resetSession("s1", makeClip("clip_02"));
 
             expect(ws.terminate).toHaveBeenCalled();
@@ -372,7 +388,7 @@ describe("Coordinator", () => {
             const ws = new MockWebSocket();
             const { coord } = makeCoord(ws);
 
-            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "nl");
             ws.open();
 
             mockFetchSuccess(makeBehaviourResult("s1", "s1:1", 0.0));
@@ -390,7 +406,7 @@ describe("Coordinator", () => {
             const ws = new MockWebSocket();
             const { coord } = makeCoord(ws);
 
-            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "nl");
             await coord.resetSession("s1", makeClip("clip_02"));
 
             const urls = (fetch as ReturnType<typeof vi.fn>).mock.calls.map(c => c[0] as string);
@@ -402,7 +418,7 @@ describe("Coordinator", () => {
             const ws = new MockWebSocket();
             const { coord } = makeCoord(ws);
 
-            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "nl");
             await coord.resetSession("s1", makeClip("clip_02"));
 
             const urls = (fetch as ReturnType<typeof vi.fn>).mock.calls.map(c => c[0] as string);
@@ -418,10 +434,29 @@ describe("Coordinator", () => {
                 .mockReturnValueOnce(ws2);
             const coord = new Coordinator(makeConfig(), factory);
 
-            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "nl");
             await coord.resetSession("s1", makeClip("clip_02"));
 
             expect(factory).toHaveBeenCalledTimes(2);
+        });
+
+        it("preserves the session language across a clip reset", async () => {
+            vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
+            const ws1 = new MockWebSocket();
+            const ws2 = new MockWebSocket();
+            const factory = vi.fn()
+                .mockReturnValueOnce(ws1)
+                .mockReturnValueOnce(ws2);
+            const coord = new Coordinator(makeConfig(), factory);
+
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "en");
+            await coord.resetSession("s1", makeClip("clip_02"));
+
+            // Both the first and second WebSocket should have language=en in the URL
+            const [url1] = factory.mock.calls[0];
+            const [url2] = factory.mock.calls[1];
+            expect(url1).toContain("language=en");
+            expect(url2).toContain("language=en");
         });
     });
 
@@ -431,7 +466,7 @@ describe("Coordinator", () => {
         it("returns null before any flush", () => {
             const ws = new MockWebSocket();
             const { coord } = makeCoord(ws);
-            coord.registerSession("s1", makeClip("clip_01"), vi.fn());
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "nl");
             expect(coord.getLastResult("s1")).toBeNull();
         });
 

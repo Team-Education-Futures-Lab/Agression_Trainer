@@ -5,6 +5,12 @@ Each session entry holds:
   - The live WebSocket connection (so finalise can push a final Transcript)
   - The raw PCM accumulation buffer (for VAD windowing and flush)
   - A monotonically increasing window_seq counter
+  - A flush_lock that serialises _transcribe_window and finalise so a
+    concurrent finalise() call cannot race to read the same buffer bytes
+    that a rolling window is already transcribing.
+  - The per-session language code (ISO 639-1) passed by the App container
+    when the WebSocket is opened. Overrides the container-level WHISPER_LANGUAGE
+    default so different scenarios can use different transcription languages.
 
 No shared state between container instances — session pinning is handled by
 the App container's ServiceRouter, so each instance only ever sees one
@@ -13,6 +19,7 @@ connection per session_id.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from fastapi import WebSocket
@@ -21,8 +28,13 @@ logger = logging.getLogger(__name__)
 
 # Maximum PCM buffer size per session (bytes).
 # At 16kHz s16le (2 bytes/sample) a 120-second clip produces 3,840,000 bytes.
-# 4 MB = 4,194,304 bytes — roughly 2× a legitimate 60-second clip, giving
-# ample headroom while capping runaway growth from a misbehaving client.
+# 4 MB = 4,194,304 bytes gives headroom above the 120 s worst case while
+# capping runaway growth from a misbehaving client.
+# Note: under normal operation with rolling windows active (_MIN_BUFFER_BYTES
+# = 192_000), the effective peak buffer size is ~192 KB, not 4 MB — the cap
+# is a defence against a client that streams audio without the rolling window
+# ever firing (e.g. extremely quiet audio that always triggers the silence
+# gate). In that case the full clip accumulates here and is flushed at finalise.
 _MAX_PCM_BUFFER_BYTES = 4 * 1024 * 1024
 
 
@@ -31,8 +43,10 @@ _MAX_PCM_BUFFER_BYTES = 4 * 1024 * 1024
 @dataclass
 class SessionEntry:
     websocket:  WebSocket
-    pcm_buffer: bytearray = field(default_factory=bytearray)
-    window_seq: int       = 0
+    language:   str              # ISO 639-1, e.g. "nl". Set at open time from the WS query param.
+    pcm_buffer: bytearray    = field(default_factory=bytearray)
+    window_seq: int          = 0
+    flush_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 # ─── Store ────────────────────────────────────────────────────────────────────
@@ -46,13 +60,16 @@ class SessionStore:
     def __init__(self) -> None:
         self._sessions: dict[str, SessionEntry] = {}
 
-    def open(self, session_id: str, websocket: WebSocket) -> SessionEntry:
+    def open(self, session_id: str, websocket: WebSocket, language: str) -> SessionEntry:
         """
         Register a new WebSocket connection for session_id.
+
+        language is the ISO 639-1 code for this session's transcription language,
+        supplied by the App container via the WebSocket URL query parameter.
         If a stale entry exists (e.g. from a previous clip's connection that
         closed without cleanup), it is replaced.
         """
-        entry = SessionEntry(websocket=websocket)
+        entry = SessionEntry(websocket=websocket, language=language)
         self._sessions[session_id] = entry
         return entry
 
@@ -70,7 +87,8 @@ class SessionStore:
         """
         Clear the PCM buffer and reset the window_seq counter for a session.
         Called by POST /transcription/reset/{session_id} between clips.
-        The WebSocket connection is NOT closed — the App container manages that.
+        The WebSocket connection, language, and flush_lock are NOT replaced —
+        the App container manages the connection lifecycle.
         """
         entry = self._sessions.get(session_id)
         if entry is not None:
@@ -82,16 +100,18 @@ class SessionStore:
         Append raw PCM bytes to the session's accumulation buffer.
 
         Bytes that would push the buffer past _MAX_PCM_BUFFER_BYTES are
-        silently dropped. This is a denial-of-service defence — a legitimate
-        clip produces at most ~2 MB; anything larger indicates a misbehaving
-        or malicious client.
+        silently dropped. This is a denial-of-service defence — see the
+        module-level note on when the cap can legitimately be reached.
         """
         entry = self._sessions.get(session_id)
         if entry is None:
             return
         available = _MAX_PCM_BUFFER_BYTES - len(entry.pcm_buffer)
         if available <= 0:
-            logger.warning("PCM buffer cap reached for session %s — dropping %d bytes", session_id, len(pcm))
+            logger.warning(
+                "PCM buffer cap reached for session %s — dropping %d bytes",
+                session_id, len(pcm),
+            )
             return
         if len(pcm) > available:
             logger.warning(
