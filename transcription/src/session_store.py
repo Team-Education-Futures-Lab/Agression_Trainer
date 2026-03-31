@@ -11,6 +11,14 @@ Each session entry holds:
   - The per-session language code (ISO 639-1) passed by the App container
     when the WebSocket is opened. Overrides the container-level WHISPER_LANGUAGE
     default so different scenarios can use different transcription languages.
+  - pcm_bytes_consumed: cumulative byte count of all PCM passed to the pool
+    so far this clip. Used to compute the audio-time offset of each window,
+    which is needed to translate per-window word timestamps into session-level
+    absolute times for cross-window deduplication.
+  - last_word_end: the session-level audio end time (seconds) of the last
+    accepted word across all windows so far. Words in a new window whose
+    start time (window-relative + offset) is less than this value are
+    duplicates and are filtered out before emission.
 
 No shared state between container instances — session pinning is handled by
 the App container's ServiceRouter, so each instance only ever sees one
@@ -30,23 +38,29 @@ logger = logging.getLogger(__name__)
 # At 16kHz s16le (2 bytes/sample) a 120-second clip produces 3,840,000 bytes.
 # 4 MB = 4,194,304 bytes gives headroom above the 120 s worst case while
 # capping runaway growth from a misbehaving client.
-# Note: under normal operation with rolling windows active (_MIN_BUFFER_BYTES
-# = 192_000), the effective peak buffer size is ~192 KB, not 4 MB — the cap
-# is a defence against a client that streams audio without the rolling window
-# ever firing (e.g. extremely quiet audio that always triggers the silence
-# gate). In that case the full clip accumulates here and is flushed at finalise.
 _MAX_PCM_BUFFER_BYTES = 4 * 1024 * 1024
+
+# Bytes per second of s16le PCM at 16 kHz.
+BYTES_PER_SECOND = 16_000 * 2
 
 
 # ─── Per-session state ────────────────────────────────────────────────────────
 
 @dataclass
 class SessionEntry:
-    websocket:  WebSocket
-    language:   str              # ISO 639-1, e.g. "nl". Set at open time from the WS query param.
-    pcm_buffer: bytearray    = field(default_factory=bytearray)
-    window_seq: int          = 0
-    flush_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    websocket:          WebSocket
+    language:           str              # ISO 639-1, e.g. "nl".
+    pcm_buffer:         bytearray    = field(default_factory=bytearray)
+    window_seq:         int          = 0
+    flush_lock:         asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Cumulative PCM bytes dispatched to the pool this clip.
+    # Divided by BYTES_PER_SECOND to get the session-level time offset of a
+    # window's words, enabling cross-window deduplication.
+    pcm_bytes_consumed: int          = 0
+    # Session-level audio end time of the last accepted word (seconds).
+    # Words in a new window whose (window-relative start + window offset)
+    # is less than this value are treated as repeats and dropped.
+    last_word_end:      float        = 0.0
 
 
 # ─── Store ────────────────────────────────────────────────────────────────────
@@ -66,8 +80,7 @@ class SessionStore:
 
         language is the ISO 639-1 code for this session's transcription language,
         supplied by the App container via the WebSocket URL query parameter.
-        If a stale entry exists (e.g. from a previous clip's connection that
-        closed without cleanup), it is replaced.
+        If a stale entry exists, it is replaced.
         """
         entry = SessionEntry(websocket=websocket, language=language)
         self._sessions[session_id] = entry
@@ -77,31 +90,26 @@ class SessionStore:
         return self._sessions.get(session_id)
 
     def close(self, session_id: str) -> None:
-        """
-        Remove the session entry. Called when the WebSocket closes.
-        Does not close the WebSocket itself — that is the handler's responsibility.
-        """
+        """Remove the session entry on WebSocket disconnect."""
         self._sessions.pop(session_id, None)
 
     def reset(self, session_id: str) -> None:
         """
-        Clear the PCM buffer and reset the window_seq counter for a session.
+        Clear the PCM buffer and reset all per-clip counters.
         Called by POST /transcription/reset/{session_id} between clips.
-        The WebSocket connection, language, and flush_lock are NOT replaced —
-        the App container manages the connection lifecycle.
+        The WebSocket connection, language, and flush_lock are preserved.
         """
         entry = self._sessions.get(session_id)
         if entry is not None:
             entry.pcm_buffer.clear()
-            entry.window_seq = 0
+            entry.window_seq         = 0
+            entry.pcm_bytes_consumed = 0
+            entry.last_word_end      = 0.0
 
     def append_pcm(self, session_id: str, pcm: bytes) -> None:
         """
         Append raw PCM bytes to the session's accumulation buffer.
-
-        Bytes that would push the buffer past _MAX_PCM_BUFFER_BYTES are
-        silently dropped. This is a denial-of-service defence — see the
-        module-level note on when the cap can legitimately be reached.
+        Bytes beyond _MAX_PCM_BUFFER_BYTES are silently dropped.
         """
         entry = self._sessions.get(session_id)
         if entry is None:

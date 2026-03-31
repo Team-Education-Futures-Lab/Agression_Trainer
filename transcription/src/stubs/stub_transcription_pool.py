@@ -2,8 +2,7 @@
 Stub implementation of TranscriptionPoolInterface.
 
 Returns a canned TranscriptSegment without running Whisper.
-Exists only for skeleton development and end-to-end pipeline testing
-before the real Whisper pool is implemented.
+Exists only for skeleton development and end-to-end pipeline testing.
 
 Do NOT use in production.
 """
@@ -12,10 +11,15 @@ from __future__ import annotations
 
 from interfaces import TranscriptionPoolInterface, TranscriptSegment
 
+
 class StubTranscriptionPool(TranscriptionPoolInterface):
     """
     Returns hardcoded transcript text without calling Whisper.
     Always reports 1 worker, always available, always cpu.
+
+    cutoff_time and initial_prompt are accepted to satisfy the interface but
+    intentionally ignored — the stub always returns the same canned response
+    with no word timings and last_word_end=0.0.
     """
 
     async def transcribe(
@@ -23,13 +27,15 @@ class StubTranscriptionPool(TranscriptionPoolInterface):
         pcm:            bytes,
         sample_rate:    int,
         session_id:     str,
-        initial_prompt: str = "",
+        initial_prompt: str   = "",
+        language:       str   = "",
+        cutoff_time:    float = 0.0,
     ) -> TranscriptSegment:
-        # initial_prompt is accepted to satisfy the interface but intentionally
-        # ignored — the stub always returns the same canned response.
         return TranscriptSegment(
-            text="[stub] dit is een teststranscriptie.",
-            confidence=1.0,
+            text          = "[stub] dit is een teststranscriptie.",
+            confidence    = 1.0,
+            words         = [],
+            last_word_end = 0.0,
         )
 
     @property

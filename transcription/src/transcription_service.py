@@ -5,11 +5,35 @@ Whisper dispatch, and Transcript emission for all active sessions.
 This is the service layer sitting between the WebSocket handlers and the
 TranscriptionPoolInterface. It owns:
   - Silence gating (skip the pool entirely for silent windows)
-  - Rolling window dispatch with initial_prompt threading
+  - Rolling window dispatch with initial_prompt and cutoff_time threading
+  - Cross-window deduplication via word timestamps
   - Formatting and sending TranscriptMessage over the session WebSocket
 
 The pool interface is injected so the real WhisperPool can be swapped in
 without touching any of this logic.
+
+Deduplication design
+────────────────────
+Whisper's initial_prompt seeding can cause "looping" — the decoder replays
+phrases from the prompt at the start of a new window. We eliminate this using
+faster-whisper's per-word timestamps:
+
+  1. Each window's PCM byte count is converted to a session-level time offset:
+       window_offset = entry.pcm_bytes_consumed / BYTES_PER_SECOND
+     (pcm_bytes_consumed is incremented before the pool call so finalise and
+     rolling windows share the same counter.)
+
+  2. The session-level last_word_end is converted back to a window-relative
+     cutoff before being passed to the pool:
+       cutoff_time = entry.last_word_end - window_offset
+     Words with window-relative start < cutoff_time are dropped by the pool.
+
+  3. The pool returns last_word_end in window-relative seconds. The service
+     converts it back to session-level and stores it on the entry:
+       entry.last_word_end = window_offset + segment.last_word_end
+
+  Both pcm_bytes_consumed and last_word_end are reset by reset_session()
+  between clips so each clip starts clean.
 """
 
 from __future__ import annotations
@@ -22,52 +46,34 @@ import math
 from fastapi import WebSocket
 
 from interfaces import AudioChunk, TranscriptionPoolInterface, TranscriptMessage
-from session_store import SessionStore
+from session_store import SessionStore, BYTES_PER_SECOND
 
 logger = logging.getLogger(__name__)
 
 # ── Rolling window threshold ──────────────────────────────────────────────────
-# Minimum PCM buffer size before a rolling mid-clip window is dispatched.
-# At 16 kHz s16le (2 bytes/sample):
-#   64_000 bytes = 2 s  — original, high call-rate
-#  192_000 bytes = 6 s  — current: reduces Whisper startup overhead per call
-#                         while keeping peak unfinalised audio well under 4 MB.
+# At 16 kHz s16le (2 bytes/sample): 192_000 bytes = 6 s.
 _MIN_BUFFER_BYTES = 192_000
 
 # ── Silence gate ──────────────────────────────────────────────────────────────
-# RMS threshold below which a PCM window is considered silent and the pool is
-# not called. Computed on int16 samples (range 0–32767). A value of 200
-# corresponds to roughly -44 dBFS — well below typical speech from a laptop
-# microphone (~2000–8000 RMS) but above idle electrical noise.
+# RMS threshold below which a window is considered silent (~-44 dBFS).
 _SILENCE_RMS_THRESHOLD = 200
 
 
 class TranscriptionService:
     """
     Coordinates audio receipt → pool dispatch → Transcript emission.
-
-    One shared instance per container process, injected into all route handlers.
+    One shared instance per container process.
     """
 
     def __init__(self, pool: TranscriptionPoolInterface, store: SessionStore) -> None:
         self._pool  = pool
         self._store = store
-        # Tracks the last successfully emitted transcript text per session.
-        # Passed as initial_prompt to Whisper on subsequent calls to reduce
-        # hallucination on short or context-sparse windows.
         self._last_text: dict[str, str] = {}
 
     # ── Session lifecycle ─────────────────────────────────────────────────────
 
     def open_session(self, session_id: str, websocket: WebSocket, language: str) -> None:
-        """
-        Register a new WebSocket connection for this session.
-
-        language is the ISO 639-1 code supplied by the App container via the
-        WebSocket URL query parameter (e.g. "nl", "en"). Stored on the session
-        entry and passed to every pool.transcribe() call so each session is
-        transcribed in the correct language regardless of the container default.
-        """
+        """Register a new WebSocket connection for this session."""
         self._store.open(session_id, websocket, language)
         self._last_text.pop(session_id, None)
         logger.info("session opened: %s (language=%s)", session_id, language)
@@ -79,10 +85,7 @@ class TranscriptionService:
         logger.info("session closed: %s", session_id)
 
     def reset_session(self, session_id: str) -> None:
-        """
-        Clear the VAD buffer and last-prompt cache between clips.
-        Called by POST /transcription/reset/{session_id}.
-        """
+        """Clear the VAD buffer, prompt cache, and deduplication state between clips."""
         self._store.reset(session_id)
         self._last_text.pop(session_id, None)
         logger.debug("session reset: %s", session_id)
@@ -90,13 +93,7 @@ class TranscriptionService:
     # ── Audio ingestion ───────────────────────────────────────────────────────
 
     async def on_audio_chunk(self, session_id: str, raw_msg: dict) -> None:
-        """
-        Process one AudioChunk received over the WebSocket.
-
-        Decodes the base64 PCM and appends it to the session buffer.
-        Fires a rolling mid-clip window when the buffer reaches
-        _MIN_BUFFER_BYTES.
-        """
+        """Decode PCM, append to buffer, fire rolling window when threshold reached."""
         pcm_b64 = raw_msg.get("pcm", "")
         if not pcm_b64:
             return
@@ -117,14 +114,8 @@ class TranscriptionService:
 
     async def finalise(self, session_id: str) -> bool:
         """
-        Flush any remaining audio in the buffer through Whisper and emit a
-        final Transcript message (is_final=True) over the session WebSocket.
-
-        Returns True if a final message was sent, False if the session is
-        unknown (e.g. the WebSocket was never opened or already closed).
-
-        Uses the per-session flush_lock to prevent a race with a concurrent
-        in-flight rolling window.
+        Flush remaining audio, apply deduplication, and emit is_final=True.
+        Returns True if the session was known, False otherwise.
         """
         entry = self._store.get(session_id)
         if entry is None:
@@ -133,35 +124,11 @@ class TranscriptionService:
 
         async with entry.flush_lock:
             pcm = bytes(entry.pcm_buffer)
-
-            # Clear the buffer before dispatching so a second finalise() call
-            # (or a reset() that races with a slow Whisper call) cannot
-            # retranscribe the same audio.
             entry.pcm_buffer.clear()
 
         if pcm and not _is_silent(pcm):
-            try:
-                segment = await self._pool.transcribe(
-                    pcm            = pcm,
-                    sample_rate    = 16_000,
-                    session_id     = session_id,
-                    initial_prompt = self._last_text.get(session_id, ""),
-                    language       = entry.language,
-                )
-                text       = segment.text
-                confidence = segment.confidence
-                if text:
-                    self._last_text[session_id] = text
-            except Exception as exc:
-                logger.warning(
-                    "Whisper error during finalise for session %s — emitting empty final: %s",
-                    session_id, exc,
-                )
-                text       = ""
-                confidence = 0.0
+            text, confidence = await self._dispatch_to_pool(session_id, pcm, entry)
         else:
-            # Nothing meaningful in the buffer — emit an empty final segment
-            # so the App container's ClipSession can still resolve its promise.
             if pcm:
                 logger.debug("finalise: silent window for session %s — skipping pool", session_id)
             text       = ""
@@ -190,16 +157,8 @@ class TranscriptionService:
 
     async def _transcribe_window(self, session_id: str, is_final: bool) -> None:
         """
-        Transcribe the current buffer contents and emit a Transcript message.
-
-        Protected by the per-session flush_lock so a concurrent finalise()
-        call cannot race to read and clear the same buffer.
-
-        Silent windows are skipped: if the RMS of the buffer is below
-        _SILENCE_RMS_THRESHOLD the pool is not called and no message is emitted.
-
-        On Whisper error, emits an empty segment rather than propagating the
-        exception, so the session remains alive.
+        Snapshot the buffer, gate on silence, dispatch to pool with deduplication,
+        and emit a Transcript message.
         """
         entry = self._store.get(session_id)
         if entry is None:
@@ -216,25 +175,7 @@ class TranscriptionService:
             logger.debug("rolling window: silent — skipping pool for session %s", session_id)
             return
 
-        try:
-            segment = await self._pool.transcribe(
-                pcm            = pcm,
-                sample_rate    = 16_000,
-                session_id     = session_id,
-                initial_prompt = self._last_text.get(session_id, ""),
-                language       = entry.language,
-            )
-            text       = segment.text
-            confidence = segment.confidence
-            if text:
-                self._last_text[session_id] = text
-        except Exception as exc:
-            logger.warning(
-                "Whisper error during rolling window for session %s — emitting empty partial: %s",
-                session_id, exc,
-            )
-            text       = ""
-            confidence = 0.0
+        text, confidence = await self._dispatch_to_pool(session_id, pcm, entry)
 
         seq = self._store.next_seq(session_id)
         msg = TranscriptMessage(
@@ -246,6 +187,64 @@ class TranscriptionService:
         )
 
         await self._send(entry.websocket, msg)
+
+    async def _dispatch_to_pool(
+        self,
+        session_id: str,
+        pcm:        bytes,
+        entry:      object,  # SessionEntry — avoids circular import in type hint
+    ) -> tuple[str, float]:
+        """
+        Compute the window time offset and cutoff, call the pool, update
+        deduplication state, and return (text, confidence).
+
+        The offset/cutoff math:
+          - window_offset: session-level start time of this buffer (seconds)
+          - cutoff_time:   window-relative threshold; words starting before
+                           this point are repeats from a previous window
+        """
+        from session_store import SessionEntry  # local to avoid top-level circular
+        assert isinstance(entry, SessionEntry)
+
+        window_offset = entry.pcm_bytes_consumed / BYTES_PER_SECOND
+
+        # Advance the consumed counter before the pool call so a concurrent
+        # finalise() (if it somehow bypasses the lock) cannot reuse this range.
+        entry.pcm_bytes_consumed += len(pcm)
+
+        # Convert the session-level last_word_end into this window's coordinate
+        # space. If last_word_end <= window_offset all words in this window are
+        # fresh (cutoff_time ≤ 0), so pass 0.0 to avoid filtering anything.
+        cutoff_time = max(0.0, entry.last_word_end - window_offset)
+
+        try:
+            segment = await self._pool.transcribe(
+                pcm            = pcm,
+                sample_rate    = 16_000,
+                session_id     = session_id,
+                initial_prompt = self._last_text.get(session_id, ""),
+                language       = entry.language,
+                cutoff_time    = cutoff_time,
+            )
+            text       = segment.text
+            confidence = segment.confidence
+
+            if text:
+                self._last_text[session_id] = text
+
+            # Convert window-relative last_word_end back to session-level.
+            if segment.last_word_end > 0.0:
+                entry.last_word_end = window_offset + segment.last_word_end
+
+        except Exception as exc:
+            logger.warning(
+                "Whisper error for session %s — emitting empty segment: %s",
+                session_id, exc,
+            )
+            text       = ""
+            confidence = 0.0
+
+        return text, confidence
 
     @staticmethod
     async def _send(websocket: WebSocket, msg: TranscriptMessage) -> None:
@@ -267,20 +266,12 @@ class TranscriptionService:
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _is_silent(pcm: bytes) -> bool:
-    """
-    Return True if the RMS energy of the PCM buffer is below the silence
-    threshold, indicating the window contains no meaningful speech.
-
-    Operates on raw s16le bytes. Returns False (not silent) for empty input
-    so an empty buffer still reaches the pool and returns an empty transcript
-    rather than being silently discarded.
-    """
+    """Return True if the RMS of the PCM buffer is below the silence threshold."""
     if not pcm:
         return False
     n_samples = len(pcm) // 2
     if n_samples == 0:
         return False
-    # Interpret as signed 16-bit little-endian samples.
     total = 0
     for i in range(0, len(pcm) - 1, 2):
         sample = int.from_bytes(pcm[i:i+2], byteorder="little", signed=True)

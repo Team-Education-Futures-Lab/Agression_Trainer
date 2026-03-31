@@ -20,7 +20,7 @@ import numpy as np
 from faster_whisper import WhisperModel
 
 from config import TranscriptionConfig
-from interfaces import TranscriptionPoolInterface, TranscriptSegment
+from interfaces import TranscriptionPoolInterface, TranscriptSegment, WordTiming
 
 logger = logging.getLogger(__name__)
 
@@ -49,15 +49,11 @@ class WhisperPool(TranscriptionPoolInterface):
         self._language     = cfg.whisper_language
         self._device       = cfg.device
 
-        # Thread pool sized to the number of Whisper workers so each model
-        # can run in its own thread without contention.
         self._executor = ThreadPoolExecutor(
-            max_workers = cfg.whisper_workers,
+            max_workers        = cfg.whisper_workers,
             thread_name_prefix = "whisper-worker",
         )
 
-        # Load all models upfront. This is intentionally synchronous and
-        # blocking — model load time is acceptable at startup.
         logger.info(
             "Loading %d WhisperModel instance(s): model=%s device=%s language=%s",
             cfg.whisper_workers, cfg.whisper_model, cfg.device, cfg.whisper_language,
@@ -71,12 +67,7 @@ class WhisperPool(TranscriptionPoolInterface):
             )
             self._models.put(model)
 
-        # Semaphore limits concurrent transcriptions to the pool size.
-        # Callers block here rather than queueing up on the model queue.
         self._semaphore = asyncio.Semaphore(cfg.whisper_workers)
-
-        # Available-worker counter for health reporting.
-        # Decremented on acquire, incremented on release.
         self._available = cfg.whisper_workers
 
         logger.info("WhisperPool ready — %d worker(s)", cfg.whisper_workers)
@@ -88,8 +79,9 @@ class WhisperPool(TranscriptionPoolInterface):
         pcm:            bytes,
         sample_rate:    int,
         session_id:     str,
-        initial_prompt: str = "",
-        language:       str = "",
+        initial_prompt: str   = "",
+        language:       str   = "",
+        cutoff_time:    float = 0.0,
     ) -> TranscriptSegment:
         """
         Transcribe a buffer of s16le PCM audio.
@@ -97,29 +89,27 @@ class WhisperPool(TranscriptionPoolInterface):
         Converts PCM → float32 numpy array, acquires a free WhisperModel,
         runs transcription in a thread executor, and returns the result.
 
-        If the audio is entirely silence (VAD filters everything), returns an
-        empty TranscriptSegment rather than raising.
+        Words whose window-relative start time is less than `cutoff_time` are
+        filtered out before text is assembled. This eliminates phrases that
+        Whisper has repeated from a previous window due to initial_prompt
+        looping, without requiring any string comparison or heuristics.
 
         On inference failure the model instance is discarded from the pool
-        (to avoid reusing a potentially corrupt model) and TranscriptionError
-        is raised. The caller is responsible for handling the error gracefully.
+        and TranscriptionError is raised.
 
         Args:
-            initial_prompt: Optional prior transcript text used to seed
-                            Whisper's decoder, reducing hallucination on
-                            short or context-sparse windows.
-            language:       ISO 639-1 language code for this session (e.g. "nl").
-                            When provided, overrides the pool-level default so
-                            each session can transcribe in its own language.
-                            Falls back to the pool's configured language when
-                            empty.
+            cutoff_time: Window-relative seconds. Words starting before this
+                         time are dropped. The service layer computes this as
+                         (last_word_end − window_time_offset), which converts
+                         the session-level last_word_end into the coordinate
+                         space of this window's audio buffer.
         """
-        audio     = _pcm_to_float32(pcm)
+        audio              = _pcm_to_float32(pcm)
         effective_language = language or self._language
 
         async with self._semaphore:
             self._available -= 1
-            model = self._models.get()
+            model   = self._models.get()
             discard = False
             try:
                 loop   = asyncio.get_running_loop()
@@ -130,6 +120,7 @@ class WhisperPool(TranscriptionPoolInterface):
                     audio,
                     effective_language,
                     initial_prompt,
+                    cutoff_time,
                 )
             except Exception as exc:
                 discard = True
@@ -140,9 +131,6 @@ class WhisperPool(TranscriptionPoolInterface):
                 raise TranscriptionError(str(exc)) from exc
             finally:
                 if discard:
-                    # Do not return a potentially corrupt model to the pool.
-                    # Decrement the worker count so health reporting reflects
-                    # the reduced capacity.
                     self._worker_count -= 1
                     logger.warning(
                         "Worker count reduced to %d after model discard",
@@ -153,8 +141,8 @@ class WhisperPool(TranscriptionPoolInterface):
                 self._available += 1
 
         logger.debug(
-            "transcribed session=%s text=%r confidence=%.2f",
-            session_id, result.text, result.confidence,
+            "transcribed session=%s text=%r confidence=%.2f last_word_end=%.3f",
+            session_id, result.text, result.confidence, result.last_word_end,
         )
         return result
 
@@ -174,10 +162,7 @@ class WhisperPool(TranscriptionPoolInterface):
 # ── Thread-local helpers (run inside executor) ────────────────────────────────
 
 def _pcm_to_float32(pcm: bytes) -> np.ndarray:
-    """
-    Convert raw s16le PCM bytes to a normalised float32 numpy array.
-    faster-whisper expects float32 in the range [-1.0, 1.0].
-    """
+    """Convert raw s16le PCM bytes to a normalised float32 numpy array."""
     return np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
 
 
@@ -185,43 +170,68 @@ def _run_transcription(
     model:          WhisperModel,
     audio:          np.ndarray,
     language:       str,
-    initial_prompt: str = "",
+    initial_prompt: str   = "",
+    cutoff_time:    float = 0.0,
 ) -> TranscriptSegment:
     """
     Synchronous transcription call — runs inside a thread executor.
 
-    Materialises the segment generator fully before returning so the model
-    is safe to release back to the pool. The generator is tied to the model's
-    internal state and must not outlive this function.
+    Requests word-level timestamps from faster-whisper and filters out any
+    word whose start time (relative to this buffer's t=0) is less than
+    cutoff_time. This removes phrases that Whisper has replayed from the
+    initial_prompt context without requiring string matching.
 
-    VAD is enabled via vad_filter=True so silence is skipped automatically
-    without manual buffer windowing in the service layer.
+    The returned TranscriptSegment carries:
+      - text: the deduplicated, space-joined transcript for this window
+      - words: the accepted WordTiming list (for diagnostics / future use)
+      - last_word_end: end time of the last accepted word, in window-relative
+        seconds. The service layer adds the window's session-level time offset
+        to convert this back to a session-level cutoff for the next window.
 
     Any exception raised here propagates back to WhisperPool.transcribe(),
     which catches it, discards the model instance, and re-raises as
     TranscriptionError.
     """
     kwargs: dict = dict(
-        language   = language,
-        vad_filter = True,
-        beam_size  = 5,
+        language         = language,
+        vad_filter       = True,
+        beam_size        = 5,
+        word_timestamps  = True,
     )
     if initial_prompt:
         kwargs["initial_prompt"] = initial_prompt
 
     segments_gen, _info = model.transcribe(audio, **kwargs)
-
-    # Materialise the lazy generator completely inside this thread.
     segments = list(segments_gen)
 
     if not segments:
         return TranscriptSegment(text="", confidence=0.0)
 
-    text = " ".join(s.text.strip() for s in segments if s.text.strip())
+    # Collect all words across all segments, filtered by cutoff_time.
+    accepted: list[WordTiming] = []
+    for seg in segments:
+        for w in (seg.words or []):
+            # w.start and w.end are relative to this buffer's beginning.
+            if w.start >= cutoff_time:
+                accepted.append(WordTiming(
+                    word  = w.word,
+                    start = w.start,
+                    end   = w.end,
+                ))
 
-    # faster-whisper provides per-segment avg_logprob. Convert to a 0–1
-    # confidence proxy: logprob of 0 → 1.0, logprob of -1 → ~0.37.
+    if not accepted:
+        # All words were filtered (entire window is a repeat) — return empty.
+        return TranscriptSegment(text="", confidence=0.0)
+
+    text          = " ".join(w.word.strip() for w in accepted if w.word.strip())
+    last_word_end = accepted[-1].end
+
     avg_logprob = sum(s.avg_logprob for s in segments) / len(segments)
     confidence  = float(min(1.0, max(0.0, 1.0 + avg_logprob)))
 
-    return TranscriptSegment(text=text, confidence=confidence)
+    return TranscriptSegment(
+        text          = text,
+        confidence    = confidence,
+        words         = accepted,
+        last_word_end = last_word_end,
+    )

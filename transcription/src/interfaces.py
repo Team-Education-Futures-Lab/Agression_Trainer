@@ -29,14 +29,37 @@ class AudioChunk:
 
 
 @dataclass
+class WordTiming:
+    """
+    A single recognised word with its start and end time relative to the
+    beginning of the audio buffer it was transcribed from.
+
+    Used internally by TranscriptionService for cross-window deduplication.
+    Not serialised over the wire — TranscriptMessage carries plain text only.
+    """
+    word:  str
+    start: float    # seconds from start of this window's audio buffer
+    end:   float    # seconds from start of this window's audio buffer
+
+
+@dataclass
 class TranscriptSegment:
     """
     The result of transcribing a single window of audio.
-    Produced by TranscriptionPoolInterface.transcribe() and emitted to the
-    App container as a Transcript WebSocket message.
+    Produced by TranscriptionPoolInterface.transcribe() and consumed by
+    TranscriptionService for deduplication before emission.
+
+    `words` carries per-word timings so the service layer can filter out any
+    word that overlaps audio already covered by a previous window.
+    `text` is the pre-joined, pre-filtered string ready to emit; it is set
+    by the pool after filtering has been applied.
     """
     text:       str
-    confidence: float           # 0.0–1.0; stub always returns 1.0
+    confidence: float               # 0.0–1.0; stub always returns 1.0
+    words:      list[WordTiming] = field(default_factory=list)
+    # The end time (relative to this window's audio) of the last accepted word.
+    # Returned to the service so it can advance the session-level cutoff.
+    last_word_end: float = 0.0
 
 
 @dataclass
@@ -76,8 +99,9 @@ class TranscriptionPoolInterface(ABC):
     Abstracts the Whisper worker pool.
 
     The pool has a single responsibility: given a contiguous buffer of raw
-    s16le PCM bytes, return a TranscriptSegment. All VAD accumulation and
-    window management is handled by the service layer (TranscriptionService).
+    s16le PCM bytes and a cutoff time, transcribe the audio and return only
+    the words that start at or after the cutoff. All VAD accumulation, window
+    management, and cutoff tracking is handled by the service layer.
 
     Implementations:
       - StubTranscriptionPool  (stubs/stub_transcription_pool.py)
@@ -90,7 +114,9 @@ class TranscriptionPoolInterface(ABC):
         pcm:            bytes,
         sample_rate:    int,
         session_id:     str,
-        initial_prompt: str = "",
+        initial_prompt: str   = "",
+        language:       str   = "",
+        cutoff_time:    float = 0.0,
     ) -> TranscriptSegment:
         """
         Transcribe a contiguous buffer of s16le PCM audio.
@@ -102,12 +128,18 @@ class TranscriptionPoolInterface(ABC):
             pcm:            Raw s16le PCM bytes at the given sample_rate.
             sample_rate:    Hz — always 16000 in this system.
             session_id:     Used for logging and tracing only; no state is kept.
-            initial_prompt: Optional prior transcript text used to seed the
-                            decoder's attention. Reduces hallucination on short
-                            or context-sparse windows. Ignored by the stub.
+            initial_prompt: Prior transcript text to seed Whisper's decoder,
+                            reducing hallucination on short windows.
+            language:       ISO 639-1 language code. Overrides the pool-level
+                            default when provided.
+            cutoff_time:    Audio-relative time (seconds) before which words
+                            are considered already covered by a previous window
+                            and should be filtered out. Words with start < cutoff
+                            are dropped before text is assembled.
 
         Returns:
-            A TranscriptSegment with the recognised text and confidence score.
+            A TranscriptSegment with deduplicated text, word timings, and the
+            end time of the last accepted word.
         """
         ...
 
