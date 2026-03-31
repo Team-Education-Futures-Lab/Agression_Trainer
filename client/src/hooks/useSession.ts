@@ -14,6 +14,25 @@ import type {
 import { SessionHandler } from "../session-handler.ts";
 import type { CaptureSession } from "../capture.ts";
 
+// ─── Session history ──────────────────────────────────────────────────────────
+
+/**
+ * One entry per completed clip transition, appended when clip_selected arrives.
+ * UI state only — never crosses container boundaries.
+ */
+export interface SessionHistoryEntry {
+    /** 1-indexed turn number. */
+    turn:          number;
+    /** clip_id of the clip that just ended (from currentClipData at snapshot time). */
+    endedClipId:   string;
+    /** escalation_score from clip_selected. */
+    score:         number;
+    /** Accumulated student transcript for the ended clip (snapshot before clear). */
+    transcript:    string;
+    /** Next clip_id, or null if terminal. */
+    nextClipId:    string | null;
+}
+
 export interface UseSessionResult {
     handler:              SessionHandler;
     state:                SessionState;
@@ -27,6 +46,7 @@ export interface UseSessionResult {
     clipCandidates:       ClipCandidateData[]; // from most recent clip_candidates
     currentClipData:      ClipData | null;     // from most recent clip_data with activate=true
     feedbackUnavailable:  boolean;             // true if error{code:"feedback_unavailable"} received
+    sessionHistory:       SessionHistoryEntry[]; // one entry per clip_selected, oldest first
     // Stable callbacks
     connect:              (userId?: string, language?: string) => Promise<void>;
     disconnect:           () => void;
@@ -53,9 +73,26 @@ export function useSession(capture: CaptureSession, options: UseSessionOptions =
     const [clipCandidates,       setClipCandidates]       = useState<ClipCandidateData[]>([]);
     const [currentClipData,      setCurrentClipData]      = useState<ClipData | null>(null);
     const [feedbackUnavailable,  setFeedbackUnavailable]  = useState(false);
+    const [sessionHistory,       setSessionHistory]       = useState<SessionHistoryEntry[]>([]);
+
+    // Refs that mirror mutable state values so callbacks can read the current
+    // value synchronously without stale-closure issues.
+    const transcriptRef      = useRef("");
+    const currentClipDataRef = useRef<ClipData | null>(null);
+    const turnCounterRef     = useRef(0);
 
     const optionsRef = useRef(options);
     optionsRef.current = options;
+
+    // Wrapped setters that keep refs in sync.
+    const updateTranscript = (t: string) => {
+        transcriptRef.current = t;
+        setTranscript(t);
+    };
+    const updateCurrentClipData = (d: ClipData | null) => {
+        currentClipDataRef.current = d;
+        setCurrentClipData(d);
+    };
 
     if (!handlerRef.current) {
         handlerRef.current = new SessionHandler(capture, {
@@ -63,17 +100,19 @@ export function useSession(capture: CaptureSession, options: UseSessionOptions =
                 setState(s);
                 if (s === "idle") {
                     setSessionId(null);
-                    setTranscript("");
+                    updateTranscript("");
                     setQueuePos(null);
                     setClipScore(null);
                     setScenarios([]);
                     setClipCandidates([]);
-                    setCurrentClipData(null);
+                    updateCurrentClipData(null);
                     setFeedbackUnavailable(false);
+                    setSessionHistory([]);
+                    turnCounterRef.current = 0;
                 }
             },
             onActivatingClipData: (msg) => {
-                setCurrentClipData(msg);
+                updateCurrentClipData(msg);
             },
             onMessage: (msg) => {
                 setLastMessage(msg);
@@ -85,7 +124,7 @@ export function useSession(capture: CaptureSession, options: UseSessionOptions =
                         if (msg.queue_position !== null) {
                             setQueuePos(msg.queue_position);
                         } else {
-                            setTranscript(msg.transcript);
+                            updateTranscript(msg.transcript);
                         }
                         break;
 
@@ -97,11 +136,26 @@ export function useSession(capture: CaptureSession, options: UseSessionOptions =
                         setClipCandidates(msg.candidates);
                         break;
 
-                    case "clip_selected":
+                    case "clip_selected": {
+                        // Snapshot current clip and transcript before clearing them.
+                        const endedClip  = currentClipDataRef.current;
+                        const snapTx     = transcriptRef.current;
+                        const turn       = ++turnCounterRef.current;
+
+                        const entry: SessionHistoryEntry = {
+                            turn,
+                            endedClipId: endedClip?.clip_id ?? "(unknown)",
+                            score:       msg.clip_score,
+                            transcript:  snapTx,
+                            nextClipId:  msg.clip_id,
+                        };
+
+                        setSessionHistory(prev => [...prev, entry]);
                         setClipScore(msg.clip_score);
-                        setTranscript(""); // clear for next clip
+                        updateTranscript(""); // clear for next clip
                         setClipCandidates([]);
                         break;
+                    }
 
                     case "error":
                         if (msg.code === "feedback_unavailable") {
@@ -144,6 +198,7 @@ export function useSession(capture: CaptureSession, options: UseSessionOptions =
         clipCandidates,
         currentClipData,
         feedbackUnavailable,
+        sessionHistory,
         connect,
         disconnect,
         selectScenario,

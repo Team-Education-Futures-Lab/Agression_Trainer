@@ -5,13 +5,14 @@
 //   Left  — camera feed, landmark overlay, MFCC spectrogram, capture controls,
 //            session controls, clip control panel
 //   Right — scrollable data panels (transcript, clip_data, candidates,
-//            clip_selected, scenarios, feedback stream, error log)
+//            clip_selected, scenarios, feedback stream, error log, session history)
 // =============================================================================
 
 import { useEffect, useRef, useState } from "react";
 import type { ServerMessage, ClipData } from "@ar-training/shared";
 import { useCapture }      from "./hooks/useCapture.ts";
 import { useSession }      from "./hooks/useSession.ts";
+import type { SessionHistoryEntry } from "./hooks/useSession.ts";
 import { LandmarkOverlay } from "./components/LandmarkOverlay.tsx";
 import { MfccSpectrogram } from "./components/MfccSpectrogram.tsx";
 
@@ -25,6 +26,7 @@ export function App() {
         state, lastMessage,
         sessionId, transcript, queuePos, clipScore,
         scenarios, clipCandidates, currentClipData, feedbackUnavailable,
+        sessionHistory,
         connect, disconnect, selectScenario, preloadClip, sendClipEnded,
     } = useSession(capture);
 
@@ -148,13 +150,14 @@ export function App() {
 
     // ── Collapsible panel state ───────────────────────────────────────────────
     const [openPanels, setOpenPanels] = useState<Record<string, boolean>>({
-        transcript: true,
-        clip_data: true,
-        candidates: true,
+        transcript:    true,
+        clip_data:     true,
+        candidates:    true,
         clip_selected: true,
-        scenarios: true,
-        feedback: true,
-        errors: true,
+        scenarios:     true,
+        feedback:      true,
+        errors:        true,
+        history:       true,
     });
     const togglePanel = (key: string) =>
         setOpenPanels(p => ({ ...p, [key]: !p[key] }));
@@ -424,6 +427,18 @@ export function App() {
                             : <em style={st.empty}>no errors</em>}
                     </CollapsiblePanel>
 
+                    {/* Session history */}
+                    <CollapsiblePanel
+                        label={`Session history (${sessionHistory.length})`}
+                        panelKey="history"
+                        open={openPanels["history"] ?? true}
+                        onToggle={togglePanel}
+                    >
+                        {sessionHistory.length > 0
+                            ? sessionHistory.map(e => <HistoryEntryView key={e.turn} entry={e} />)
+                            : <em style={st.empty}>no turns yet</em>}
+                    </CollapsiblePanel>
+
                 </div>
             </div>
         </div>
@@ -562,6 +577,37 @@ function SessionCompleteView({ msg }: { msg: Extract<ServerMessage, { type: "ses
     );
 }
 
+function HistoryEntryView({ entry }: { entry: SessionHistoryEntry }) {
+    const score = entry.score;
+    const pct   = ((score + 1) / 2) * 100;
+    const color = score < -0.2 ? "#27ae60" : score > 0.2 ? "#e74c3c" : "#e6a817";
+    const txDisplay = entry.transcript.length > 120
+        ? entry.transcript.slice(0, 120) + "…"
+        : entry.transcript || "(no transcript)";
+    return (
+        <div style={he.row}>
+            {/* Main row: turn · ended clip · score · next clip */}
+            <div style={he.mainRow}>
+                <span style={he.turn}>#{entry.turn}</span>
+                <span style={he.endedClip}>{entry.endedClipId}</span>
+                <span style={{ ...he.score, color }}>{score.toFixed(3)}</span>
+                <div style={he.miniBarTrack}>
+                    <div style={he.miniBarMid} />
+                    <div style={{ ...he.miniBarFill, width: `${pct}%`, background: color }} />
+                </div>
+                <span style={he.arrow}>→</span>
+                {entry.nextClipId
+                    ? <span style={he.nextClip}>{entry.nextClipId}</span>
+                    : <span style={he.terminal}>— terminal —</span>}
+            </div>
+            {/* Transcript row */}
+            <div style={he.txRow}>
+                <span style={he.txText} title={entry.transcript}>{txDisplay}</span>
+            </div>
+        </div>
+    );
+}
+
 // ─── Small helpers ────────────────────────────────────────────────────────────
 
 function StatusBadge({ state }: { state: string }) {
@@ -667,4 +713,22 @@ const sc = {
     advice: { margin: "0 0 8px", fontSize: "12px", color: "#cbd5e1", lineHeight: 1.6, whiteSpace: "pre-wrap" as const },
     list:   { margin: 0, padding: "0 0 0 14px" },
     item:   { fontSize: "11px", color: "#94a3b8", lineHeight: 1.6, marginBottom: "2px" },
+} as const;
+
+// ─── HistoryEntryView styles ──────────────────────────────────────────────────
+
+const he = {
+    row:          { borderBottom: "1px solid #2a2a2a", padding: "5px 0" },
+    mainRow:      { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" as const },
+    turn:         { fontSize: "11px", color: "#555", minWidth: "24px", flexShrink: 0 },
+    endedClip:    { fontSize: "11px", color: "#e0e0e0", fontFamily: "monospace", flexShrink: 0 },
+    score:        { fontSize: "12px", fontFamily: "monospace", fontWeight: "bold" as const, flexShrink: 0 },
+    miniBarTrack: { position: "relative" as const, width: "60px", height: "4px", background: "#2a2a2a", borderRadius: "2px", overflow: "hidden" as const, flexShrink: 0 },
+    miniBarMid:   { position: "absolute" as const, left: "50%", top: 0, width: "1px", height: "100%", background: "#444" },
+    miniBarFill:  { position: "absolute" as const, left: 0, top: 0, height: "100%", borderRadius: "2px" },
+    arrow:        { fontSize: "11px", color: "#555", flexShrink: 0 },
+    nextClip:     { fontSize: "11px", color: "#7ab0f0", fontFamily: "monospace" },
+    terminal:     { fontSize: "11px", color: "#8e44ad", fontStyle: "italic" as const },
+    txRow:        { paddingLeft: "32px", marginTop: "2px" },
+    txText:       { fontSize: "11px", color: "#666", lineHeight: 1.4 },
 } as const;
