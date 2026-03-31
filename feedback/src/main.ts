@@ -1,6 +1,7 @@
 import Fastify from "fastify";
 import { timingSafeEqual } from "node:crypto";
 import { loadConfig } from "./config.js";
+import { ensureModel } from "./ensure-model.js";
 import { StubFeedbackGenerator } from "./stub-feedback-generator.js";
 import { OllamaFeedbackGenerator } from "./ollama-feedback-generator.js";
 import type { FeedbackGeneratorInterface } from "./interfaces.js";
@@ -16,6 +17,17 @@ const app    = Fastify({
         redact: ["req.headers.authorization"],
     },
 });
+
+// ── Model management (production only) ───────────────────────────────────────
+//
+// ensureModel runs before the generator is instantiated so that
+// OllamaFeedbackGenerator is only created once model availability is
+// confirmed. The stub path bypasses this entirely — no Ollama interaction
+// occurs when FEEDBACK_GENERATOR=stub.
+
+if (config.generatorImpl === "production") {
+    await ensureModel(config, app.log);
+}
 
 const generator: FeedbackGeneratorInterface =
     config.generatorImpl === "production"

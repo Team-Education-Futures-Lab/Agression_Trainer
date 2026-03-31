@@ -35,6 +35,17 @@ abstract generateStream(req: FeedbackRequest): AsyncGenerator<string>;
 
 The Fastify route layer in `main.ts` is intentionally thin — each route handler calls one `FeedbackService` method, sets the appropriate `Content-Type`, and writes the response. No business logic lives in route handlers.
 
+### Startup model management
+
+When `FEEDBACK_GENERATOR=production`, the container runs `ensureModel()` during startup before the `OllamaFeedbackGenerator` is instantiated. This guarantees the required model is available before any request is served. The sequence is:
+
+1. Check whether the model is already present via `GET /api/tags`.
+2. If absent, pull it via `POST /api/pull` (blocking, up to `OLLAMA_PULL_TIMEOUT_MS`). On failure the container exits with code 1.
+3. If `OLLAMA_MODEL_DIGEST` is set, verify the model's digest via `POST /api/show`. On mismatch the container exits with code 1, logging the expected and actual digest values.
+4. Log success — model name and digest (if verified).
+
+The stub path bypasses `ensureModel` entirely — no Ollama interaction occurs when `FEEDBACK_GENERATOR=stub`.
+
 ### Shared types dependency
 
 The Feedback container imports `FeedbackRequest`, `ConversationTurn`, `ClipMetadata`, `BehaviourResult`, and `Feedback`-related types from `@ar-training/shared`. These are the TypeScript DTOs that the App container also uses when constructing the `FeedbackRequest` body — sharing the package keeps the shapes in sync without duplication.
@@ -134,14 +145,16 @@ When Ollama is unreachable, `ollama_reachable` is `false` but the response is st
 
 Copy `.env.example` to `.env` and set `INTERNAL_API_KEY`. All other variables have defaults.
 
-| Variable             | Default               | Description                                                                                                                                                  |
-|----------------------|-----------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `PORT`               | `8002`                | Internal listen port                                                                                                                                         |
-| `INTERNAL_API_KEY`   | _(required)_          | Shared secret. All requests must carry `Authorization: Bearer <INTERNAL_API_KEY>`. Generate with `openssl rand -hex 32` and set the same value in `app/.env` |
-| `FEEDBACK_GENERATOR` | `stub`                | `stub` — canned responses, no Ollama; `production` — real `OllamaFeedbackGenerator`                                                                          |
-| `OLLAMA_HOST`        | `http://ollama:11434` | Base URL of the Ollama instance. Override to use an external Ollama server                                                                                   |
-| `OLLAMA_MODEL`       | `llama3.2`            | The Ollama model name to use for generation                                                                                                                  |
-| `OLLAMA_TIMEOUT_MS`  | `120000`              | How long to wait for Ollama to respond before treating it as unreachable (ms)                                                                                |
+| Variable                 | Default               | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+|--------------------------|-----------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `PORT`                   | `8002`                | Internal listen port                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `INTERNAL_API_KEY`       | _(required)_          | Shared secret. All requests must carry `Authorization: Bearer <INTERNAL_API_KEY>`. Generate with `openssl rand -hex 32` and set the same value in `app/.env`                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `FEEDBACK_GENERATOR`     | `stub`                | `stub` — canned responses, no Ollama; `production` — real `OllamaFeedbackGenerator`                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `OLLAMA_HOST`            | `http://ollama:11434` | Base URL of the Ollama instance. Override to use an external Ollama server                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `OLLAMA_MODEL`           | `llama3.2`            | The Ollama model name to use for generation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `OLLAMA_TIMEOUT_MS`      | `120000`              | How long to wait for Ollama to respond during generation before aborting (ms). Distinct from `OLLAMA_PULL_TIMEOUT_MS`                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `OLLAMA_MODEL_DIGEST`    | _(unset)_             | Optional. When set, must be the exact SHA-256 digest of the expected Ollama model manifest in the form `sha256:<64 hex chars>`. At startup the container verifies the model digest matches; if it does not, startup fails with a clear error. When unset, digest verification is skipped. **Operators should set this in production deployments** to prevent a compromised or substituted registry entry from causing an unintended model to be used. The correct digest for a model can be found by running `ollama show <model>` and copying the `digest` field |
+| `OLLAMA_PULL_TIMEOUT_MS` | `600000`              | How long to wait for a model pull to complete before treating it as failed (ms). Large models can take several minutes to download; the default is 10 minutes. Distinct from `OLLAMA_TIMEOUT_MS` which governs generation requests                                                                                                                                                                                                                                                                                                                                |
 
 ---
 
@@ -196,6 +209,8 @@ Then set `FEEDBACK_GENERATOR=production` in `feedback/.env` and start the full s
 ```bash
 docker compose up
 ```
+
+When `FEEDBACK_GENERATOR=production`, the container will automatically pull the model at startup if it is not already present. The manual pull above is therefore optional — it is useful when you want to pre-warm the model image in a separate step rather than waiting during the first `docker compose up`.
 
 Ollama model loading can take up to 60 seconds on first start. The healthcheck has a `start_period` of 60 s to accommodate this.
 
