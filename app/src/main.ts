@@ -367,7 +367,7 @@ app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
                 sessions.setCurrentClip(session_id, clipId);
 
                 // Register with coordinator and transition to ACTIVE.
-                coord.registerSession(session_id, clip, (m) => send(m));
+                coord.registerSession(session_id, clip, (m) => send(m), current.language);
                 sessions.markActive(session_id);
             }
         }
