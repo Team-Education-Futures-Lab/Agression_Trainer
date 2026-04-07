@@ -9,8 +9,20 @@ TranscriptionPoolInterface. It owns:
   - Cross-window deduplication via word timestamps
   - Formatting and sending TranscriptMessage over the session WebSocket
 
-The pool interface is injected so the real WhisperPool can be swapped in
-without touching any of this logic.
+Word timing conversion
+──────────────────────
+The pool returns word timings in window-relative seconds (relative to the
+start of the PCM buffer it was given). Before emission, the service converts
+these to session-level (clip-relative) seconds by adding the window's time
+offset:
+
+  session_level_time = window_offset + window_relative_time
+
+where window_offset = entry.pcm_bytes_consumed_before_this_window / BYTES_PER_SECOND
+
+This produces clip-relative word timings that the App container can include
+in the AnalysisWindow dispatched to the Evaluation container, enabling
+accurate silence_ratio and speech_pace computation.
 
 Deduplication design
 ────────────────────
@@ -45,7 +57,9 @@ import math
 
 from fastapi import WebSocket
 
-from interfaces import AudioChunk, TranscriptionPoolInterface, TranscriptMessage
+from interfaces import (
+    AudioChunk, TranscriptionPoolInterface, TranscriptMessage, WordTiming,
+)
 from session_store import SessionStore, BYTES_PER_SECOND
 
 logger = logging.getLogger(__name__)
@@ -72,7 +86,7 @@ class TranscriptionService:
 
     # ── Session lifecycle ─────────────────────────────────────────────────────
 
-    def open_session(self, session_id: str, websocket: WebSocket, language: str) -> None:
+    def open_session(self, session_id: str, websocket: WebSocket, language: str = "") -> None:
         """Register a new WebSocket connection for this session."""
         self._store.open(session_id, websocket, language)
         self._last_text.pop(session_id, None)
@@ -127,12 +141,13 @@ class TranscriptionService:
             entry.pcm_buffer.clear()
 
         if pcm and not _is_silent(pcm):
-            text, confidence = await self._dispatch_to_pool(session_id, pcm, entry)
+            text, confidence, words = await self._dispatch_to_pool(session_id, pcm, entry)
         else:
             if pcm:
                 logger.debug("finalise: silent window for session %s — skipping pool", session_id)
             text       = ""
             confidence = 1.0
+            words      = []
 
         seq = self._store.next_seq(session_id)
         msg = TranscriptMessage(
@@ -141,6 +156,7 @@ class TranscriptionService:
             window_seq = seq,
             is_final   = True,
             confidence = confidence,
+            words      = words,
         )
 
         # Re-fetch entry in case it was replaced between lock release and send.
@@ -175,7 +191,7 @@ class TranscriptionService:
             logger.debug("rolling window: silent — skipping pool for session %s", session_id)
             return
 
-        text, confidence = await self._dispatch_to_pool(session_id, pcm, entry)
+        text, confidence, words = await self._dispatch_to_pool(session_id, pcm, entry)
 
         seq = self._store.next_seq(session_id)
         msg = TranscriptMessage(
@@ -184,6 +200,7 @@ class TranscriptionService:
             window_seq = seq,
             is_final   = is_final,
             confidence = confidence,
+            words      = words,
         )
 
         await self._send(entry.websocket, msg)
@@ -193,15 +210,13 @@ class TranscriptionService:
         session_id: str,
         pcm:        bytes,
         entry:      object,  # SessionEntry — avoids circular import in type hint
-    ) -> tuple[str, float]:
+    ) -> tuple[str, float, list[WordTiming]]:
         """
         Compute the window time offset and cutoff, call the pool, update
-        deduplication state, and return (text, confidence).
+        deduplication state, and return (text, confidence, words).
 
-        The offset/cutoff math:
-          - window_offset: session-level start time of this buffer (seconds)
-          - cutoff_time:   window-relative threshold; words starting before
-                           this point are repeats from a previous window
+        Words are returned with session-level (clip-relative) times, converted
+        from the pool's window-relative times by adding window_offset.
         """
         from session_store import SessionEntry  # local to avoid top-level circular
         assert isinstance(entry, SessionEntry)
@@ -236,6 +251,16 @@ class TranscriptionService:
             if segment.last_word_end > 0.0:
                 entry.last_word_end = window_offset + segment.last_word_end
 
+            # Convert all word timings from window-relative to session-level.
+            words: list[WordTiming] = [
+                WordTiming(
+                    word  = w.word,
+                    start = window_offset + w.start,
+                    end   = window_offset + w.end,
+                )
+                for w in segment.words
+            ]
+
         except Exception as exc:
             logger.warning(
                 "Whisper error for session %s — emitting empty segment: %s",
@@ -243,8 +268,9 @@ class TranscriptionService:
             )
             text       = ""
             confidence = 0.0
+            words      = []
 
-        return text, confidence
+        return text, confidence, words
 
     @staticmethod
     async def _send(websocket: WebSocket, msg: TranscriptMessage) -> None:
@@ -257,6 +283,10 @@ class TranscriptionService:
                 "window_seq": msg.window_seq,
                 "is_final":   msg.is_final,
                 "confidence": msg.confidence,
+                "words":      [
+                    {"word": w.word, "start": w.start, "end": w.end}
+                    for w in msg.words
+                ],
             }
             await websocket.send_text(json.dumps(payload))
         except Exception as exc:

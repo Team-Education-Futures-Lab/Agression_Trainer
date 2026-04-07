@@ -10,9 +10,48 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type {
     SessionState, ServerMessage,
     ScenarioSummary, ClipData, ClipCandidateData,
+    BehaviourResult, WordTiming,
 } from "@ar-training/shared";
 import { SessionHandler } from "../session-handler.ts";
 import type { CaptureSession } from "../capture.ts";
+
+// ─── Debug eval types (client-internal — not in shared/types.ts) ──────────────
+
+/**
+ * App-level capture statistics for one clip, mirroring the `capture` field
+ * of the `debug_eval` wire message.
+ */
+export interface DebugAppMeta {
+    frame_count:       number;
+    chunk_count:       number;
+    word_count:        number;
+    eval_latency_ms:   number;
+    eval_fallback:     boolean;
+}
+
+/**
+ * The final transcript data forwarded to the Evaluation container, mirroring
+ * the `transcript` field of the `debug_eval` wire message.
+ */
+export interface DebugTranscript {
+    final_text: string;
+    words:      WordTiming[];
+}
+
+/**
+ * Client-internal representation of a `debug_eval` message payload.
+ * Attached to the corresponding SessionHistoryEntry once received.
+ *
+ * `stages` is typed as `Record<string, unknown> | null` — its shape varies by
+ * `analyser_id` and is narrowed at render time.
+ */
+export interface DebugEvalPayload {
+    analyser_id: string;
+    result:      BehaviourResult;
+    stages:      Record<string, unknown> | null;
+    app_meta:    DebugAppMeta;
+    transcript:  DebugTranscript;
+}
 
 // ─── Session history ──────────────────────────────────────────────────────────
 
@@ -31,12 +70,19 @@ export interface SessionHistoryEntry {
     transcript:    string;
     /** Next clip_id, or null if terminal. */
     nextClipId:    string | null;
+    /**
+     * Evaluation debug payload for this turn. Populated when the session is
+     * an admin session and the server sends a `debug_eval` message after
+     * `clip_selected`. Absent for non-admin sessions.
+     */
+    debugEval?:    DebugEvalPayload;
 }
 
 export interface UseSessionResult {
     handler:              SessionHandler;
     state:                SessionState;
     lastMessage:          ServerMessage | null;
+    isAdmin:              boolean;
     // Derived convenience values
     sessionId:            string | null;
     transcript:           string;              // accumulated for current clip, cleared on clip_selected
@@ -48,7 +94,7 @@ export interface UseSessionResult {
     feedbackUnavailable:  boolean;             // true if error{code:"feedback_unavailable"} received
     sessionHistory:       SessionHistoryEntry[]; // one entry per clip_selected, oldest first
     // Stable callbacks
-    connect:              (userId?: string, language?: string) => Promise<void>;
+    connect:              (userId?: string, language?: string, adminKey?: string) => Promise<void>;
     disconnect:           () => void;
     selectScenario:       (scenarioId: string, entryClipId: string) => void;
     preloadClip:          (scenarioId: string, clipId: string) => void;
@@ -65,6 +111,7 @@ export function useSession(capture: CaptureSession, options: UseSessionOptions =
 
     const [state,                setState]               = useState<SessionState>("idle");
     const [lastMessage,          setLastMessage]          = useState<ServerMessage | null>(null);
+    const [isAdmin,              setIsAdmin]              = useState(false);
     const [sessionId,            setSessionId]            = useState<string | null>(null);
     const [transcript,           setTranscript]           = useState("");
     const [queuePos,             setQueuePos]             = useState<number | null>(null);
@@ -100,6 +147,7 @@ export function useSession(capture: CaptureSession, options: UseSessionOptions =
                 setState(s);
                 if (s === "idle") {
                     setSessionId(null);
+                    setIsAdmin(false);
                     updateTranscript("");
                     setQueuePos(null);
                     setClipScore(null);
@@ -157,6 +205,39 @@ export function useSession(capture: CaptureSession, options: UseSessionOptions =
                         break;
                     }
 
+                    case "debug_eval": {
+                        // Attach debug payload to the most recently appended history entry.
+                        // debug_eval always arrives after clip_selected for the same turn,
+                        // so the entry is guaranteed to exist.
+                        const payload: DebugEvalPayload = {
+                            analyser_id: msg.analyser_id,
+                            result:      msg.result,
+                            stages:      msg.stages != null
+                                ? (msg.stages as Record<string, unknown>)
+                                : null,
+                            app_meta: {
+                                frame_count:     msg.capture.frame_count,
+                                chunk_count:     msg.capture.audio_chunk_count,
+                                word_count:      msg.capture.word_timing_count,
+                                eval_latency_ms: msg.capture.eval_latency_ms,
+                                eval_fallback:   msg.capture.eval_fallback,
+                            },
+                            transcript: {
+                                final_text: msg.transcript.final_text,
+                                words:      msg.transcript.words,
+                            },
+                        };
+                        setSessionHistory(prev =>
+                            prev.map((e, i) =>
+                                i === prev.length - 1 ? { ...e, debugEval: payload } : e
+                            )
+                        );
+                        // Reflect admin flag from the handler now that the first
+                        // debug_eval has arrived (belt-and-suspenders alongside connect()).
+                        setIsAdmin(true);
+                        break;
+                    }
+
                     case "error":
                         if (msg.code === "feedback_unavailable") {
                             setFeedbackUnavailable(true);
@@ -172,12 +253,18 @@ export function useSession(capture: CaptureSession, options: UseSessionOptions =
 
     const handler = handlerRef.current;
 
+    // Sync isAdmin from handler after connect (handler.isAdmin is set synchronously
+    // before the first onStateChange fires, so read it once on state change).
+    useEffect(() => {
+        if (state !== "idle") setIsAdmin(handler.isAdmin);
+    }, [state, handler]);
+
     useEffect(() => {
         return () => { handler.disconnect(); };
     }, [handler]);
 
-    const connect        = useCallback((userId?: string, language?: string) =>
-        handler.connect(userId, language), [handler]);
+    const connect        = useCallback((userId?: string, language?: string, adminKey?: string) =>
+        handler.connect(userId, language, adminKey), [handler]);
     const disconnect     = useCallback(() => handler.disconnect(), [handler]);
     const selectScenario = useCallback((scenarioId: string, entryClipId: string) =>
         handler.selectScenario(scenarioId, entryClipId), [handler]);
@@ -190,6 +277,7 @@ export function useSession(capture: CaptureSession, options: UseSessionOptions =
         handler,
         state,
         lastMessage,
+        isAdmin,
         sessionId,
         transcript,
         queuePos,

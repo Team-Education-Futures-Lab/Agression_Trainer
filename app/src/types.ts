@@ -47,22 +47,28 @@ export interface SessionContext {
      * True if the session was created with a valid ADMIN_API_KEY.
      * Admin sessions bypass clip activation restrictions (any clip may be
      * activated, not just the scenario entry clip).
-     *
-     * This is the extension point for per-user admin tokens — when a teacher
-     * dashboard is added, replace the env-var check at session creation with a
-     * token lookup; nothing downstream changes.
      */
     is_admin:             boolean;
     /**
      * Optional scenario-specific coaching context, read from the scenario's
-     * metadata.json `coaching_context` field and bound alongside the scenario
-     * when request_clip { activate: true } is first received.
-     *
-     * Forwarded to the Feedback container in FeedbackRequest.coaching_context
-     * so the LLM can frame its debrief for the specific professional context
-     * being practised. Null when the scenario metadata omits the field.
+     * metadata.json `coaching_context` field. Forwarded to FeedbackRequest.
+     * Null when the scenario metadata omits the field.
      */
     coaching_context:     string | null;
+    /**
+     * Optional de-escalation competency labels the scenario trains.
+     * Read from the scenario's `learning_objectives` field.
+     * Forwarded to FeedbackRequest so the LLM can anchor its advice.
+     * Null when the scenario metadata omits the field.
+     */
+    learning_objectives:  string[] | null;
+    /**
+     * Optional MBO level or professional context description.
+     * Read from the scenario's `target_audience` field.
+     * Forwarded to FeedbackRequest so the LLM can calibrate its vocabulary.
+     * Null when the scenario metadata omits the field.
+     */
+    target_audience:      string | null;
 }
 
 // ─── Coordinator config ───────────────────────────────────────────────────────

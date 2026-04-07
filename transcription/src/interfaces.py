@@ -3,7 +3,7 @@
 # Abstract base classes and dataclasses for all Transcription DTOs.
 #
 # TypeScript equivalent: shared/types.ts (AudioChunk, Transcript fields)
-# Wire format reference: docs/api_contract.md
+# Wire format reference: docs/admin_and_tooling_api.md
 # =============================================================================
 
 from __future__ import annotations
@@ -31,15 +31,23 @@ class AudioChunk:
 @dataclass
 class WordTiming:
     """
-    A single recognised word with its start and end time relative to the
-    beginning of the audio buffer it was transcribed from.
+    A single recognised word with its start and end time.
 
-    Used internally by TranscriptionService for cross-window deduplication.
-    Not serialised over the wire — TranscriptMessage carries plain text only.
+    In TranscriptSegment (internal), times are window-relative (seconds from
+    the start of the audio buffer being transcribed).
+
+    In TranscriptMessage (wire format), times are session-level (seconds from
+    the start of the clip, i.e. from the last reset). The TranscriptionService
+    converts from window-relative to session-level before emission by adding
+    the window's time offset.
+
+    These session-level times are forwarded by the App container in the
+    AnalysisWindow sent to the Evaluation container, where they are used to
+    compute silence_ratio and speech_pace accurately.
     """
     word:  str
-    start: float    # seconds from start of this window's audio buffer
-    end:   float    # seconds from start of this window's audio buffer
+    start: float    # seconds (context-dependent — see docstring above)
+    end:   float    # seconds (context-dependent — see docstring above)
 
 
 @dataclass
@@ -49,10 +57,9 @@ class TranscriptSegment:
     Produced by TranscriptionPoolInterface.transcribe() and consumed by
     TranscriptionService for deduplication before emission.
 
-    `words` carries per-word timings so the service layer can filter out any
-    word that overlaps audio already covered by a previous window.
-    `text` is the pre-joined, pre-filtered string ready to emit; it is set
-    by the pool after filtering has been applied.
+    `words` carries per-word timings in window-relative seconds. The service
+    layer converts them to session-level times before forwarding.
+    `text` is the pre-joined, pre-filtered string ready to emit.
     """
     text:       str
     confidence: float               # 0.0–1.0; stub always returns 1.0
@@ -67,12 +74,17 @@ class TranscriptMessage:
     """
     Wire format for Transcript messages sent back to the App container.
     Serialised to JSON and sent over the session WebSocket.
+
+    `words` carries session-level word timings (seconds from clip start).
+    The App container accumulates these across all received messages and
+    includes them in the AnalysisWindow dispatched to the Evaluation container.
     """
     session_id: str
     text:       str
     window_seq: int             # Monotonically increasing per session
     is_final:   bool
     confidence: float
+    words:      list[WordTiming] = field(default_factory=list)
     type:       str = "transcript"
 
 
@@ -121,25 +133,13 @@ class TranscriptionPoolInterface(ABC):
         """
         Transcribe a contiguous buffer of s16le PCM audio.
 
-        This call may be CPU/GPU bound. Implementations must ensure they do
-        not block the asyncio event loop (use run_in_executor for sync libs).
+        Returns a TranscriptSegment with deduplicated text, word timings
+        (window-relative), and the end time of the last accepted word.
 
-        Args:
-            pcm:            Raw s16le PCM bytes at the given sample_rate.
-            sample_rate:    Hz — always 16000 in this system.
-            session_id:     Used for logging and tracing only; no state is kept.
-            initial_prompt: Prior transcript text to seed Whisper's decoder,
-                            reducing hallucination on short windows.
-            language:       ISO 639-1 language code. Overrides the pool-level
-                            default when provided.
-            cutoff_time:    Audio-relative time (seconds) before which words
-                            are considered already covered by a previous window
-                            and should be filtered out. Words with start < cutoff
-                            are dropped before text is assembled.
-
-        Returns:
-            A TranscriptSegment with deduplicated text, word timings, and the
-            end time of the last accepted word.
+        Word timings in the returned segment are relative to this buffer's
+        t=0. The service layer adds the window's session-level time offset
+        to convert them to session-level (clip-relative) times before
+        forwarding to the App container.
         """
         ...
 

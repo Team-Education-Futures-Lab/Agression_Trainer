@@ -65,12 +65,21 @@ function makeChunk(sessionId: string, chunkId: number): AudioChunk {
 
 function makeClip(clipId: string): ClipMetadata {
     return {
-        clip_id:           clipId,
-        scenario_id:       "scenario_01",
-        video_url:         `/scenarios/scenario_01/${clipId}.mp4`,
-        transcript:        "Test transcript",
-        notable_features:  [],
-        branch_conditions: [{ min_score: -1.0, max_score: 1.01, next_clip: null }],
+        clip_id:                  clipId,
+        scenario_id:              "scenario_01",
+        video_url:                `/scenarios/scenario_01/${clipId}.mp4`,
+        transcript:               "Test transcript",
+        clip_duration_seconds:    10.0,
+        notable_features:         [],
+        scoring_mode:             "rubric",
+        de_escalation_rubric:     [],
+        escalation_rubric:        [],
+        critical_failures:        [],
+        score_range:              { min: -1.0, max: 1.0 },
+        clip_learning_objectives: [],
+        ideal_response:           null,
+        response_warnings:        [],
+        branch_conditions:        [{ min_score: -1.0, max_score: 1.01, next_clip: null }],
     };
 }
 
@@ -82,20 +91,25 @@ function makeBehaviourResult(sessionId: string, windowId: string, score: number)
         dominant_emotion: "neutral",
         confidence:       1.0,
         signal_summary: {
-            voice_tension:   0.5,
-            speech_pace:     3.2,
-            hand_velocity:   0.3,
-            gaze_stability:  0.7,
-            open_palm_ratio: 0.6,
-            notable_signals: [],
+            vocal_tension:      0.5,
+            speech_pace:        3.2,
+            gesture_activity:   0.3,
+            open_gesture_ratio: 0.6,
+            head_nod_frequency: 0.4,
+            facing_ratio:       0.8,
+            silence_ratio:      0.2,
+            lexical_markers:    [],
+            response_tone:      "neutral",
+            notable_signals:    [],
         },
     };
 }
 
-function mockFetchSuccess(result: BehaviourResult): void {
+function mockFetchSuccess(result: BehaviourResult, debug?: { analyser_id: string; stages: unknown }): void {
+    const body = debug ? { ...result, debug } : result;
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
         ok:   true,
-        json: () => Promise.resolve(result),
+        json: () => Promise.resolve(body),
     }));
 }
 
@@ -367,6 +381,116 @@ describe("Coordinator", () => {
 
             vi.useRealTimers();
         });
+
+        // ── Debug header ──────────────────────────────────────────────────────
+
+        it("does not send X-Debug header for a non-admin flush", async () => {
+            const ws = new MockWebSocket();
+            const { coord } = makeCoord(ws);
+            mockFetchSuccess(makeBehaviourResult("s1", "s1:1", 0.0));
+
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "nl");
+            ws.open();
+            for (let i = 0; i < 5; i++) coord.onFrame("s1", makeFrame("s1", i));
+
+            const flush = coord.flushSession("s1", false);
+            emitTranscript(ws, "tekst", true);
+            await flush;
+
+            const fetchMock = fetch as ReturnType<typeof vi.fn>;
+            const call = fetchMock.mock.calls.find(c => (c[0] as string).includes("/evaluate/analyse"))!;
+            expect(call[1].headers["X-Debug"]).toBeUndefined();
+        });
+
+        it("sends X-Debug: true header for an admin flush", async () => {
+            const ws = new MockWebSocket();
+            const { coord } = makeCoord(ws);
+            mockFetchSuccess(makeBehaviourResult("s1", "s1:1", 0.0));
+
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "nl");
+            ws.open();
+            for (let i = 0; i < 5; i++) coord.onFrame("s1", makeFrame("s1", i));
+
+            const flush = coord.flushSession("s1", true);
+            emitTranscript(ws, "tekst", true);
+            await flush;
+
+            const fetchMock = fetch as ReturnType<typeof vi.fn>;
+            const call = fetchMock.mock.calls.find(c => (c[0] as string).includes("/evaluate/analyse"))!;
+            expect(call[1].headers["X-Debug"]).toBe("true");
+        });
+
+        it("getLastDebug returns null for a non-admin flush", async () => {
+            const ws = new MockWebSocket();
+            const { coord } = makeCoord(ws);
+            const debugPayload = { analyser_id: "stub", stages: { note: "stub" } };
+            mockFetchSuccess(makeBehaviourResult("s1", "s1:1", 0.0), debugPayload);
+
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "nl");
+            ws.open();
+            for (let i = 0; i < 5; i++) coord.onFrame("s1", makeFrame("s1", i));
+
+            const flush = coord.flushSession("s1", false);
+            emitTranscript(ws, "tekst", true);
+            await flush;
+
+            expect(coord.getLastDebug("s1")).toBeNull();
+        });
+
+        it("getLastDebug stores the debug payload for an admin flush", async () => {
+            const ws = new MockWebSocket();
+            const { coord } = makeCoord(ws);
+            const debugPayload = { analyser_id: "stub", stages: { note: "stub analyser" } };
+            mockFetchSuccess(makeBehaviourResult("s1", "s1:1", 0.0), debugPayload);
+
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "nl");
+            ws.open();
+            for (let i = 0; i < 5; i++) coord.onFrame("s1", makeFrame("s1", i));
+
+            const flush = coord.flushSession("s1", true);
+            emitTranscript(ws, "tekst", true);
+            await flush;
+
+            const debug = coord.getLastDebug("s1");
+            expect(debug?.analyser_id).toBe("stub");
+            expect(debug?.stages).toEqual({ note: "stub analyser" });
+        });
+
+        it("debug field is not included in the BehaviourResult stored as lastResult", async () => {
+            const ws = new MockWebSocket();
+            const { coord } = makeCoord(ws);
+            const result = makeBehaviourResult("s1", "s1:1", 0.3);
+            const debugPayload = { analyser_id: "stub", stages: { note: "x" } };
+            mockFetchSuccess(result, debugPayload);
+
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "nl");
+            ws.open();
+            for (let i = 0; i < 5; i++) coord.onFrame("s1", makeFrame("s1", i));
+
+            const flush = coord.flushSession("s1", true);
+            emitTranscript(ws, "tekst", true);
+            await flush;
+
+            const stored = coord.getLastResult("s1") as Record<string, unknown>;
+            expect(stored["debug"]).toBeUndefined();
+            expect(stored.escalation_score).toBe(0.3);
+        });
+
+        it("getLastDebug returns null when evaluation fails", async () => {
+            const ws = new MockWebSocket();
+            const { coord } = makeCoord(ws);
+            mockFetchFailure();
+
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "nl");
+            ws.open();
+            for (let i = 0; i < 5; i++) coord.onFrame("s1", makeFrame("s1", i));
+
+            const flush = coord.flushSession("s1", true);
+            emitTranscript(ws, "tekst", true);
+            await flush;
+
+            expect(coord.getLastDebug("s1")).toBeNull();
+        });
     });
 
     // ── Reset ─────────────────────────────────────────────────────────────────
@@ -480,6 +604,19 @@ describe("Coordinator", () => {
             const ws = new MockWebSocket();
             const { coord } = makeCoord(ws);
             expect(coord.getLastTranscript("unknown")).toBeNull();
+        });
+
+        it("getLastDebug returns null for an unknown session", () => {
+            const ws = new MockWebSocket();
+            const { coord } = makeCoord(ws);
+            expect(coord.getLastDebug("unknown")).toBeNull();
+        });
+
+        it("getLastDebug returns null before any flush", () => {
+            const ws = new MockWebSocket();
+            const { coord } = makeCoord(ws);
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "nl");
+            expect(coord.getLastDebug("s1")).toBeNull();
         });
     });
 });

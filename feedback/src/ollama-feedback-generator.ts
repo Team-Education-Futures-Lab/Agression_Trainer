@@ -12,10 +12,11 @@ import type { FeedbackConfig } from "./config.js";
 // the response can be parsed deterministically.
 //
 // The system prompt is generic — it describes the tool's purpose and output
-// format without assuming any specific professional role. The scenario's
-// coaching_context field provides the role-specific framing and is injected
-// at the top of the user prompt. This allows the same Feedback container to
-// serve scenarios across different professions without code changes.
+// format without assuming any specific professional role. Per-scenario context
+// is injected through the user prompt via coaching_context, learning_objectives,
+// target_audience, and the per-clip ideal_response / response_warnings fields.
+// This allows the same Feedback container to serve scenarios across different
+// professions without code changes.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const FALLBACK_COACHING_CONTEXT =
@@ -106,38 +107,84 @@ export class OllamaFeedbackGenerator implements FeedbackGeneratorInterface {
     // ── Private helpers ───────────────────────────────────────────────────────
 
     /**
-     * Generic system prompt. Describes the tool's purpose and the required
-     * output format. Deliberately contains no role-specific language —
-     * that comes from coaching_context in the user prompt.
+     * Generic system prompt. Describes the tool's purpose and required output
+     * format. Contains no role-specific language — that comes from the user
+     * prompt via coaching_context, learning_objectives, and clip rubric fields.
      */
     private _systemPrompt(language: string): string {
         return (
             `You are a professional coach for a de-escalation training tool used in vocational education. ` +
             `Students practise responding to simulated conflict scenarios. ` +
             `You review the student's responses and provide structured, constructive coaching feedback. ` +
-            `The student's preferred language is "${language}". Respond in that language. ` +
+            `The student's preferred language is "${language}". Respond entirely in that language — ` +
+            `including all field values in the JSON output. ` +
             `\n\n` +
             `You will receive a prompt containing the following information:\n` +
-            `- Context: a description of the professional role and situation the student is practising.\n` +
-            `- Scenario and session identifiers.\n` +
-            `- A series of turns, each representing one exchange in the scenario. For each turn you receive:\n` +
+            `- Context: the professional role and situation the student is practising.\n` +
+            `- Learning objectives: the de-escalation competencies this scenario trains (when available).\n` +
+            `- Audience: the MBO level or professional context (when available).\n` +
+            `- A series of turns, each representing one exchange in the scenario. For each turn:\n` +
             `  - The transcript of the video clip the student was responding to, and its notable behavioural features.\n` +
+            `  - What an ideal student response would look like for this clip (when available).\n` +
+            `  - Behaviours the student should have avoided (when available).\n` +
             `  - The student's spoken response (transcript).\n` +
-            `  - Multimodal analysis signals derived from the student's webcam and microphone: an escalation score (-1.0 = strongly de-escalating, 1.0 = strongly escalating), dominant emotion, voice tension, speech pace, and gaze stability.\n` +
+            `  - Multimodal signals from the student's webcam and microphone:\n` +
+            `    escalation score (-1.0 = strongly de-escalating, 1.0 = strongly escalating),\n` +
+            `    dominant emotion, vocal tension (0=relaxed, 1=tense), speech pace (syllables/sec),\n` +
+            `    head nod frequency (Hz), facing ratio (0=turned away, 1=facing forward),\n` +
+            `    silence ratio (fraction of clip with no student speech),\n` +
+            `    lexical de-escalation markers detected in the student's transcript,\n` +
+            `    and overall response tone (positive/neutral/negative).\n` +
             `\n` +
-            `Use all of this information together to assess how effectively the student handled the situation and where they can improve. ` +
-            `Give weight to the full picture — what the student said, how they said it, and how their body language and voice signals evolved across the session. ` +
+            `Use all of this information together to assess how effectively the student handled ` +
+            `the situation and where they can improve. ` +
+            `Give weight to the full picture — what the student said, how they said it, and how ` +
+            `their behaviour evolved across the session. ` +
+            `When learning objectives are provided, anchor your feedback to those competencies. ` +
+            `When ideal_response or response_warnings are provided for a turn, use them as the ` +
+            `benchmark for that turn's assessment. ` +
             `\n\n` +
             `You must respond with a single valid JSON object — no markdown, no explanation, no preamble. ` +
             `The JSON must match this exact shape:\n` +
             `{\n` +
-            `  "advice": "<full debrief paragraph>",\n` +
+            `  "advice": "<structured debrief — see format below>",\n` +
             `  "severity": "<low|medium|high>",\n` +
-            `  "highlights": ["<notable moment 1>", "<notable moment 2>"]\n` +
+            `  "highlights": ["<one string per turn>", ...]\n` +
             `}\n` +
-            `"severity" reflects the overall escalation risk shown by the student: ` +
-            `"low" means the student de-escalated effectively, "high" means significant escalating behaviour was observed. ` +
-            `"highlights" should reference specific turns by number, e.g. "Turn 2: voice tension spiked when the other person pushed back."`
+            `\n` +
+            `ADVICE FORMAT\n` +
+            `The "advice" field must contain three clearly labelled sections, separated by blank lines:\n` +
+            `\n` +
+            `Section 1 — Per-turn summaries. One short paragraph per turn, in order. ` +
+            `Each paragraph starts with "Beurt <N>:" (or the equivalent label in the student's language). ` +
+            `Briefly describe what the actor showed, what the student did, and whether it was effective. ` +
+            `Two to four sentences per turn.\n` +
+            `\n` +
+            `Section 2 — Overall summary. One paragraph (three to five sentences) summarising how the ` +
+            `student performed across the whole session. Note any patterns — did they improve turn by turn? ` +
+            `Did tension rise or fall? Were the learning objectives met?\n` +
+            `\n` +
+            `Section 3 — Coaching advice. One paragraph (three to five sentences) with concrete, ` +
+            `actionable suggestions for what the student should practise or do differently next time. ` +
+            `Anchor this to the learning objectives when they are provided.\n` +
+            `\n` +
+            `HIGHLIGHTS FORMAT\n` +
+            `"highlights" is a list with exactly one entry per turn in the session — no more, no fewer. ` +
+            `Each entry is a single sentence identifying the most notable thing (positive or negative) ` +
+            `about the student's response in that turn. ` +
+            `Always reference the turn number. ` +
+            `Example for a three-turn session:\n` +
+            `[\n` +
+            `  "Beurt 1: student sprak rustig en gebruikte een open vraag — goede start.",\n` +
+            `  "Beurt 2: stemspanning steeg sterk toen de acteur escaleerde; de student verloor de kalme toon.",\n` +
+            `  "Beurt 3: student herstelde gedeeltelijk maar vermeed oogcontact."\n` +
+            `]\n` +
+            `\n` +
+            `SEVERITY\n` +
+            `"severity" reflects the overall escalation risk shown by the student across the session:\n` +
+            `"low"    = student consistently de-escalated or maintained calm.\n` +
+            `"medium" = mixed performance — some effective moments, some escalating behaviour.\n` +
+            `"high"   = significant escalating behaviour observed across multiple turns.`
         );
     }
 
@@ -146,26 +193,65 @@ export class OllamaFeedbackGenerator implements FeedbackGeneratorInterface {
 
         const lines: string[] = [
             `Context: ${context}`,
+        ];
+
+        if (req.learning_objectives?.length) {
+            lines.push(`Learning objectives: ${req.learning_objectives.join(", ")}`);
+        }
+        if (req.target_audience) {
+            lines.push(`Target audience: ${req.target_audience}`);
+        }
+
+        lines.push(
             `Scenario: ${req.scenario_id}`,
             `Session: ${req.session_id}`,
             `Turns: ${req.history.length}`,
             "",
-        ];
+        );
 
         for (const turn of req.history) {
+            const ss = turn.student_response.signal_summary;
+
             lines.push(`--- Turn ${turn.turn_id} ---`);
             lines.push(`Video clip: ${turn.clip.clip_id}`);
             lines.push(`Clip transcript: ${turn.clip.transcript}`);
-            lines.push(`Notable features in clip: ${turn.clip.notable_features.join(", ")}`);
-            lines.push(`Student transcript: ${turn.student_transcript}`);
+            lines.push(`Notable features in clip: ${turn.clip.notable_features.join(", ") || "none"}`);
+
+            // Clip-level coaching context — surfaces scenario author guidance to the LLM.
+            if (turn.clip.ideal_response) {
+                lines.push(`Ideal response for this clip: ${turn.clip.ideal_response}`);
+            }
+            if (turn.clip.response_warnings?.length) {
+                lines.push(`Behaviours to avoid: ${turn.clip.response_warnings.join("; ")}`);
+            }
+            if (turn.clip.clip_learning_objectives?.length) {
+                lines.push(`Competencies tested by this clip: ${turn.clip.clip_learning_objectives.join(", ")}`);
+            }
+
+            lines.push(`Student transcript: ${turn.student_transcript || "(no speech detected)"}`);
             lines.push(`Escalation score: ${turn.student_response.escalation_score.toFixed(3)}`);
             lines.push(`Dominant emotion: ${turn.student_response.dominant_emotion}`);
-            lines.push(`Voice tension: ${turn.student_response.signal_summary.voice_tension.toFixed(2)}`);
-            lines.push(`Speech pace (syl/s): ${turn.student_response.signal_summary.speech_pace.toFixed(2)}`);
-            lines.push(`Gaze stability: ${turn.student_response.signal_summary.gaze_stability.toFixed(2)}`);
-            if (turn.student_response.signal_summary.notable_signals.length > 0) {
-                lines.push(`Notable signals: ${turn.student_response.signal_summary.notable_signals.join(", ")}`);
+            lines.push(`Vocal tension: ${ss.vocal_tension.toFixed(2)}`);
+            lines.push(`Speech pace (syl/s): ${ss.speech_pace.toFixed(2)}`);
+            lines.push(`Head nod frequency (Hz): ${ss.head_nod_frequency.toFixed(2)}`);
+            lines.push(`Facing ratio: ${ss.facing_ratio.toFixed(2)}`);
+            lines.push(`Silence ratio: ${ss.silence_ratio.toFixed(2)}`);
+            lines.push(`Response tone: ${ss.response_tone}`);
+
+            if (ss.lexical_markers.length > 0) {
+                lines.push(`De-escalation markers detected: ${ss.lexical_markers.join(", ")}`);
+            } else {
+                lines.push(`De-escalation markers detected: none`);
             }
+
+            if (ss.open_gesture_ratio !== null) {
+                lines.push(`Open gesture ratio: ${ss.open_gesture_ratio.toFixed(2)}`);
+            }
+
+            if (ss.notable_signals.length > 0) {
+                lines.push(`Notable signals: ${ss.notable_signals.join(", ")}`);
+            }
+
             lines.push("");
         }
 

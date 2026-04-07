@@ -62,6 +62,9 @@ export class SessionHandler {
     private sessionId: string | null = null;
     private transport: TransportInterface | null = null;
 
+    // Whether the session was created with an admin API key.
+    private _isAdmin = false;
+
     // Set to true by disconnect() so subsequent WebSocket close events are ignored.
     private _clean = false;
 
@@ -80,6 +83,7 @@ export class SessionHandler {
 
     get state(): SessionState { return this._state; }
     get currentSessionId(): string | null { return this.sessionId; }
+    get isAdmin(): boolean { return this._isAdmin; }
 
     // ─── Public API ───────────────────────────────────────────────────────────
 
@@ -87,11 +91,18 @@ export class SessionHandler {
      * Create a session and open the WebSocket. If the server is at capacity
      * the handler enters the queued state and waits for session_ready over the
      * WebSocket rather than polling.
+     *
+     * When `adminKey` is provided it is sent as `Authorization: Bearer <key>`
+     * on the POST /session/create request. The resulting session is an admin
+     * session: any clip can be activated, and the server sends `debug_eval`
+     * messages after each `clip_selected`. When empty/undefined the request
+     * is unauthenticated and a normal session is created.
      */
-    async connect(userId = "dev-user", language = "nl"): Promise<void> {
+    async connect(userId = "dev-user", language = "nl", adminKey?: string): Promise<void> {
         if (this._state !== "idle") return;
 
-        this._clean = false;
+        this._clean   = false;
+        this._isAdmin = false;
         this._setState("connecting");
 
         let sessionId: string;
@@ -100,9 +111,12 @@ export class SessionHandler {
         let wsPath: string;
 
         try {
+            const headers: Record<string, string> = { "Content-Type": "application/json" };
+            if (adminKey) headers["Authorization"] = `Bearer ${adminKey}`;
+
             const res = await fetch(`${HTTP_BASE}/session/create`, {
                 method:  "POST",
-                headers: { "Content-Type": "application/json" },
+                headers,
                 body:    JSON.stringify({ user_id: userId, language }),
             });
 
@@ -127,6 +141,9 @@ export class SessionHandler {
             initialState  = body.state;
             wsPath        = body.ws_path;
             queuePosition = body.queue_position;
+
+            // Record admin mode if a key was provided and the session was accepted.
+            if (adminKey) this._isAdmin = true;
         } catch (e) {
             this._setState("error");
             this.callbacks.onError(new Error(`Session create error: ${String(e)}`));
@@ -203,7 +220,8 @@ export class SessionHandler {
      * WebSocket are ignored via the _clean flag.
      */
     disconnect(): void {
-        this._clean = true;
+        this._clean     = true;
+        this._isAdmin   = false;
         this.loopsCancelled = true;
 
         if (this.sessionId) {
@@ -312,6 +330,11 @@ export class SessionHandler {
                     this._lastCandidates = [];
                     this._setState("completed");
                 }
+                break;
+
+            case "debug_eval":
+                // Admin-only message: forwarded to the callback for UI handling.
+                // No state machine changes — it is purely supplementary data.
                 break;
 
             case "session_complete":

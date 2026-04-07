@@ -5,12 +5,44 @@
     "language": "nl",
     "entry_clip": "clip_01_intro",
     "coaching_context": "De student oefent de rol van zorgmedewerker die een verwarde oudere patiënt probeert te kalmeren. De patiënt is angstig en beschuldigend over zijn medicatie. Het doel is de patiënt zich gehoord en veilig te laten voelen en zijn vertrouwen in de zorg te herstellen.",
+    "learning_objectives": [
+        "vertrouwen opbouwen",
+        "emotieregulatie",
+        "empathie tonen",
+        "rustige aanwezigheid bewaren",
+        "actief luisteren"
+    ],
+    "target_audience": "MBO niveau 3-4, zorg en welzijn",
 
     "clips": {
         "clip_01_intro": {
             "file": "clip_01_intro.mp4",
             "transcript": "Waar zijn mijn pillen? Ik heb ze vanmorgen niet gekregen, dat weet ik zeker. Jullie verstoppen ze. Ik zie hoe jullie kijken. Ik ben niet gek, hoor. Zeg me de waarheid — waarom geef je me mijn medicijnen niet?",
+            "clip_duration_seconds": 14.0,
             "notable_features": ["raised_voice", "direct_eye_contact", "aggressive_posture"],
+            "scoring_mode": "rubric",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",          "weight": 1.0 },
+                { "signal": "empathy_phrase",       "weight": 0.9 },
+                { "signal": "measured_pace",        "weight": 0.8 },
+                { "signal": "open_posture",         "weight": 0.6 },
+                { "signal": "appropriate_silence",  "weight": 0.5 }
+            ],
+            "escalation_rubric": [
+                { "signal": "raised_voice",   "weight": 1.0 },
+                { "signal": "fast_speech",    "weight": 0.8 },
+                { "signal": "negative_tone",  "weight": 0.7 },
+                { "signal": "turning_away",   "weight": 0.6 }
+            ],
+            "critical_failures": ["raised_voice"],
+            "score_range": { "min": -0.9, "max": 0.9 },
+            "clip_learning_objectives": ["vertrouwen opbouwen", "empathie tonen"],
+            "ideal_response": "Reageer rustig en direct op de vraag van de patiënt zonder de beschuldiging te ontkennen of te bagatelliseren. Noem de patiënt bij naam, spreek langzaam en op gelijke hoogte. Zeg iets als: 'Ik hoor dat u zich zorgen maakt — dat begrijp ik. Laten we samen kijken wat er is gebeurd.'",
+            "response_warnings": [
+                "zeg niet 'u vergist zich' of 'dat klopt niet' — dit ontregelt een verwarde patiënt verder",
+                "ga de beschuldiging niet rationeel ontkrachten zonder eerst empathie te tonen",
+                "verhef de stem niet, ook niet om boven het lawaai uit te komen"
+            ],
             "branch_conditions": [
                 { "min_score": -1.0, "max_score": 0.2,  "next_clip": "clip_02_enigszins_rustiger" },
                 { "min_score":  0.2, "max_score": 1.01, "next_clip": "clip_02_meer_angstig" }
@@ -20,7 +52,29 @@
         "clip_02_enigszins_rustiger": {
             "file": "clip_02_enigszins_rustiger.mp4",
             "transcript": "U zegt dat ze er zijn... maar ik heb ze niet gezien. Elke dag gaat het zo. Ik weet niet meer wat ik moet geloven. Kunt u het me laten zien? Dan geloof ik u misschien.",
+            "clip_duration_seconds": 12.0,
             "notable_features": ["calm_voice", "crossed_arms", "direct_eye_contact"],
+            "scoring_mode": "rubric",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",          "weight": 0.8 },
+                { "signal": "validation",           "weight": 1.0 },
+                { "signal": "active_listening",    "weight": 0.9 },
+                { "signal": "open_posture",        "weight": 0.6 },
+                { "signal": "appropriate_silence", "weight": 0.5 }
+            ],
+            "escalation_rubric": [
+                { "signal": "fast_speech",   "weight": 0.7 },
+                { "signal": "negative_tone", "weight": 0.8 },
+                { "signal": "no_empathy",    "weight": 0.9 }
+            ],
+            "critical_failures": [],
+            "score_range": { "min": -0.9, "max": 0.8 },
+            "clip_learning_objectives": ["vertrouwen opbouwen", "actief luisteren"],
+            "ideal_response": "Valideer de onzekerheid van de patiënt ('Het is begrijpelijk dat u dat wilt zien') en bied concreet bewijs of een concrete handeling aan. Spreek traag en kalmerend. Toon transparantie door daadwerkelijk iets te laten zien of te doen.",
+            "response_warnings": [
+                "geef geen vage antwoorden — de patiënt heeft behoefte aan concrete bevestiging",
+                "verklaar de situatie niet te gedetailleerd tegelijk, dit kan verwarring vergroten"
+            ],
             "branch_conditions": [
                 { "min_score": -1.0, "max_score": 0.2,  "next_clip": "clip_03_vertrouwen_opgebouwd" },
                 { "min_score":  0.2, "max_score": 1.01, "next_clip": "clip_03_twijfel_blijft" }
@@ -30,7 +84,29 @@
         "clip_02_meer_angstig": {
             "file": "clip_02_meer_angstig.mp4",
             "transcript": "Laat me los! Ik wil hier weg. Roep mijn dochter, ik wil mijn dochter. Jullie mogen me hier niet zo houden. Dit is mijn lichaam!",
+            "clip_duration_seconds": 11.0,
             "notable_features": ["raised_voice", "crying", "aggressive_posture"],
+            "scoring_mode": "threshold",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",         "weight": 1.0 },
+                { "signal": "measured_pace",      "weight": 0.9 },
+                { "signal": "open_posture",       "weight": 0.8 },
+                { "signal": "open_gesture",       "weight": 0.7 }
+            ],
+            "escalation_rubric": [
+                { "signal": "raised_voice",    "weight": 1.0 },
+                { "signal": "fast_speech",     "weight": 0.9 },
+                { "signal": "closed_gesture",  "weight": 0.7 }
+            ],
+            "critical_failures": ["raised_voice"],
+            "score_range": { "min": -0.4, "max": 1.0 },
+            "clip_learning_objectives": ["rustige aanwezigheid bewaren", "emotieregulatie"],
+            "ideal_response": "Blijf absoluut kalm en maak geen plotselinge bewegingen. Spreek zacht en langzaam. Ga in op het concrete verzoek van de patiënt: 'Ik hoor u — we kunnen uw dochter bellen. Laten we even rustig gaan zitten.' Ga niet in discussie over zijn rechten of de situatie.",
+            "response_warnings": [
+                "ga niet in discussie over wat wel of niet mag",
+                "probeer de patiënt niet fysiek te kalmeren met aanraking zonder toestemming",
+                "verhef de stem niet, ook al is de patiënt zeer luid"
+            ],
             "branch_conditions": [
                 { "min_score": -1.0, "max_score": 0.15, "next_clip": "clip_03_twijfel_blijft" },
                 { "min_score":  0.15, "max_score": 1.01, "next_clip": "clip_03_crisis" }
@@ -40,7 +116,20 @@
         "clip_03_vertrouwen_opgebouwd": {
             "file": "clip_03_vertrouwen_opgebouwd.mp4",
             "transcript": "Oh... u heeft ze dus al die tijd bewaard voor me. Excuus, ik wist het even niet meer. Ik schrik soms van mezelf. Dank u wel dat u geduldig bent.",
+            "clip_duration_seconds": 11.0,
             "notable_features": ["calm_voice", "open_posture", "backing_away"],
+            "scoring_mode": "rubric",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",       "weight": 0.8 },
+                { "signal": "positive_tone",    "weight": 0.7 },
+                { "signal": "active_listening", "weight": 0.6 }
+            ],
+            "escalation_rubric": [],
+            "critical_failures": [],
+            "score_range": { "min": -1.0, "max": 0.2 },
+            "clip_learning_objectives": [],
+            "ideal_response": "Ontvang de dankbaarheid van de patiënt warm en oprecht. Bevestig het gevoel van veiligheid en sluit af met een geruststellende opmerking, zoals 'U kunt het altijd vragen als u iets niet zeker weet.'",
+            "response_warnings": [],
             "branch_conditions": [
                 { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
             ]
@@ -49,7 +138,27 @@
         "clip_03_twijfel_blijft": {
             "file": "clip_03_twijfel_blijft.mp4",
             "transcript": "Ik weet het niet... misschien heeft u gelijk. Maar ik voel me zo alleen hier. Niemand vertelt me wat er echt gebeurt. Ik wil gewoon weten wat er met me aan de hand is.",
+            "clip_duration_seconds": 12.0,
             "notable_features": ["crying", "silence", "crossed_arms"],
+            "scoring_mode": "threshold",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",          "weight": 0.9 },
+                { "signal": "empathy_phrase",       "weight": 1.0 },
+                { "signal": "appropriate_silence",  "weight": 0.7 },
+                { "signal": "open_posture",         "weight": 0.6 }
+            ],
+            "escalation_rubric": [
+                { "signal": "fast_speech",   "weight": 0.8 },
+                { "signal": "negative_tone", "weight": 0.9 }
+            ],
+            "critical_failures": ["raised_voice"],
+            "score_range": { "min": -0.4, "max": 1.0 },
+            "clip_learning_objectives": [],
+            "ideal_response": "Zit of sta dicht bij de patiënt en laat de stilte toe. Benoem het gevoel: 'Ik hoor dat u zich erg alleen voelt — dat spijt me.' Beloof geen dingen die buiten jouw bevoegdheid vallen, maar toon echte aanwezigheid.",
+            "response_warnings": [
+                "geef geen loze beloftes over wat er medisch gaat veranderen",
+                "vul de stilte niet te snel — dit is een moment van verdriet, geen probleem om op te lossen"
+            ],
             "branch_conditions": [
                 { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
             ]
@@ -58,7 +167,27 @@
         "clip_03_crisis": {
             "file": "clip_03_crisis.mp4",
             "transcript": "Ik vertrouw u niet meer. Ik vertrouw niemand hier meer. Bel mijn dochter. Nu. Anders ga ik zelf schreeuwen totdat iemand me hoort.",
+            "clip_duration_seconds": 10.0,
             "notable_features": ["raised_voice", "crying", "direct_eye_contact"],
+            "scoring_mode": "threshold",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",    "weight": 1.0 },
+                { "signal": "measured_pace", "weight": 0.9 },
+                { "signal": "open_gesture",  "weight": 0.7 }
+            ],
+            "escalation_rubric": [
+                { "signal": "raised_voice",   "weight": 1.0 },
+                { "signal": "fast_speech",    "weight": 0.8 },
+                { "signal": "closed_gesture", "weight": 0.6 }
+            ],
+            "critical_failures": ["raised_voice"],
+            "score_range": { "min": -0.3, "max": 1.0 },
+            "clip_learning_objectives": [],
+            "ideal_response": "Ga direct in op het verzoek: 'Ik bel uw dochter nu meteen.' Geen discussie, geen uitleg. Benoem de actie die je gaat ondernemen en doe dat kalm en duidelijk. Daarna pas ruimte voor meer woorden.",
+            "response_warnings": [
+                "ga niet onderhandelen of uitleggen voordat het verzoek is gehonoreerd",
+                "reageer niet op de dreiging om te gaan schreeuwen — erken alleen wat je gaat doen"
+            ],
             "branch_conditions": [
                 { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
             ]

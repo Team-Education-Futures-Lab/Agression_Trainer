@@ -50,7 +50,7 @@ bound later via `request_clip` with `activate: true` over the WebSocket.
 }
 ```
 
-> **Admin mode:** pass `Authorization: Bearer <ADMIN_API_KEY>` to create an admin session. Admin sessions bypass clip activation restrictions — any clip can be activated, not just the scenario's entry clip. See `admin_and_tooling_api.md` for details.
+> **Admin mode:** pass `Authorization: Bearer <ADMIN_API_KEY>` to create an admin session. Admin sessions bypass clip activation restrictions — any clip can be activated, not just the scenario's entry clip. Admin sessions also receive `debug_eval` messages after each clip (see [Debug messages](#debug-messages-admin-sessions-only)). See `admin_and_tooling_api.md` for details.
 
 ---
 
@@ -112,7 +112,8 @@ Poll for queue position updates while waiting for a session slot.
 
 Connection must be established after a successful `/session/create` or
 `/session/resume`. The WebSocket is the sole channel for scenario discovery,
-clip negotiation, data streaming, evaluation results, and feedback delivery.
+clip negotiation, data streaming, evaluation results, feedback delivery, and
+(for admin sessions) evaluation debug data.
 
 ### Client → Server messages
 
@@ -192,7 +193,8 @@ at any point during the session, including while a clip is playing.
 
 The client must stop sending `VideoFrame` and `AudioChunk` messages after
 sending this. The App responds immediately with `clip_candidates`, then with
-`clip_selected` once evaluation completes.
+`clip_selected` once evaluation completes. For admin sessions, `debug_eval`
+follows `clip_selected`.
 
 ---
 
@@ -307,6 +309,8 @@ conditions have `next_clip: null` (terminal clip).
 When `clip_id` is null the scenario is complete — the client should wait for
 `FeedbackToken` and `SessionComplete` messages.
 
+For admin sessions, `debug_eval` is sent immediately after `clip_selected`.
+
 **FeedbackToken** — streamed during debrief generation
 ```json
 {
@@ -350,3 +354,130 @@ Error codes:
 | `feedback_unavailable`   | Feedback container unreachable; session is otherwise complete                       |
 | `invalid_frame`          | Malformed `video_frame` or `audio_chunk` message                                    |
 | `session_expired`        | Session recovery window elapsed                                                     |
+
+---
+
+## Debug messages (admin sessions only)
+
+> **Visibility:** `debug_eval` is **never sent to non-admin sessions.** The App container does not request debug data from the Evaluation container for non-admin sessions, and non-admin clients will never receive this message type regardless of any client-side request or configuration. There is no opt-in mechanism for non-admin sessions.
+
+**DebugEval** — sent immediately after `clip_selected`, for admin sessions only
+
+Carries the full evaluation result for the completed clip, together with
+implementation-specific intermediate data from the Evaluation container's
+analysis pipeline and App-level capture statistics.
+
+```json
+{
+    "type": "debug_eval",
+    "session_id": "string",
+    "window_id": "string  // '{session_id}:{clip_sequence}'",
+
+    "capture": {
+        "frame_count": "integer  // VideoFrame messages received for this clip",
+        "audio_chunk_count": "integer  // AudioChunk messages received for this clip",
+        "word_timing_count": "integer  // word timing entries forwarded to Evaluation",
+        "eval_fallback": "boolean  // true if the neutral fallback score was used (Evaluation returned non-2xx or was unreachable)",
+        "eval_latency_ms": "integer  // round-trip time for the POST /evaluate/analyse call, in milliseconds"
+    },
+
+    "transcript": {
+        "final_text": "string  // complete accumulated transcript for the clip",
+        "words": [
+            {
+                "word": "string",
+                "start": "float  // seconds from clip start",
+                "end": "float  // seconds from clip start"
+            }
+        ]
+    },
+
+    "result": {
+        "window_id": "string",
+        "session_id": "string",
+        "escalation_score": "float",
+        "dominant_emotion": "string",
+        "confidence": "float",
+        "signal_summary": {
+            "vocal_tension": "float",
+            "speech_pace": "float",
+            "gesture_activity": "float",
+            "open_gesture_ratio": "float | null",
+            "head_nod_frequency": "float",
+            "facing_ratio": "float",
+            "silence_ratio": "float",
+            "lexical_markers": ["string"],
+            "response_tone": "string",
+            "notable_signals": ["string"]
+        }
+    },
+
+    "analyser_id": "string  // e.g. 'stub' or 'production'; identifies the BehaviourAnalyser implementation",
+    "stages": "object | null  // implementation-specific intermediate data; shape is determined by analyser_id"
+}
+```
+
+### `stages` field
+
+`stages` contains intermediate data from the Evaluation container's analysis
+pipeline. Its shape varies by `analyser_id`. Clients must use `analyser_id` to
+determine how to interpret `stages`. If a client encounters an `analyser_id` it
+does not recognise, it must treat `stages` as an opaque object — it may log or
+display it raw but must not attempt to parse or render it against a known schema.
+New implementation IDs may be introduced in future without a protocol version bump.
+
+The `stages` field may be large. When the production analyser is active it can
+include per-word timing arrays, scored signal sets, and multi-stage floating-point
+outputs. Clients should not assume the field is small or that it can be rendered
+inline without truncation.
+
+#### `stages` for `analyser_id: "stub"`
+
+The stub analyser has no meaningful intermediate stages. It returns a minimal
+object confirming that the debug path itself is functioning.
+
+```json
+{
+    "note": "string  // always 'stub analyser — no intermediate stage data available'"
+}
+```
+
+#### `stages` for `analyser_id: "production"`
+
+Reflects the four-stage pipeline described in `architecture.md`. All four stage
+keys are always present; individual fields within a stage may be absent if that
+stage could not run (e.g. empty MFCC input, no speech detected).
+
+```json
+{
+    "stage_a_audio_emotion": {
+        "audio_emotion_label": "string  // raw label from the audio emotion classifier",
+        "arousal": "float  // 0.0 (low) to 1.0 (high)",
+        "valence": "float  // -1.0 (negative) to 1.0 (positive)",
+        "energy_var_norm": "float  // normalised MFCC energy variance across the clip; input to vocal_tension alongside arousal"
+    },
+    "stage_b_landmark_features": {
+        "hands_detected_ratio": "float  // fraction of frames where at least one hand landmark array was non-empty",
+        "gesture_activity": "float  // variance of wrist and fingertip displacement vectors",
+        "facing_frame_count": "integer  // number of frames where the face was estimated to be forward-facing",
+        "total_frame_count": "integer  // total frames processed in Stage B",
+        "nod_fft_peak_hz": "float  // frequency of the dominant peak in the head Y-coordinate oscillation spectrum"
+    },
+    "stage_c_transcript_features": {
+        "speech_duration_s": "float  // cumulative speech duration derived from word timing boundaries",
+        "silence_duration_s": "float  // clip_duration_seconds minus speech_duration_s",
+        "word_count": "integer",
+        "syllable_count": "integer  // estimated syllable count used for speech_pace",
+        "sentiment_raw_label": "string  // raw label from the sentiment classifier, e.g. 'POSITIVE', 'NEGATIVE', 'NEUTRAL'",
+        "sentiment_raw_score": "float  // classifier confidence for sentiment_raw_label"
+    },
+    "scorer": {
+        "detected_signals": ["string  // signal names from the rubric vocabulary that were detected as active for this clip"],
+        "de_score": "float  // weighted sum of detected de-escalation signals before normalisation",
+        "esc_score": "float  // weighted sum of detected escalation signals before normalisation",
+        "de_weight_total": "float  // sum of all de_escalation_rubric weights for this clip",
+        "esc_weight_total": "float  // sum of all escalation_rubric weights for this clip",
+        "raw_score_pre_clamp": "float  // normalised escalation_score before score_range clamping is applied"
+    }
+}
+```

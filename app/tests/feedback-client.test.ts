@@ -4,11 +4,12 @@ import type { FeedbackRequest, FeedbackToken, SessionComplete } from "@ar-traini
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-const FEEDBACK_URL = "http://feedback:8002";
-const API_KEY      = "test-key";
+const FEEDBACK_URL  = "http://feedback:8002";
+const API_KEY       = "test-key";
+const TIMEOUT_MS    = 30_000;
 
 function makeClient(): FeedbackClient {
-    return new FeedbackClient(FEEDBACK_URL, API_KEY);
+    return new FeedbackClient(FEEDBACK_URL, API_KEY, TIMEOUT_MS);
 }
 
 function makeRequest(): FeedbackRequest {
@@ -153,7 +154,7 @@ describe("FeedbackClient", () => {
                 ]),
             }));
 
-            const sendFn  = vi.fn();
+            const sendFn = vi.fn();
             await makeClient().stream("session-abc", makeRequest(), sendFn);
             const types = sendFn.mock.calls.map((c: [unknown]) => (c[0] as { type: string }).type);
 
@@ -179,7 +180,7 @@ describe("FeedbackClient", () => {
     // ── Failure handling ──────────────────────────────────────────────────────
 
     describe("failure handling", () => {
-        it("returns without calling sendFn when the response is not ok", async () => {
+        it("sends feedback_unavailable error when the response is not ok", async () => {
             vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
                 ok:     false,
                 status: 503,
@@ -188,10 +189,14 @@ describe("FeedbackClient", () => {
 
             const sendFn = vi.fn();
             await makeClient().stream("session-abc", makeRequest(), sendFn);
-            expect(sendFn).not.toHaveBeenCalled();
+            expect(sendFn).toHaveBeenCalledOnce();
+            expect(sendFn.mock.calls[0][0]).toMatchObject({
+                type: "error",
+                code: "feedback_unavailable",
+            });
         });
 
-        it("returns without calling sendFn when the response body is null", async () => {
+        it("sends feedback_unavailable error when the response body is null", async () => {
             vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
                 ok:   true,
                 body: null,
@@ -199,7 +204,11 @@ describe("FeedbackClient", () => {
 
             const sendFn = vi.fn();
             await makeClient().stream("session-abc", makeRequest(), sendFn);
-            expect(sendFn).not.toHaveBeenCalled();
+            expect(sendFn).toHaveBeenCalledOnce();
+            expect(sendFn.mock.calls[0][0]).toMatchObject({
+                type: "error",
+                code: "feedback_unavailable",
+            });
         });
     });
 });

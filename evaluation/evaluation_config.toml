@@ -1,0 +1,203 @@
+# =============================================================================
+# AR Training — Evaluation Container — Tuning Configuration
+#
+# This file controls the pedagogical thresholds and Dutch lexical patterns used
+# by the production BehaviourAnalyser. It is intended for non-technical tuning
+# by pedagogy coordinators and scenario designers. No Python knowledge is needed.
+#
+# Location: evaluation/evaluation_config.toml  (next to .env.example)
+# Override the path with the EVALUATION_CONFIG environment variable.
+#
+# All float thresholds must be in the range [0.0, 1.0] unless a wider range is
+# explicitly noted. The container will refuse to start if any value is
+# out-of-range or missing.
+# =============================================================================
+
+
+# ─── Signal Thresholds ────────────────────────────────────────────────────────
+#
+# These values map the continuous signals computed by the analyser pipeline
+# to the binary "detected / not detected" judgements used by the rubric scorer.
+#
+# Each threshold has a direction note:
+#   ↑ raising the value makes the signal harder to trigger
+#   ↓ lowering the value makes the signal easier to trigger
+#
+[signal_thresholds]
+
+# vocal_tension thresholds
+# ─────────────────────────
+# The analyser computes vocal_tension as a float from 0.0 (fully relaxed) to
+# 1.0 (maximally tense), derived from the audio emotion model's arousal output
+# combined with MFCC energy variance.
+
+# A vocal_tension value AT OR ABOVE this level triggers the "raised_voice"
+# escalation signal. Students whose tension exceeds this are scored negatively.
+# ↑ raise to be more lenient about how loud a student can be before it counts
+# ↓ lower to flag even mildly elevated tension as raised_voice
+raised_voice_tension_threshold = 0.65
+
+# A vocal_tension value AT OR BELOW this level triggers the "calm_voice"
+# de-escalation signal. Students below this are rewarded.
+# ↑ raise to reward a wider range of students with calm_voice (more lenient)
+# ↓ lower to require very calm delivery before calm_voice is credited
+calm_voice_tension_threshold = 0.35
+
+
+# speech_pace thresholds  (unit: syllables per second)
+# ─────────────────────────────────────────────────────
+# Speech pace is estimated from Whisper word timings. A pace of ~3.5–4.5 syl/s
+# is typical conversational Dutch. Fast speakers with anxiety tend toward 5–6.
+
+# A pace AT OR ABOVE this value (syl/s) triggers the "fast_speech" escalation
+# signal. A student speaking faster than this is scored negatively.
+# ↑ raise to tolerate faster speech before penalising (more lenient)
+# ↓ lower to penalise moderately fast speech as well
+fast_speech_pace_threshold = 5.0
+
+# A pace AT OR BELOW this value (syl/s) triggers the "measured_pace"
+# de-escalation signal. Only applied when the student is speaking at all.
+# ↑ raise to credit a wider range of paces as measured_pace
+# ↓ lower to require very slow delivery before measured_pace is credited
+measured_pace_threshold = 3.5
+
+
+# open_gesture_ratio thresholds
+# ──────────────────────────────
+# open_gesture_ratio is the fraction of hand-detected frames in which the
+# student's hand is open (fingers extended). Values range from 0.0 to 1.0.
+# Only computed when hands are visible in at least 50% of frames (see code).
+
+# A ratio AT OR BELOW this value triggers the "closed_gesture" escalation
+# signal. Students whose hands are mostly closed are scored negatively.
+# ↑ raise to penalise only very closed/tense gesture patterns
+# ↓ lower to penalise even a modest proportion of closed gestures
+closed_gesture_threshold = 0.35
+
+# A ratio AT OR ABOVE this value triggers the "open_gesture" de-escalation
+# signal. Students whose hands are mostly open are rewarded.
+# ↑ raise to require a greater proportion of open hands before rewarding
+# ↓ lower to credit partial open-hand behaviour more generously
+open_gesture_threshold = 0.60
+
+
+# head_nod_frequency threshold  (unit: Hz)
+# ─────────────────────────────────────────
+# Head nod frequency is estimated from the Y-oscillation of the nose and
+# forehead face mesh landmarks via FFT. A frequency of 0.5–1.0 Hz corresponds
+# to natural nodding in conversation.
+
+# A nod frequency AT OR ABOVE this value (Hz) triggers the "active_listening"
+# de-escalation signal.
+# ↑ raise to require more vigorous nodding before rewarding active listening
+# ↓ lower to credit even gentle or infrequent nodding
+nod_frequency_threshold = 0.5
+
+
+# facing_ratio thresholds
+# ────────────────────────
+# facing_ratio is the fraction of frames in which the student's face is
+# estimated to be forward-facing, based on the horizontal symmetry of
+# cheekbone/ear-region face mesh landmarks. Values range from 0.0 to 1.0.
+
+# A facing_ratio AT OR BELOW this value triggers the "turning_away" escalation
+# signal.
+# ↑ raise to penalise even modest deviations from direct eye contact
+# ↓ lower to only penalise strongly avoidant posture
+turning_away_threshold = 0.45
+
+# A facing_ratio AT OR ABOVE this value triggers the "open_posture"
+# de-escalation signal.
+# ↑ raise to require very consistent forward-facing posture before rewarding
+# ↓ lower to reward moderate forward engagement
+open_posture_threshold = 0.65
+
+
+# silence_ratio thresholds
+# ─────────────────────────
+# silence_ratio is the fraction of the clip's declared duration during which
+# the student was not speaking. Computed from Whisper word timings.
+# Values range from 0.0 (spoke the whole clip) to 1.0 (complete silence).
+
+# A silence_ratio AT OR ABOVE this value triggers the "long_silence" escalation
+# signal — the student failed to respond meaningfully.
+# ↑ raise to only penalise very prolonged silence
+# ↓ lower to penalise even moderate non-response
+long_silence_threshold = 0.70
+
+# A silence_ratio AT OR ABOVE this value AND at or below appropriate_silence_max
+# triggers the "appropriate_silence" de-escalation signal — the student paused
+# before responding, signalling reflection.
+# ↑ raise to require more silence before counting it as reflective
+# ↓ lower to credit even a brief pause as appropriate silence
+appropriate_silence_min = 0.15
+
+# Upper bound of the "appropriate_silence" range (inclusive).
+# A silence_ratio ABOVE this value is no longer rewarded — it becomes
+# "long_silence" at long_silence_threshold.
+# ↑ raise to allow longer pauses to still be considered appropriate
+# ↓ lower to narrow the rewarded range of reflective pause
+appropriate_silence_max = 0.55
+
+
+# ─── Lexical Markers ──────────────────────────────────────────────────────────
+#
+# Plain Dutch phrases used to detect de-escalation language in the student's
+# transcript. Each phrase is matched case-insensitively using whole-word
+# (word-boundary) matching. You do not need to write regular expressions —
+# type each phrase as plain Dutch text.
+#
+# Three categories are supported. Their names must match the rubric signal
+# vocabulary in docs/scenario_schema.md:
+#
+#   empathy_phrase  — acknowledging or reflecting the other person's experience
+#   open_question   — questions that invite the actor to elaborate
+#   validation      — explicitly affirming the other person's perspective
+#
+# Each category appears at most once in the scored signals, regardless of how
+# many phrases from that category were matched. Adding more phrases broadens
+# the set of student responses that trigger the category; it does not increase
+# the score for that category.
+#
+# To add a phrase: add a new quoted string to the relevant list. Phrases are
+# matched as substrings with word boundaries — partial words do not match.
+# Multi-word phrases (e.g. "ik kan me voorstellen") work correctly.
+#
+[lexical_markers]
+
+# Empathy phrases — the student acknowledges or mirrors the actor's experience.
+empathy_phrases = [
+    "ik begrijp",
+    "dat klinkt",
+    "ik hoor je",
+    "ik hoor u",
+    "ik hoor dat",
+    "dat snap ik",
+    "ik zie dat",
+    "dat moet moeilijk",
+    "ik kan me voorstellen",
+]
+
+# Open questions — the student invites the actor to say more.
+open_question_phrases = [
+    "kun je me",
+    "kunt u me",
+    "wat bedoel",
+    "wat vind",
+    "wat denk",
+    "hoe voelt",
+    "hoe zit",
+    "hoe gaat",
+    "wat is er",
+]
+
+# Validation phrases — the student explicitly affirms the actor's perspective.
+validation_phrases = [
+    "dat is begrijpelijk",
+    "dat is logisch",
+    "dat is eerlijk",
+    "je heeft gelijk",
+    "u heeft gelijk",
+    "je hebt gelijk",
+    "u hebt gelijk",
+]

@@ -38,8 +38,8 @@ match cfg.analyser_impl:
         from stubs.stub_behaviour_analyser import StubBehaviourAnalyser
         return StubBehaviourAnalyser()
     case "production":
-        from models.production_behaviour_analyser import ProductionBehaviourAnalyser
-        return ProductionBehaviourAnalyser()
+        from behaviour_analyser import BehaviourAnalyser
+        return BehaviourAnalyser(cfg)
 ```
 
 **TypeScript container (Feedback):**
@@ -75,15 +75,15 @@ Set `TRANSCRIPTION_POOL=stub` (the default) during development and in CI. The st
 
 ## `StubBehaviourAnalyser`
 
-Returns a deterministic but plausible `BehaviourResult` based on the clip context rather than actual analysis. Allows the branching logic and full session flow to be tested without a trained classifier.
+Returns a deterministic but plausible `BehaviourResult` based on the clip's rubric context, without running any signal extraction or model inference. Allows the branching logic and full session flow to be tested immediately.
 
 ### Behaviour
 
-- If the clip's `notable_features` include `raised_voice`, `aggressive_posture`, or `pointing_gesture`, returns a mildly positive `escalation_score` (0.4) to simulate a student struggling to de-escalate.
-- Otherwise returns a mildly negative score (-0.2) to simulate reasonable de-escalation.
+- Inspects the clip's `escalation_rubric` and `de_escalation_rubric` to determine which side is heavier (by sum of weights). If the escalation side is heavier, returns a mildly positive `escalation_score` (0.4); otherwise returns a mildly negative score (−0.2). Falls back to `notable_features` heuristic (challenging features → 0.4, otherwise −0.2) if both rubrics are empty.
 - `confidence` is always `1.0`.
 - `dominant_emotion` cycles through `["calm", "anxious", "frustrated", "neutral"]` for varied but predictable output.
-- `signal_summary` values are hardcoded to mid-range floats.
+- `signal_summary` values are hardcoded mid-range floats. `open_gesture_ratio` is `0.6`. `lexical_markers` is an empty list. `response_tone` is `"neutral"`. `notable_signals` is `["stub_mode"]`.
+- `escalation_score` is clamped to the clip's `score_range` before returning, so stub scores respect the scenario author's declared range.
 
 ### Implementation
 
@@ -97,7 +97,8 @@ _EMOTIONS             = ["calm", "anxious", "frustrated", "neutral"]
 class StubBehaviourAnalyser(BehaviourAnalyserInterface):
     """
     Stub implementation for development and integration testing.
-    Returns plausible but hardcoded results based on clip context.
+    Returns deterministic results based on clip rubric context.
+    Does not run signal extraction or model inference.
     Do not use in production.
     """
 
@@ -105,10 +106,21 @@ class StubBehaviourAnalyser(BehaviourAnalyserInterface):
         self._counter: int = 0
 
     async def analyse(self, window: AnalysisWindow) -> BehaviourResult:
-        features       = set(window.clip_metadata.notable_features)
-        is_challenging = bool(features & _CHALLENGING_FEATURES)
-        score          = 0.4 if is_challenging else -0.2
-        emotion        = _EMOTIONS[self._counter % len(_EMOTIONS)]
+        meta = window.clip_metadata
+
+        # Determine raw score from rubric weights, fall back to notable_features
+        de_weight  = sum(e.weight for e in meta.de_escalation_rubric)
+        esc_weight = sum(e.weight for e in meta.escalation_rubric)
+        if de_weight == 0 and esc_weight == 0:
+            features    = set(meta.notable_features)
+            raw_score   = 0.4 if features & _CHALLENGING_FEATURES else -0.2
+        else:
+            raw_score   = 0.4 if esc_weight >= de_weight else -0.2
+
+        # Clamp to declared score_range
+        score = max(meta.score_range.min, min(meta.score_range.max, raw_score))
+
+        emotion = _EMOTIONS[self._counter % len(_EMOTIONS)]
         self._counter += 1
 
         return BehaviourResult(
@@ -118,12 +130,16 @@ class StubBehaviourAnalyser(BehaviourAnalyserInterface):
             dominant_emotion = emotion,
             confidence       = 1.0,
             signal_summary   = SignalSummary(
-                voice_tension   = 0.5,
-                speech_pace     = 3.2,
-                hand_velocity   = 0.3,
-                gaze_stability  = 0.7,
-                open_palm_ratio = 0.6,
-                notable_signals = ["stub_mode"],
+                vocal_tension      = 0.5,
+                speech_pace        = 3.2,
+                gesture_activity   = 0.3,
+                open_gesture_ratio = 0.6,
+                head_nod_frequency = 0.4,
+                facing_ratio       = 0.8,
+                silence_ratio      = 0.2,
+                lexical_markers    = [],
+                response_tone      = "neutral",
+                notable_signals    = ["stub_mode"],
             ),
         )
 ```
@@ -212,9 +228,10 @@ If this flow completes without errors, the full inter-container pipeline is work
 
 ## What Stubs Do Not Test
 
-- Accuracy or quality of escalation scoring
+- Signal extraction accuracy — Stages A, B, and C of the evaluation pipeline are fully bypassed by the stub
 - Whisper transcription quality — switch to `TRANSCRIPTION_POOL=production` to test real transcription
+- Rubric scoring logic — the stub returns a fixed score derived from rubric weight sums, not from computed signals
 - Ollama availability or prompt formatting
 - Edge cases in `BranchCondition` evaluation with real score distributions
 
-Human judgment is required to validate model output once real implementations are in place.
+Human judgment is required to validate signal extraction and scoring quality once real implementations are in place.

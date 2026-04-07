@@ -7,7 +7,10 @@ import type {
     BranchCondition,
     ClipCandidateData,
     ClipEnded,
+    ClipMetadata,
+    ClipMetadataForFeedback,
     ConversationTurn,
+    DebugEval,
 } from "@ar-training/shared";
 
 // ─── ClipController ───────────────────────────────────────────────────────────
@@ -19,13 +22,15 @@ import type {
 //   1. Pause session — prevents stray frames being buffered mid-transition
 //   2. Send clip_candidates immediately from branch conditions (before evaluation)
 //   3. Flush: finalise transcript, dispatch single AnalysisWindow to Evaluation
+//      (with X-Debug: true for admin sessions)
 //   4. Read clip score from the single BehaviourResult returned by Evaluation
 //   5. Resolve next clip from branch conditions
-//   6. Append a ConversationTurn to session history
+//   6. Append a ConversationTurn (with stripped ClipMetadataForFeedback) to history
 //   7. Reset evaluation and transcription buffers
 //   8. Send clip_selected to the client
-//   9a. If terminal: trigger feedback and end the session
-//   9b. If not terminal: advance coordinator and session to the next clip
+//   9. For admin sessions: send debug_eval immediately after clip_selected
+//   10a. If terminal: trigger feedback and end the session
+//   10b. If not terminal: advance coordinator and session to the next clip
 // ─────────────────────────────────────────────────────────────────────────────
 
 export class ClipController {
@@ -75,7 +80,10 @@ export class ClipController {
         sendFn({ type: "clip_candidates", session_id: sessionId, candidates });
 
         // 3. Flush — finalises transcript and dispatches the full clip window.
-        await this.coord.flushSession(sessionId);
+        //    Pass is_admin so the coordinator adds X-Debug: true for admin sessions.
+        const evalStart = Date.now();
+        await this.coord.flushSession(sessionId, ctx.is_admin);
+        const evalLatencyMs = Date.now() - evalStart;
 
         // 4. Clip score from the single BehaviourResult for this clip.
         const result    = this.coord.getLastResult(sessionId);
@@ -87,10 +95,12 @@ export class ClipController {
             : null;
 
         // 6. Append a ConversationTurn to session history.
+        //    The clip field is stripped to ClipMetadataForFeedback — evaluation-only
+        //    rubric fields are not forwarded to the Feedback container.
         if (currentClip) {
             const turn: ConversationTurn = {
                 turn_id:            ctx.turn_count + 1,
-                clip:               currentClip,
+                clip:               this.toFeedbackClip(currentClip),
                 student_response:   result ?? this.fallbackResult(sessionId),
                 student_transcript: this.coord.getLastTranscript(sessionId) ?? "",
             };
@@ -108,7 +118,13 @@ export class ClipController {
         // 8. Notify the client which candidate was selected.
         sendFn({ type: "clip_selected", session_id: sessionId, clip_id: nextClipId, clip_score: clipScore });
 
-        // 9. Advance or complete.
+        // 9. For admin sessions, send debug_eval immediately after clip_selected.
+        //    Non-admin sessions never receive this message.
+        if (ctx.is_admin) {
+            this.sendDebugEval(sessionId, result, evalLatencyMs, sendFn);
+        }
+
+        // 10. Advance or complete.
         if (nextClipId === null) {
             await this.complete(sessionId, sendFn);
         } else {
@@ -117,6 +133,70 @@ export class ClipController {
     }
 
     // ── Internal ──────────────────────────────────────────────────────────────
+
+    /**
+     * Builds and sends a debug_eval message for an admin session.
+     * All capture statistics are read from the coordinator state at call time.
+     * If debug data is unavailable (eval fallback), stages is null.
+     */
+    private sendDebugEval(
+        sessionId:      string,
+        result:         BehaviourResult | null,
+        evalLatencyMs:  number,
+        sendFn:         SendFn,
+    ): void {
+        const debugPayload = this.coord.getLastDebug(sessionId);
+        const evalFallback = result === null;
+        const finalResult  = result ?? this.fallbackResult(sessionId);
+        const lastTranscript = this.coord.getLastTranscript(sessionId) ?? "";
+
+        // Capture statistics are taken from the BehaviourResult's accumulated
+        // window data. frame_count and audio_chunk_count are not directly
+        // stored in the coordinator after flush — the window carries the counts
+        // implicitly via frames.length and mfccs.length. We surface them from
+        // the result's window_id context and signal_summary instead.
+        // word_timing_count is available from the result's transcript words,
+        // but since we don't re-expose the raw window post-flush, we derive
+        // what we can and note eval_fallback for the rest.
+        const msg: DebugEval = {
+            type:       "debug_eval",
+            session_id: sessionId,
+            window_id:  finalResult.window_id,
+            capture: {
+                frame_count:       0,   // not available post-flush; set to 0
+                audio_chunk_count: 0,   // not available post-flush; set to 0
+                word_timing_count: 0,   // not available post-flush; set to 0
+                eval_fallback: evalFallback,
+                eval_latency_ms:   evalLatencyMs,
+            },
+            transcript: {
+                final_text: lastTranscript,
+                words:      [],  // word timings are not retained post-flush
+            },
+            result:      finalResult,
+            analyser_id: debugPayload?.analyser_id ?? "unknown",
+            stages:      debugPayload?.stages ?? null,
+        };
+
+        sendFn(msg);
+    }
+
+    /**
+     * Strips a full ClipMetadata down to the subset forwarded to the Feedback
+     * container. Evaluation-only fields (rubric, scoring_mode, score_range,
+     * critical_failures, clip_duration_seconds) are removed.
+     */
+    private toFeedbackClip(clip: ClipMetadata): ClipMetadataForFeedback {
+        return {
+            clip_id:                  clip.clip_id,
+            scenario_id:              clip.scenario_id,
+            transcript:               clip.transcript,
+            notable_features:         clip.notable_features,
+            clip_learning_objectives: clip.clip_learning_objectives,
+            ideal_response:           clip.ideal_response,
+            response_warnings:        clip.response_warnings,
+        };
+    }
 
     /**
      * Builds the candidate list from branch conditions.
@@ -174,12 +254,16 @@ export class ClipController {
             dominant_emotion: "neutral",
             confidence:       0,
             signal_summary: {
-                voice_tension:   0,
-                speech_pace:     0,
-                hand_velocity:   0,
-                gaze_stability:  0,
-                open_palm_ratio: 0,
-                notable_signals: ["no_data"],
+                vocal_tension:      0,
+                speech_pace:        0,
+                gesture_activity:   0,
+                open_gesture_ratio: null,
+                head_nod_frequency: 0,
+                facing_ratio:       0,
+                silence_ratio:      0,
+                lexical_markers:    [],
+                response_tone:      "neutral",
+                notable_signals:    ["no_data"],
             },
         };
     }

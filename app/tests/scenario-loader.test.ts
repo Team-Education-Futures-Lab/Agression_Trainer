@@ -13,34 +13,57 @@ function makeScenarioDir(base: string, scenarioId: string, metadata: object): st
     return dir;
 }
 
+// Minimal valid rubric entry
+const RUBRIC_ENTRY = { signal: "calm_voice", weight: 0.8 };
+
 const VALID_METADATA = {
     scenario_id:  "scenario_01",
     title:        "Frustrated Student",
     description:  "A student confronts the teacher about a failing grade.",
     language:     "nl",
     entry_clip:   "clip_01_intro",
+    coaching_context:   "De student oefent de rol van MBO-docent.",
+    learning_objectives: ["actief luisteren", "emotieregulatie"],
+    target_audience:    "MBO niveau 3-4",
     clips: {
         clip_01_intro: {
-            file:             "clip_01_intro.mp4",
-            transcript:       "Dit is niet eerlijk!",
-            notable_features: ["raised_voice", "aggressive_posture"],
+            file:                  "clip_01_intro.mp4",
+            transcript:            "Dit is niet eerlijk!",
+            clip_duration_seconds: 12.0,
+            notable_features:      ["raised_voice", "aggressive_posture"],
+            scoring_mode:          "rubric",
+            de_escalation_rubric:  [{ signal: "calm_voice", weight: 0.9 }, { signal: "empathy_phrase", weight: 1.0 }],
+            escalation_rubric:     [{ signal: "raised_voice", weight: 1.0 }],
+            critical_failures:     ["raised_voice"],
+            score_range:           { min: -0.9, max: 0.9 },
+            clip_learning_objectives: ["emotieregulatie"],
+            ideal_response:        "Erken de frustratie.",
+            response_warnings:     ["ga niet in de verdediging"],
             branch_conditions: [
                 { min_score: -1.0, max_score:  0.2,  next_clip: "clip_02_calm" },
                 { min_score:  0.2, max_score:  1.01, next_clip: "clip_02_escalated" },
             ],
         },
         clip_02_calm: {
-            file:             "clip_02_calm.mp4",
-            transcript:       "Oké, ik begrijp het nu.",
-            notable_features: ["calm_voice", "open_posture"],
+            file:                  "clip_02_calm.mp4",
+            transcript:            "Oké, ik begrijp het nu.",
+            clip_duration_seconds: 8.0,
+            notable_features:      ["calm_voice", "open_posture"],
+            scoring_mode:          "rubric",
+            de_escalation_rubric:  [RUBRIC_ENTRY],
+            escalation_rubric:     [],
             branch_conditions: [
                 { min_score: -1.0, max_score: 1.01, next_clip: null },
             ],
         },
         clip_02_escalated: {
-            file:             "clip_02_escalated.mp4",
-            transcript:       "U luistert toch niet!",
-            notable_features: ["raised_voice", "pointing_gesture"],
+            file:                  "clip_02_escalated.mp4",
+            transcript:            "U luistert toch niet!",
+            clip_duration_seconds: 7.0,
+            notable_features:      ["raised_voice", "pointing_gesture"],
+            scoring_mode:          "threshold",
+            de_escalation_rubric:  [RUBRIC_ENTRY],
+            escalation_rubric:     [{ signal: "raised_voice", weight: 1.0 }],
             branch_conditions: [
                 { min_score: -1.0, max_score: 1.01, next_clip: null },
             ],
@@ -74,6 +97,38 @@ describe("FileScenarioLoader", () => {
             expect(clip!.video_url).toBe("/scenarios/scenario_01/clip_01_intro.mp4");
             expect(clip!.notable_features).toContain("raised_voice");
             expect(clip!.branch_conditions).toHaveLength(2);
+        });
+
+        it("populates new required clip fields correctly", () => {
+            const dir    = mkdtempSync(join(tmpdir(), "ar-"));
+            makeScenarioDir(dir, "scenario_01", VALID_METADATA);
+            const loader = new FileScenarioLoader(dir);
+            const clip   = loader.getClip("scenario_01", "clip_01_intro")!;
+
+            expect(clip.clip_duration_seconds).toBe(12.0);
+            expect(clip.scoring_mode).toBe("rubric");
+            expect(clip.de_escalation_rubric).toHaveLength(2);
+            expect(clip.de_escalation_rubric[0]).toMatchObject({ signal: "calm_voice", weight: 0.9 });
+            expect(clip.escalation_rubric).toHaveLength(1);
+            expect(clip.escalation_rubric[0]).toMatchObject({ signal: "raised_voice", weight: 1.0 });
+            expect(clip.critical_failures).toContain("raised_voice");
+            expect(clip.score_range).toMatchObject({ min: -0.9, max: 0.9 });
+            expect(clip.clip_learning_objectives).toContain("emotieregulatie");
+            expect(clip.ideal_response).toBe("Erken de frustratie.");
+            expect(clip.response_warnings).toContain("ga niet in de verdediging");
+        });
+
+        it("defaults optional fields when absent", () => {
+            const dir    = mkdtempSync(join(tmpdir(), "ar-"));
+            makeScenarioDir(dir, "scenario_01", VALID_METADATA);
+            const loader = new FileScenarioLoader(dir);
+            const clip   = loader.getClip("scenario_01", "clip_02_calm")!;
+
+            expect(clip.critical_failures).toEqual([]);
+            expect(clip.score_range).toMatchObject({ min: -1.0, max: 1.0 });
+            expect(clip.clip_learning_objectives).toEqual([]);
+            expect(clip.ideal_response).toBeNull();
+            expect(clip.response_warnings).toEqual([]);
         });
 
         it("loads multiple scenarios from subdirectories", () => {
@@ -148,6 +203,43 @@ describe("FileScenarioLoader", () => {
             const loader = new FileScenarioLoader(dir);
             expect(loader.getClipVideoUrl("scenario_01", "clip_99")).toBeNull();
         });
+
+        it("getCoachingContext returns the coaching context string", () => {
+            const dir    = mkdtempSync(join(tmpdir(), "ar-"));
+            makeScenarioDir(dir, "scenario_01", VALID_METADATA);
+            const loader = new FileScenarioLoader(dir);
+            expect(loader.getCoachingContext("scenario_01")).toBe("De student oefent de rol van MBO-docent.");
+        });
+
+        it("getLearningObjectives returns the array when present", () => {
+            const dir    = mkdtempSync(join(tmpdir(), "ar-"));
+            makeScenarioDir(dir, "scenario_01", VALID_METADATA);
+            const loader = new FileScenarioLoader(dir);
+            expect(loader.getLearningObjectives("scenario_01")).toEqual(["actief luisteren", "emotieregulatie"]);
+        });
+
+        it("getLearningObjectives returns null when absent", () => {
+            const dir  = mkdtempSync(join(tmpdir(), "ar-"));
+            const meta = { ...VALID_METADATA, learning_objectives: undefined };
+            makeScenarioDir(dir, "scenario_01", meta);
+            const loader = new FileScenarioLoader(dir);
+            expect(loader.getLearningObjectives("scenario_01")).toBeNull();
+        });
+
+        it("getTargetAudience returns the string when present", () => {
+            const dir    = mkdtempSync(join(tmpdir(), "ar-"));
+            makeScenarioDir(dir, "scenario_01", VALID_METADATA);
+            const loader = new FileScenarioLoader(dir);
+            expect(loader.getTargetAudience("scenario_01")).toBe("MBO niveau 3-4");
+        });
+
+        it("getTargetAudience returns null when absent", () => {
+            const dir  = mkdtempSync(join(tmpdir(), "ar-"));
+            const meta = { ...VALID_METADATA, target_audience: undefined };
+            makeScenarioDir(dir, "scenario_01", meta);
+            const loader = new FileScenarioLoader(dir);
+            expect(loader.getTargetAudience("scenario_01")).toBeNull();
+        });
     });
 
     // ── Validation errors ─────────────────────────────────────────────────────
@@ -216,6 +308,32 @@ describe("FileScenarioLoader", () => {
             const meta = { ...VALID_METADATA, entry_clip: "clip_99_missing" };
             makeScenarioDir(dir, "scenario_01", meta);
             expect(() => new FileScenarioLoader(dir)).toThrow(/entry_clip/);
+        });
+
+        it("throws when clip_duration_seconds is missing", () => {
+            const dir  = mkdtempSync(join(tmpdir(), "ar-"));
+            const meta = {
+                ...VALID_METADATA,
+                clips: {
+                    ...VALID_METADATA.clips,
+                    clip_01_intro: { ...VALID_METADATA.clips.clip_01_intro, clip_duration_seconds: undefined },
+                },
+            };
+            makeScenarioDir(dir, "scenario_01", meta);
+            expect(() => new FileScenarioLoader(dir)).toThrow(/clip_duration_seconds/);
+        });
+
+        it("throws when scoring_mode is missing or invalid", () => {
+            const dir  = mkdtempSync(join(tmpdir(), "ar-"));
+            const meta = {
+                ...VALID_METADATA,
+                clips: {
+                    ...VALID_METADATA.clips,
+                    clip_01_intro: { ...VALID_METADATA.clips.clip_01_intro, scoring_mode: "invalid" },
+                },
+            };
+            makeScenarioDir(dir, "scenario_01", meta);
+            expect(() => new FileScenarioLoader(dir)).toThrow(/scoring_mode/);
         });
 
         it("throws when a clip has no branch_conditions", () => {

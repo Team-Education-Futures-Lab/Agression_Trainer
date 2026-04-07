@@ -1,6 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
-import type { FeedbackRequest, Feedback, BehaviourResult, ConversationTurn, ClipMetadata } from "@ar-training/shared";
+import type {
+    FeedbackRequest,
+    Feedback,
+    BehaviourResult,
+    ConversationTurn,
+    ClipMetadataForFeedback,
+} from "@ar-training/shared";
 import type { FeedbackGeneratorInterface } from "../src/interfaces.js";
 
 // ─── Minimal test server factory ─────────────────────────────────────────────
@@ -61,14 +67,15 @@ function buildApp(generator: FeedbackGeneratorInterface): FastifyInstance {
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
-function makeClip(clipId: string): ClipMetadata {
+function makeClip(clipId: string): ClipMetadataForFeedback {
     return {
-        clip_id:          clipId,
-        scenario_id:      "scenario_01",
-        video_url:        `/scenarios/scenario_01/${clipId}.mp4`,
-        transcript:       "Test transcript",
-        notable_features: ["raised_voice"],
-        branch_conditions: [{ min_score: -1.0, max_score: 1.01, next_clip: null }],
+        clip_id:                  clipId,
+        scenario_id:              "scenario_01",
+        transcript:               "Test clip transcript",
+        notable_features:         ["raised_voice"],
+        clip_learning_objectives: ["emotieregulatie"],
+        ideal_response:           "Blijf kalm en stel een open vraag.",
+        response_warnings:        ["ga niet in de verdediging"],
     };
 }
 
@@ -80,12 +87,16 @@ function makeResult(sessionId: string): BehaviourResult {
         dominant_emotion: "calm",
         confidence:       1.0,
         signal_summary: {
-            voice_tension:   0.4,
-            speech_pace:     3.0,
-            hand_velocity:   0.2,
-            gaze_stability:  0.8,
-            open_palm_ratio: 0.5,
-            notable_signals: [],
+            vocal_tension:      0.4,
+            speech_pace:        3.0,
+            gesture_activity:   0.2,
+            open_gesture_ratio: 0.6,
+            head_nod_frequency: 0.3,
+            facing_ratio:       0.8,
+            silence_ratio:      0.15,
+            lexical_markers:    ["ik begrijp"],
+            response_tone:      "neutral",
+            notable_signals:    [],
         },
     };
 }
@@ -101,10 +112,13 @@ function makeTurn(sessionId: string, turnId: number): ConversationTurn {
 
 function makeRequest(sessionId: string): FeedbackRequest {
     return {
-        session_id:  sessionId,
-        scenario_id: "scenario_01",
-        language:    "nl",
-        history:     [makeTurn(sessionId, 1), makeTurn(sessionId, 2)],
+        session_id:          sessionId,
+        scenario_id:         "scenario_01",
+        language:            "nl",
+        history:             [makeTurn(sessionId, 1), makeTurn(sessionId, 2)],
+        coaching_context:    "De student oefent de rol van MBO-docent.",
+        learning_objectives: ["actief luisteren", "emotieregulatie"],
+        target_audience:     "MBO niveau 3-4",
     };
 }
 
@@ -167,8 +181,8 @@ describe("Feedback routes", () => {
     describe("POST /feedback/generate", () => {
         it("returns 401 when Authorization header is absent", async () => {
             const res = await app.inject({
-                method: "POST",
-                url:    "/feedback/generate",
+                method:  "POST",
+                url:     "/feedback/generate",
                 payload: makeRequest("sess-auth-1"),
             });
             expect(res.statusCode).toBe(401);
@@ -206,6 +220,32 @@ describe("Feedback routes", () => {
             expect(typeof body.advice).toBe("string");
             expect(["low", "medium", "high"]).toContain(body.severity);
             expect(Array.isArray(body.highlights)).toBe(true);
+        });
+
+        it("request with optional fields (learning_objectives, target_audience) is accepted", async () => {
+            const res = await app.inject({
+                method:  "POST",
+                url:     "/feedback/generate",
+                headers: { Authorization: `Bearer ${TEST_KEY}` },
+                payload: makeRequest("sess-gen-3"),
+            });
+            expect(res.statusCode).toBe(200);
+        });
+
+        it("request without optional fields is also accepted", async () => {
+            const minimal: FeedbackRequest = {
+                session_id:  "sess-gen-4",
+                scenario_id: "scenario_01",
+                language:    "nl",
+                history:     [],
+            };
+            const res = await app.inject({
+                method:  "POST",
+                url:     "/feedback/generate",
+                headers: { Authorization: `Bearer ${TEST_KEY}` },
+                payload: minimal,
+            });
+            expect(res.statusCode).toBe(200);
         });
     });
 
@@ -250,13 +290,12 @@ describe("Feedback routes", () => {
                 payload: makeRequest("sess-stream-2"),
             });
 
-            const body = res.body;
-            const lines = body.split("\n").filter((l: string) => l.startsWith("data:"));
+            const lines = res.body.split("\n").filter((l: string) => l.startsWith("data:"));
             const events = lines.map((l: string) =>
                 JSON.parse(l.replace(/^data: /, "")) as { type: string; token?: string; feedback?: Feedback }
             );
 
-            const tokenEvents = events.filter(e => e.type === "token");
+            const tokenEvents    = events.filter(e => e.type === "token");
             const completeEvents = events.filter(e => e.type === "complete");
 
             expect(tokenEvents.length).toBeGreaterThan(0);

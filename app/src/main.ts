@@ -364,6 +364,8 @@ app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
                 // because setScenario and setCoachingContext guard on scenario_id !== null).
                 sessions.setScenario(session_id, scenarioId);
                 sessions.setCoachingContext(session_id, scenarios.getCoachingContext(scenarioId));
+                sessions.setLearningObjectives(session_id, scenarios.getLearningObjectives(scenarioId));
+                sessions.setTargetAudience(session_id, scenarios.getTargetAudience(scenarioId));
                 sessions.setCurrentClip(session_id, clipId);
 
                 // Register with coordinator and transition to ACTIVE.

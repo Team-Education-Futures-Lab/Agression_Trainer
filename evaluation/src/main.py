@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 
 import uvicorn
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Header
 from pydantic import BaseModel, ConfigDict
 
 from auth import make_verify_token
@@ -25,7 +25,10 @@ from interfaces import (
     ClipMetadata,
     HealthStatus,
     Landmark,
+    RubricEntry,
+    ScoreRange,
     VideoFrame,
+    WordTiming,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -40,8 +43,8 @@ def _make_analyser(cfg: EvaluationConfig) -> BehaviourAnalyserInterface:
             from stubs.stub_behaviour_analyser import StubBehaviourAnalyser
             return StubBehaviourAnalyser()
         case "production":
-            from models.production_behaviour_analyser import ProductionBehaviourAnalyser
-            return ProductionBehaviourAnalyser()
+            from behaviour_analyser import BehaviourAnalyser
+            return BehaviourAnalyser(cfg)
         case other:
             raise ValueError(f"Unknown BEHAVIOUR_ANALYSER value: {other!r}")
 
@@ -66,18 +69,42 @@ class BranchConditionModel(BaseModel):
     next_clip: str | None
 
 
+class RubricEntryModel(BaseModel):
+    signal: str
+    weight: float
+
+
+class WordTimingModel(BaseModel):
+    word:  str
+    start: float
+    end:   float
+
+
+class ScoreRangeModel(BaseModel):
+    min: float = -1.0
+    max: float =  1.0
+
+
 class ClipMetadataModel(BaseModel):
     # Extra fields sent by the App container (e.g. video_url) are accepted but
     # ignored — the Evaluation container only needs the fields listed here.
-    # model_config is set explicitly so the intent is clear rather than relying
-    # on Pydantic v2's default behaviour of silently ignoring extras.
     model_config = ConfigDict(extra="ignore")
 
-    clip_id:           str
-    scenario_id:       str
-    transcript:        str
-    notable_features:  list[str]
-    branch_conditions: list[BranchConditionModel]
+    clip_id:               str
+    scenario_id:           str
+    transcript:            str
+    clip_duration_seconds: float
+    notable_features:      list[str]
+    scoring_mode:          str
+    de_escalation_rubric:  list[RubricEntryModel]
+    escalation_rubric:     list[RubricEntryModel]
+    critical_failures:     list[str]                = []
+    score_range:           ScoreRangeModel          = ScoreRangeModel()
+    branch_conditions:     list[BranchConditionModel]
+    # Feedback-only fields — accepted and forwarded but not used by the scorer
+    clip_learning_objectives: list[str]  = []
+    ideal_response:           str | None = None
+    response_warnings:        list[str]  = []
 
 
 class VideoFrameModel(BaseModel):
@@ -95,6 +122,7 @@ class AnalysisWindowModel(BaseModel):
     frames:        list[VideoFrameModel]
     mfccs:         list[list[float]]
     transcript:    str
+    words:         list[WordTimingModel] = []
     clip_metadata: ClipMetadataModel
 
 
@@ -117,11 +145,17 @@ def _to_video_frame(m: VideoFrameModel) -> VideoFrame:
 
 def _to_clip_metadata(m: ClipMetadataModel) -> ClipMetadata:
     return ClipMetadata(
-        clip_id           = m.clip_id,
-        scenario_id       = m.scenario_id,
-        transcript        = m.transcript,
-        notable_features  = m.notable_features,
-        branch_conditions = [
+        clip_id               = m.clip_id,
+        scenario_id           = m.scenario_id,
+        transcript            = m.transcript,
+        clip_duration_seconds = m.clip_duration_seconds,
+        notable_features      = m.notable_features,
+        scoring_mode          = m.scoring_mode,
+        de_escalation_rubric  = [RubricEntry(signal=e.signal, weight=e.weight) for e in m.de_escalation_rubric],
+        escalation_rubric     = [RubricEntry(signal=e.signal, weight=e.weight) for e in m.escalation_rubric],
+        critical_failures     = m.critical_failures,
+        score_range           = ScoreRange(min=m.score_range.min, max=m.score_range.max),
+        branch_conditions     = [
             BranchCondition(
                 min_score = bc.min_score,
                 max_score = bc.max_score,
@@ -129,6 +163,9 @@ def _to_clip_metadata(m: ClipMetadataModel) -> ClipMetadata:
             )
             for bc in m.branch_conditions
         ],
+        clip_learning_objectives = m.clip_learning_objectives,
+        ideal_response           = m.ideal_response,
+        response_warnings        = m.response_warnings,
     )
 
 
@@ -139,6 +176,7 @@ def _to_analysis_window(m: AnalysisWindowModel) -> AnalysisWindow:
         frames        = [_to_video_frame(f) for f in m.frames],
         mfccs         = m.mfccs,
         transcript    = m.transcript,
+        words         = [WordTiming(word=w.word, start=w.start, end=w.end) for w in m.words],
         clip_metadata = _to_clip_metadata(m.clip_metadata),
     )
 
@@ -168,14 +206,31 @@ def create_app() -> FastAPI:
         "/evaluate/analyse",
         dependencies=[Depends(verify_token)],
     )
-    async def analyse(body: AnalysisWindowModel):
+    async def analyse(
+        body: AnalysisWindowModel,
+        x_debug: str | None = Header(default=None, alias="X-Debug"),
+    ):
         """
         Analyse a complete clip window and return a BehaviourResult.
         Called exactly once per clip by the App container.
+
+        When the request carries X-Debug: true (admin sessions only), the
+        response includes an additional top-level `debug` field with
+        analyser_id and implementation-specific stage intermediates.
         """
-        window = _to_analysis_window(body)
-        result = await analyser.analyse(window)
-        return asdict(result)
+        collect_debug = x_debug is not None and x_debug.lower() == "true"
+        window        = _to_analysis_window(body)
+        result, stages = await analyser.analyse(window, collect_debug=collect_debug)
+
+        response = asdict(result)
+
+        if collect_debug:
+            response["debug"] = {
+                "analyser_id": analyser.analyser_id,
+                "stages":      stages,
+            }
+
+        return response
 
     # ── POST /evaluate/reset/{session_id} ─────────────────────────────────────
 
@@ -198,6 +253,34 @@ def create_app() -> FastAPI:
         """Report analyser implementation and inference device."""
         status = HealthStatus(status="ok", device=cfg.device)
         return asdict(status)
+
+    # ── GET /evaluate/debug/config ────────────────────────────────────────────
+
+    @app.get(
+        "/evaluate/debug/config",
+        dependencies=[Depends(verify_token)],
+    )
+    async def debug_config():
+        """
+        Return the active threshold configuration and lexical phrase lists.
+        Only available on the production analyser — the stub has no config.
+
+        Protected by INTERNAL_API_KEY. Useful for verifying that a deployed
+        container is running with the expected configuration without reading
+        the filesystem. In a multi-instance deployment, query each instance
+        separately to confirm all instances are running identical config.
+        """
+        from behaviour_analyser import BehaviourAnalyser
+        if not isinstance(analyser, BehaviourAnalyser):
+            return {
+                "analyser_id": analyser.analyser_id,
+                "note":        "debug/config is only available for the production analyser",
+            }
+        return {
+            "analyser_id": analyser.analyser_id,
+            "device":      cfg.device,
+            **analyser.debug_config(),
+        }
 
     return app
 

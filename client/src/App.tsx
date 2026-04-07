@@ -5,14 +5,15 @@
 //   Left  — camera feed, landmark overlay, MFCC spectrogram, capture controls,
 //            session controls, clip control panel
 //   Right — scrollable data panels (transcript, clip_data, candidates,
-//            clip_selected, scenarios, feedback stream, error log, session history)
+//            clip_selected, scenarios, feedback stream, error log, session history,
+//            eval debug)
 // =============================================================================
 
 import { useEffect, useRef, useState } from "react";
 import type { ServerMessage, ClipData } from "@ar-training/shared";
 import { useCapture }      from "./hooks/useCapture.ts";
 import { useSession }      from "./hooks/useSession.ts";
-import type { SessionHistoryEntry } from "./hooks/useSession.ts";
+import type { SessionHistoryEntry, DebugEvalPayload } from "./hooks/useSession.ts";
 import { LandmarkOverlay } from "./components/LandmarkOverlay.tsx";
 import { MfccSpectrogram } from "./components/MfccSpectrogram.tsx";
 
@@ -26,7 +27,7 @@ export function App() {
         state, lastMessage,
         sessionId, transcript, queuePos, clipScore,
         scenarios, clipCandidates, currentClipData, feedbackUnavailable,
-        sessionHistory,
+        sessionHistory, isAdmin,
         connect, disconnect, selectScenario, preloadClip, sendClipEnded,
     } = useSession(capture);
 
@@ -87,6 +88,7 @@ export function App() {
     // ── Connect inputs ────────────────────────────────────────────────────────
     const [userIdInput,   setUserIdInput]   = useState("dev-user");
     const [languageInput, setLanguageInput] = useState("nl");
+    const [adminKeyInput, setAdminKeyInput] = useState("");
 
     // ── Per-type message snapshots ────────────────────────────────────────────
     const [lastScenariosMsg,    setLastScenariosMsg]    = useState<ScenariosListMsg | null>(null);
@@ -148,6 +150,15 @@ export function App() {
             setFeedbackTokens("");
     }, [lastMessage]);
 
+    // ── Eval debug panel — selected turn ──────────────────────────────────────
+    const [debugTurnIndex, setDebugTurnIndex] = useState<number | null>(null);
+
+    // Auto-select the most recent turn that has debugEval data.
+    useEffect(() => {
+        const lastIdx = [...sessionHistory].reverse().findIndex(e => e.debugEval !== undefined);
+        if (lastIdx !== -1) setDebugTurnIndex(sessionHistory.length - 1 - lastIdx);
+    }, [sessionHistory]);
+
     // ── Collapsible panel state ───────────────────────────────────────────────
     const [openPanels, setOpenPanels] = useState<Record<string, boolean>>({
         transcript:    true,
@@ -158,6 +169,7 @@ export function App() {
         feedback:      true,
         errors:        true,
         history:       true,
+        eval_debug:    true,
     });
     const togglePanel = (key: string) =>
         setOpenPanels(p => ({ ...p, [key]: !p[key] }));
@@ -177,6 +189,7 @@ export function App() {
                 <span style={st.appTitle}>AR Training — Debug Harness</span>
                 <div style={st.statusItems}>
                     <StatusBadge state={state} />
+                    {isAdmin && <span style={st.adminBadge}>ADMIN</span>}
                     <Kv k="Session" v={sessionId ?? "—"} />
                     <Kv k="Queue"   v={queuePos !== null ? String(queuePos) : "—"} />
                     <Kv k="Score"   v={clipScore !== null ? clipScore.toFixed(3) : "—"} />
@@ -238,19 +251,33 @@ export function App() {
                     <div style={st.controlGroup}>
                         <SectionLabel>Session</SectionLabel>
                         {state === "idle"
-                            ? <div style={st.row}>
-                                <input style={{ ...st.input, width: "100px" }} placeholder="user_id"
-                                       value={userIdInput} onChange={e => setUserIdInput(e.target.value)} />
-                                <input style={{ ...st.input, width: "50px" }} placeholder="lang"
-                                       value={languageInput} onChange={e => setLanguageInput(e.target.value)} />
-                                <button style={st.btn} disabled={!capturing}
-                                        onClick={() => void connect(
-                                            userIdInput.trim() || undefined,
-                                            languageInput.trim() || undefined,
-                                        )}>
-                                    Connect
-                                </button>
-                            </div>
+                            ? <>
+                                <div style={st.row}>
+                                    <input style={{ ...st.input, width: "100px" }} placeholder="user_id"
+                                           value={userIdInput} onChange={e => setUserIdInput(e.target.value)} />
+                                    <input style={{ ...st.input, width: "50px" }} placeholder="lang"
+                                           value={languageInput} onChange={e => setLanguageInput(e.target.value)} />
+                                    <button style={st.btn} disabled={!capturing}
+                                            onClick={() => void connect(
+                                                userIdInput.trim() || undefined,
+                                                languageInput.trim() || undefined,
+                                                adminKeyInput.trim() || undefined,
+                                            )}>
+                                        Connect
+                                    </button>
+                                </div>
+                                <div style={{ ...st.row, marginTop: "4px" }}>
+                                    <input
+                                        style={{ ...st.input, width: "220px", ...st.adminKeyInput }}
+                                        placeholder="Admin key (optional)"
+                                        value={adminKeyInput}
+                                        onChange={e => setAdminKeyInput(e.target.value)}
+                                    />
+                                    {adminKeyInput && (
+                                        <span style={st.adminKeyHint}>admin session</span>
+                                    )}
+                                </div>
+                            </>
                             : <div style={st.row}>
                                 <button style={{ ...st.btn, ...st.btnDanger }} onClick={disconnect}>
                                     Disconnect
@@ -439,9 +466,257 @@ export function App() {
                             : <em style={st.empty}>no turns yet</em>}
                     </CollapsiblePanel>
 
+                    {/* Eval debug panel — admin sessions only */}
+                    <CollapsiblePanel
+                        label={`Eval debug${isAdmin ? "" : " (admin only)"}`}
+                        panelKey="eval_debug"
+                        open={openPanels["eval_debug"] ?? true}
+                        onToggle={togglePanel}
+                    >
+                        <EvalDebugPanel
+                            history={sessionHistory}
+                            selectedIndex={debugTurnIndex}
+                            onSelectIndex={setDebugTurnIndex}
+                        />
+                    </CollapsiblePanel>
+
                 </div>
             </div>
         </div>
+    );
+}
+
+// ─── EvalDebugPanel ───────────────────────────────────────────────────────────
+
+interface EvalDebugPanelProps {
+    history:       SessionHistoryEntry[];
+    selectedIndex: number | null;
+    onSelectIndex: (i: number) => void;
+}
+
+function EvalDebugPanel({ history, selectedIndex, onSelectIndex }: EvalDebugPanelProps) {
+    const turnsWithDebug = history.filter(e => e.debugEval !== undefined);
+
+    if (turnsWithDebug.length === 0) {
+        return <em style={st.empty}>no debug data — connect with an admin key to receive eval debug messages</em>;
+    }
+
+    const selected = selectedIndex !== null ? history[selectedIndex] : null;
+    const payload  = selected?.debugEval ?? null;
+
+    return (
+        <div>
+            {/* Turn selector */}
+            <div style={ed.turnRow}>
+                {history.map((e, i) => (
+                    e.debugEval !== undefined
+                        ? <button
+                            key={e.turn}
+                            style={{ ...ed.turnBtn, ...(i === selectedIndex ? ed.turnBtnActive : {}) }}
+                            onClick={() => onSelectIndex(i)}
+                        >
+                            #{e.turn}
+                        </button>
+                        : null
+                ))}
+            </div>
+
+            {payload === null
+                ? <em style={st.empty}>select a turn above</em>
+                : <EvalDebugPayloadView payload={payload} />
+            }
+        </div>
+    );
+}
+
+function EvalDebugPayloadView({ payload }: { payload: DebugEvalPayload }) {
+    const { result, analyser_id, stages, app_meta, transcript } = payload;
+    const { signal_summary: ss } = result;
+
+    const score = result.escalation_score;
+    const pct   = ((score + 1) / 2) * 100;
+    const scoreColor = score < -0.2 ? "#27ae60" : score > 0.2 ? "#e74c3c" : "#e6a817";
+
+    return (
+        <div style={ed.payloadRoot}>
+
+            {/* ── Scores & classification ───────────────────────────────────── */}
+            <div style={ed.section}>
+                <div style={ed.sectionTitle}>Scores &amp; classification</div>
+                <div style={ed.kvGrid}>
+                    <span style={ed.kvKey}>escalation_score</span>
+                    <span>
+                        <span style={{ ...ed.kvVal, color: scoreColor, fontWeight: "bold" }}>
+                            {score.toFixed(4)}
+                        </span>
+                        <div style={{ ...cs.barTrack, marginTop: "4px", width: "140px" }}>
+                            <div style={cs.barMid} />
+                            <div style={{ ...cs.barFill, width: `${pct}%`, background: scoreColor }} />
+                        </div>
+                    </span>
+
+                    <span style={ed.kvKey}>dominant_emotion</span>
+                    <span style={ed.kvVal}>{result.dominant_emotion}</span>
+
+                    <span style={ed.kvKey}>confidence</span>
+                    <span style={ed.kvVal}>{(result.confidence * 100).toFixed(1)}%</span>
+
+                    <span style={ed.kvKey}>analyser_id</span>
+                    <span style={{ ...ed.kvVal, ...ed.monoTag }}>{analyser_id}</span>
+                </div>
+            </div>
+
+            {/* ── Signal summary ────────────────────────────────────────────── */}
+            <div style={ed.section}>
+                <div style={ed.sectionTitle}>Signal summary</div>
+                <table style={ed.table}>
+                    <tbody>
+                    <SignalRow k="vocal_tension"      v={ss.vocal_tension.toFixed(3)} />
+                    <SignalRow k="speech_pace"        v={`${ss.speech_pace.toFixed(2)} syl/s`} />
+                    <SignalRow k="gesture_activity"   v={ss.gesture_activity.toFixed(3)} />
+                    <SignalRow k="open_gesture_ratio" v={ss.open_gesture_ratio !== null ? ss.open_gesture_ratio.toFixed(3) : "null"} />
+                    <SignalRow k="head_nod_frequency" v={`${ss.head_nod_frequency.toFixed(3)} Hz`} />
+                    <SignalRow k="facing_ratio"       v={ss.facing_ratio.toFixed(3)} />
+                    <SignalRow k="silence_ratio"      v={ss.silence_ratio.toFixed(3)} />
+                    <SignalRow k="response_tone"      v={ss.response_tone} />
+                    <tr>
+                        <td style={ed.tdKey}>lexical_markers</td>
+                        <td style={ed.tdVal}>
+                            {ss.lexical_markers.length > 0
+                                ? <div style={ed.pillRow}>
+                                    {ss.lexical_markers.map((m, i) =>
+                                        <span key={i} style={ed.pill}>{m}</span>
+                                    )}
+                                </div>
+                                : <span style={{ color: "#555" }}>(none)</span>
+                            }
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style={ed.tdKey}>notable_signals</td>
+                        <td style={ed.tdVal}>
+                            {ss.notable_signals.length > 0
+                                ? <div style={ed.pillRow}>
+                                    {ss.notable_signals.map((s, i) => {
+                                        const isCrit = s.startsWith("critical_failure:");
+                                        return (
+                                            <span key={i} style={{ ...ed.pill, ...(isCrit ? ed.pillWarn : {}) }}>
+                                                    {s}
+                                                </span>
+                                        );
+                                    })}
+                                </div>
+                                : <span style={{ color: "#555" }}>(none)</span>
+                            }
+                        </td>
+                    </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            {/* ── App metadata ─────────────────────────────────────────────── */}
+            <div style={ed.section}>
+                <div style={ed.sectionTitle}>App metadata</div>
+                <div style={ed.metaRow}>
+                    <MetaCell label="frames"  value={String(app_meta.frame_count)} />
+                    <MetaCell label="chunks"  value={String(app_meta.chunk_count)} />
+                    <MetaCell label="words"   value={String(app_meta.word_count)} />
+                    <MetaCell label="latency" value={`${app_meta.eval_latency_ms} ms`} />
+                    {app_meta.eval_fallback && (
+                        <span style={ed.fallbackBadge}>FALLBACK</span>
+                    )}
+                </div>
+                {transcript.final_text && (
+                    <div style={ed.transcriptBlock}>
+                        <span style={ed.transcriptLabel}>final transcript</span>
+                        <span style={ed.transcriptText}>{transcript.final_text}</span>
+                    </div>
+                )}
+            </div>
+
+            {/* ── Stage intermediates ───────────────────────────────────────── */}
+            {stages !== null && (
+                <div style={ed.section}>
+                    <div style={ed.sectionTitle}>Stage intermediates</div>
+                    <StageIntermediates analyser_id={analyser_id} stages={stages} />
+                </div>
+            )}
+        </div>
+    );
+}
+
+// ─── Stage intermediate renderers ────────────────────────────────────────────
+
+interface ProductionStages {
+    stage_a: Record<string, unknown>;
+    stage_b: Record<string, unknown>;
+    stage_c: Record<string, unknown>;
+    scorer:  Record<string, unknown>;
+}
+
+function StageIntermediates({ analyser_id, stages }: { analyser_id: string; stages: Record<string, unknown> }) {
+    if (analyser_id === "stub") {
+        return <span style={{ ...ed.kvVal, color: "#555", fontStyle: "italic" }}>stub mode — no stage data</span>;
+    }
+
+    if (analyser_id === "production") {
+        const s = stages as unknown as ProductionStages;
+        return (
+            <div>
+                {(["stage_a", "stage_b", "stage_c", "scorer"] as const).map(k => {
+                    const label: Record<string, string> = {
+                        stage_a: "Stage A — Audio Emotion",
+                        stage_b: "Stage B — Landmark Features",
+                        stage_c: "Stage C — Transcript Features",
+                        scorer:  "Scorer",
+                    };
+                    const data = s[k] as Record<string, unknown> | undefined;
+                    if (!data) return null;
+                    return (
+                        <div key={k} style={ed.stageBlock}>
+                            <div style={ed.stageLabel}>{label[k]}</div>
+                            <div style={ed.kvGrid}>
+                                {Object.entries(data).map(([field, val]) => (
+                                    <>
+                                        <span key={`${field}-k`} style={ed.kvKey}>{field}</span>
+                                        <span key={`${field}-v`} style={{ ...ed.kvVal, color: "#8a9ab8" }}>
+                                            {typeof val === "number"
+                                                ? (Number.isInteger(val) ? String(val) : (val as number).toFixed(4))
+                                                : String(val)}
+                                        </span>
+                                    </>
+                                ))}
+                            </div>
+                        </div>
+                    );
+                })}
+            </div>
+        );
+    }
+
+    // Unknown analyser_id — raw JSON fallback
+    return (
+        <pre style={ed.rawJson}>{JSON.stringify(stages, null, 2)}</pre>
+    );
+}
+
+// ─── Small sub-components ─────────────────────────────────────────────────────
+
+function SignalRow({ k, v }: { k: string; v: string }) {
+    return (
+        <tr>
+            <td style={ed.tdKey}>{k}</td>
+            <td style={ed.tdVal}>{v}</td>
+        </tr>
+    );
+}
+
+function MetaCell({ label, value }: { label: string; value: string }) {
+    return (
+        <span style={ed.metaCell}>
+            <span style={ed.metaLabel}>{label}</span>
+            <span style={ed.metaValue}>{value}</span>
+        </span>
     );
 }
 
@@ -599,6 +874,9 @@ function HistoryEntryView({ entry }: { entry: SessionHistoryEntry }) {
                 {entry.nextClipId
                     ? <span style={he.nextClip}>{entry.nextClipId}</span>
                     : <span style={he.terminal}>— terminal —</span>}
+                {entry.debugEval !== undefined && (
+                    <span style={he.debugTag}>debug</span>
+                )}
             </div>
             {/* Transcript row */}
             <div style={he.txRow}>
@@ -658,6 +936,9 @@ const st = {
     checkLabel:    { fontSize: "12px", cursor: "pointer" },
     dimText:       { fontSize: "11px", color: "#555" },
     badge:         { display: "inline-block", padding: "2px 10px", borderRadius: "4px", fontSize: "11px", fontWeight: "bold" as const, color: "#fff", textTransform: "uppercase" as const, letterSpacing: "0.05em" },
+    adminBadge:    { display: "inline-block", padding: "2px 10px", borderRadius: "4px", fontSize: "11px", fontWeight: "bold" as const, background: "#3d2800", color: "#f5a623", border: "1px solid #7a5400", letterSpacing: "0.05em" },
+    adminKeyInput: { border: "1px solid #7a5400", color: "#f5a623" } as React.CSSProperties,
+    adminKeyHint:  { fontSize: "11px", color: "#f5a623", opacity: 0.8 } as React.CSSProperties,
     warnBadge:     { display: "inline-block", padding: "2px 10px", borderRadius: "4px", fontSize: "11px", background: "#7f1d1d", color: "#fca5a5" },
     kv:            { fontSize: "11px", display: "inline-flex", gap: "4px" },
     kvKey:         { color: "#666" },
@@ -729,6 +1010,39 @@ const he = {
     arrow:        { fontSize: "11px", color: "#555", flexShrink: 0 },
     nextClip:     { fontSize: "11px", color: "#7ab0f0", fontFamily: "monospace" },
     terminal:     { fontSize: "11px", color: "#8e44ad", fontStyle: "italic" as const },
+    debugTag:     { fontSize: "10px", color: "#f5a623", border: "1px solid #7a5400", borderRadius: "3px", padding: "0 4px", background: "#2a1a00" },
     txRow:        { paddingLeft: "32px", marginTop: "2px" },
     txText:       { fontSize: "11px", color: "#666", lineHeight: 1.4 },
+} as const;
+
+// ─── EvalDebugPanel styles ────────────────────────────────────────────────────
+
+const ed = {
+    turnRow:        { display: "flex", flexWrap: "wrap" as const, gap: "4px", marginBottom: "10px" },
+    turnBtn:        { padding: "2px 8px", fontSize: "11px", cursor: "pointer", background: "#2c2c2c", color: "#888", border: "1px solid #3a3a3a", borderRadius: "3px" },
+    turnBtnActive:  { background: "#1e2a1e", color: "#7ab87a", border: "1px solid #3a6a3a" },
+    payloadRoot:    { display: "flex", flexDirection: "column" as const, gap: "10px" },
+    section:        { background: "#1e1e1e", border: "1px solid #2a2a2a", borderRadius: "3px", padding: "8px 10px" },
+    sectionTitle:   { fontSize: "10px", color: "#666", textTransform: "uppercase" as const, letterSpacing: "0.07em", marginBottom: "6px" },
+    kvGrid:         { display: "grid", gridTemplateColumns: "max-content 1fr", gap: "3px 12px", alignItems: "start" },
+    kvKey:          { fontSize: "11px", color: "#666", whiteSpace: "nowrap" as const },
+    kvVal:          { fontSize: "11px", color: "#c0ccd8", fontFamily: "monospace" },
+    monoTag:        { background: "#2a3040", border: "1px solid #3a4a60", borderRadius: "3px", padding: "0 5px", color: "#7a90b0" },
+    table:          { width: "100%", borderCollapse: "collapse" as const, fontSize: "11px" },
+    tdKey:          { color: "#666", padding: "2px 8px 2px 0", verticalAlign: "top" as const, whiteSpace: "nowrap" as const, width: "1px" },
+    tdVal:          { color: "#c0ccd8", fontFamily: "monospace", padding: "2px 0" },
+    pillRow:        { display: "flex", flexWrap: "wrap" as const, gap: "3px" },
+    pill:           { padding: "1px 6px", borderRadius: "999px", fontSize: "10px", background: "#2c3040", color: "#7a90b0", border: "1px solid #3a4a60" },
+    pillWarn:       { background: "#3a1800", color: "#f5a623", border: "1px solid #7a4000" },
+    metaRow:        { display: "flex", gap: "12px", flexWrap: "wrap" as const, alignItems: "center" },
+    metaCell:       { display: "flex", flexDirection: "column" as const, gap: "1px" },
+    metaLabel:      { fontSize: "10px", color: "#555", textTransform: "uppercase" as const, letterSpacing: "0.05em" },
+    metaValue:      { fontSize: "12px", color: "#c0ccd8", fontFamily: "monospace" },
+    fallbackBadge:  { padding: "2px 8px", borderRadius: "3px", fontSize: "11px", fontWeight: "bold" as const, background: "#4a1a1a", color: "#f88", border: "1px solid #822" },
+    transcriptBlock: { marginTop: "8px", borderTop: "1px solid #2a2a2a", paddingTop: "6px" },
+    transcriptLabel: { display: "block", fontSize: "10px", color: "#555", textTransform: "uppercase" as const, letterSpacing: "0.05em", marginBottom: "3px" },
+    transcriptText:  { fontSize: "11px", color: "#94a3b8", lineHeight: 1.5, whiteSpace: "pre-wrap" as const },
+    stageBlock:     { marginBottom: "8px" },
+    stageLabel:     { fontSize: "10px", color: "#8a7040", textTransform: "uppercase" as const, letterSpacing: "0.06em", marginBottom: "4px", fontWeight: "bold" as const },
+    rawJson:        { fontSize: "10px", color: "#8a9ab8", background: "#1a1a2a", border: "1px solid #2a2a3a", borderRadius: "3px", padding: "8px", overflow: "auto" as const, maxHeight: "300px", margin: 0 },
 } as const;

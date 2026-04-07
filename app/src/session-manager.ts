@@ -133,6 +133,26 @@ export class SessionManager {
         ctx.coaching_context = context;
     }
 
+    /**
+     * Stores the learning_objectives for the session.
+     * No-op if the scenario is already bound.
+     */
+    setLearningObjectives(sessionId: string, objectives: string[] | null): void {
+        const ctx = this.sessions.get(sessionId);
+        if (!ctx || ctx.scenario_id !== null) return;
+        ctx.learning_objectives = objectives;
+    }
+
+    /**
+     * Stores the target_audience for the session.
+     * No-op if the scenario is already bound.
+     */
+    setTargetAudience(sessionId: string, audience: string | null): void {
+        const ctx = this.sessions.get(sessionId);
+        if (!ctx || ctx.scenario_id !== null) return;
+        ctx.target_audience = audience;
+    }
+
     appendTurn(sessionId: string, turn: ConversationTurn): void {
         const ctx = this.sessions.get(sessionId);
         if (!ctx) return;
@@ -143,15 +163,18 @@ export class SessionManager {
     buildFeedbackRequest(sessionId: string): FeedbackRequest | null {
         const ctx = this.sessions.get(sessionId);
         if (!ctx || !ctx.scenario_id) return null;
+
         const req: FeedbackRequest = {
             session_id:  ctx.session_id,
             scenario_id: ctx.scenario_id,
             language:    ctx.language,
             history:     [...ctx.conversation_history],
         };
-        if (ctx.coaching_context) {
-            req.coaching_context = ctx.coaching_context;
-        }
+
+        if (ctx.coaching_context)    req.coaching_context    = ctx.coaching_context;
+        if (ctx.learning_objectives) req.learning_objectives = ctx.learning_objectives;
+        if (ctx.target_audience)     req.target_audience     = ctx.target_audience;
+
         return req;
     }
 
@@ -183,10 +206,10 @@ export class SessionManager {
     // ── Internal ──────────────────────────────────────────────────────────────
 
     private makeContext(
-        userId: string,
+        userId:   string,
         language: string,
-        state: SessionState,
-        isAdmin: boolean,
+        state:    SessionState,
+        isAdmin:  boolean,
         queuePos: number | null = null,
     ): SessionContext {
         return {
@@ -201,6 +224,8 @@ export class SessionManager {
             queue_position:       queuePos,
             is_admin:             isAdmin,
             coaching_context:     null,
+            learning_objectives:  null,
+            target_audience:      null,
         };
     }
 

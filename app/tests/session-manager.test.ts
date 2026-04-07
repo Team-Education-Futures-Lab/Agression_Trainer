@@ -23,26 +23,31 @@ function makeTurn(turn_id: number): ConversationTurn {
     return {
         turn_id,
         clip: {
-            clip_id:           `clip_0${turn_id}`,
-            scenario_id:       "scenario_01",
-            video_url:         `/scenarios/scenario_01/clip_0${turn_id}.mp4`,
-            transcript:        "Test transcript",
-            notable_features:  [],
-            branch_conditions: [{ min_score: -1.0, max_score: 1.01, next_clip: null }],
+            clip_id:                  `clip_0${turn_id}`,
+            scenario_id:              "scenario_01",
+            transcript:               "Test transcript",
+            notable_features:         [],
+            clip_learning_objectives: [],
+            ideal_response:           null,
+            response_warnings:        [],
         },
         student_response: {
             window_id:        `session_abc:${turn_id}`,
             session_id:       "session_abc",
-            escalation_score:  0.1,
-            dominant_emotion:  "neutral",
-            confidence:        1.0,
+            escalation_score: 0.1,
+            dominant_emotion: "neutral",
+            confidence:       1.0,
             signal_summary: {
-                voice_tension:   0.5,
-                speech_pace:     3.2,
-                hand_velocity:   0.3,
-                gaze_stability:  0.7,
-                open_palm_ratio: 0.6,
-                notable_signals: [],
+                vocal_tension:      0.5,
+                speech_pace:        3.2,
+                gesture_activity:   0.3,
+                open_gesture_ratio: 0.6,
+                head_nod_frequency: 0.4,
+                facing_ratio:       0.8,
+                silence_ratio:      0.2,
+                lexical_markers:    [],
+                response_tone:      "neutral",
+                notable_signals:    [],
             },
         },
         student_transcript: "Test response",
@@ -99,7 +104,7 @@ describe("SessionManager", () => {
 
             sm.createSession("user_1", "nl", false);
             sm.createSession("user_2", "nl", false);
-            sm.createSession("user_3", "nl", false); // fills the queue
+            sm.createSession("user_3", "nl", false);
             const result = sm.createSession("user_4", "nl", false);
 
             expect(result.status).toBe("at_capacity");
@@ -174,15 +179,15 @@ describe("SessionManager", () => {
             sm.setQueuedSocket(q2.context.session_id, cb2);
 
             sm.markActive(s1.context.session_id);
-            sm.endSession(s1.context.session_id); // promotes q1
+            sm.endSession(s1.context.session_id);
 
             expect(cb1).toHaveBeenCalledOnce();
             expect(cb2).not.toHaveBeenCalled();
 
             sm.markActive(s2.context.session_id);
-            sm.endSession(s2.context.session_id); // promotes q2
+            sm.endSession(s2.context.session_id);
 
-            expect(cb1).toHaveBeenCalledOnce(); // still only once
+            expect(cb1).toHaveBeenCalledOnce();
             expect(cb2).toHaveBeenCalledOnce();
         });
 
@@ -359,7 +364,7 @@ describe("SessionManager", () => {
             if (result.status !== "active") return;
 
             sm.setScenario(result.context.session_id, "scenario_01");
-            sm.setScenario(result.context.session_id, "scenario_02"); // should be ignored
+            sm.setScenario(result.context.session_id, "scenario_02");
             expect(sm.getSession(result.context.session_id)!.scenario_id).toBe("scenario_01");
         });
 
@@ -385,6 +390,55 @@ describe("SessionManager", () => {
             expect(req).not.toBeNull();
             expect(req!.scenario_id).toBe("scenario_01");
             expect(req!.history).toHaveLength(1);
+        });
+
+        it("buildFeedbackRequest includes learning_objectives when set", () => {
+            const sm     = new SessionManager(makeConfig());
+            const result = sm.createSession("user_1", "nl", false);
+            if (result.status !== "active") return;
+
+            // Setters must be called before setScenario — they are no-ops once the scenario is bound.
+            sm.setLearningObjectives(result.context.session_id, ["actief luisteren", "emotieregulatie"]);
+            sm.setScenario(result.context.session_id, "scenario_01");
+
+            const req = sm.buildFeedbackRequest(result.context.session_id);
+            expect(req!.learning_objectives).toEqual(["actief luisteren", "emotieregulatie"]);
+        });
+
+        it("buildFeedbackRequest omits learning_objectives when null", () => {
+            const sm     = new SessionManager(makeConfig());
+            const result = sm.createSession("user_1", "nl", false);
+            if (result.status !== "active") return;
+
+            sm.setScenario(result.context.session_id, "scenario_01");
+
+            const req = sm.buildFeedbackRequest(result.context.session_id);
+            expect(req!.learning_objectives).toBeUndefined();
+        });
+
+        it("buildFeedbackRequest includes target_audience when set", () => {
+            const sm     = new SessionManager(makeConfig());
+            const result = sm.createSession("user_1", "nl", false);
+            if (result.status !== "active") return;
+
+            // Setter must be called before setScenario — it is a no-op once the scenario is bound.
+            sm.setTargetAudience(result.context.session_id, "MBO niveau 3-4");
+            sm.setScenario(result.context.session_id, "scenario_01");
+
+            const req = sm.buildFeedbackRequest(result.context.session_id);
+            expect(req!.target_audience).toBe("MBO niveau 3-4");
+        });
+
+        it("setLearningObjectives is a no-op if the scenario is already bound", () => {
+            const sm     = new SessionManager(makeConfig());
+            const result = sm.createSession("user_1", "nl", false);
+            if (result.status !== "active") return;
+
+            sm.setScenario(result.context.session_id, "scenario_01");
+            sm.setLearningObjectives(result.context.session_id, ["should be ignored"]);
+
+            const req = sm.buildFeedbackRequest(result.context.session_id);
+            expect(req!.learning_objectives).toBeUndefined();
         });
     });
 

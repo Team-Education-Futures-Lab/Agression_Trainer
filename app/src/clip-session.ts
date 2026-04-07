@@ -1,5 +1,5 @@
 import { WebSocket } from "ws";
-import type { VideoFrame, AudioChunk, AnalysisWindow, ClipMetadata, MfccMatrix } from "@ar-training/shared";
+import type { VideoFrame, AudioChunk, AnalysisWindow, ClipMetadata, MfccMatrix, WordTiming } from "@ar-training/shared";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -10,6 +10,8 @@ interface TranscriptMessage {
     window_seq: number;
     is_final:   boolean;
     confidence: number;
+    /** Session-level word timings (seconds from clip start). Empty array from stub pool. */
+    words:      WordTiming[];
 }
 
 /**
@@ -38,9 +40,9 @@ const MAX_AUDIO_QUEUE = 120;
 
 //
 // Owns the full lifecycle of one clip's relationship with the Transcription
-// service. Opens a WebSocket on construction, accumulates frames, MFCCs, and
-// transcript segments, and resolves as a thenable once the Transcription
-// service emits a final transcript segment (triggered by flush()).
+// service. Opens a WebSocket on construction, accumulates frames, MFCCs,
+// transcript segments, and word timings, and resolves as a thenable once the
+// Transcription service emits a final transcript segment (triggered by flush()).
 //
 // The Coordinator creates one ClipSession per clip, feeds it data, calls
 // flush() on ClipEnded, then awaits the resolved AnalysisWindow.
@@ -49,7 +51,7 @@ const MAX_AUDIO_QUEUE = 120;
 //   - WebSocket connection to the Transcription container
 //   - Audio forwarding (with queue-while-connecting behaviour)
 //   - Frame and MFCC buffering
-//   - Transcript accumulation
+//   - Transcript and word timing accumulation
 //   - Resolving with a complete AnalysisWindow on is_final
 //
 // Does NOT know about: evaluation, feedback, session lifecycle, routing.
@@ -60,6 +62,7 @@ export class ClipSession {
     private readonly mfccs:       MfccMatrix[] = [];
     private readonly audioQueue:  string[]     = [];
     private transcript            = "";
+    private readonly words:       WordTiming[] = [];
     private flushed               = false;
     private finalReceived         = false;
 
@@ -99,9 +102,6 @@ export class ClipSession {
             .replace(/^https:\/\//, "wss://")
             .replace(/\/+$/, "");
 
-        // Append the per-session language as a query parameter so the
-        // Transcription container can use the correct Whisper language
-        // for this session regardless of its container-level default.
         const langParam = language ? `?language=${encodeURIComponent(language)}` : "";
         const wsUrl     = `${baseUrl}/ws/${sessionId}${langParam}`;
 
@@ -125,6 +125,15 @@ export class ClipSession {
                     this.transcript = this.transcript
                         ? `${this.transcript} ${msg.text}`
                         : msg.text;
+                }
+
+                // Accumulate word timings. The Transcription container emits
+                // session-level times (seconds from clip start), so we simply
+                // append them without further conversion.
+                if (msg.words?.length) {
+                    for (const w of msg.words) {
+                        this.words.push(w);
+                    }
                 }
 
                 this.onTranscriptUpdate?.(this.sessionId, this.transcript);
@@ -209,6 +218,7 @@ export class ClipSession {
             frames:        this.frames,
             mfccs:         this.mfccs.flat(1),
             transcript:    this.transcript,
+            words:         this.words,
             clip_metadata: this.clip,
         });
     }

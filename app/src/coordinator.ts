@@ -16,6 +16,18 @@ export type SendFn = (message: ServerMessage) => void;
 // with whatever has accumulated.
 const CLIP_RESOLVE_TIMEOUT_MS = 5_000;
 
+// ─── Debug payload ────────────────────────────────────────────────────────────
+
+/**
+ * The debug payload returned by the Evaluation container when the request
+ * carries X-Debug: true (admin sessions only). Stored in session state and
+ * exposed via getLastDebug() for ClipController to include in debug_eval messages.
+ */
+export interface EvalDebugPayload {
+    analyser_id: string;
+    stages:      unknown;
+}
+
 // ─── Per-session state ────────────────────────────────────────────────────────
 
 interface SessionState {
@@ -24,6 +36,7 @@ interface SessionState {
     sequence:       number;
     lastResult:     BehaviourResult | null;
     lastTranscript: string | null;
+    lastDebug:      EvalDebugPayload | null;
     /** ISO 639-1 language code for this session, forwarded to ClipSession. */
     language:       string;
 }
@@ -72,6 +85,7 @@ export class Coordinator {
             sequence,
             lastResult:     null,
             lastTranscript: null,
+            lastDebug:      null,
             language,
         });
     }
@@ -94,7 +108,17 @@ export class Coordinator {
         this.sessions.get(sessionId)?.clipSession.onAudio(sessionId, chunk);
     }
 
-    async flushSession(sessionId: string): Promise<void> {
+    /**
+     * Flushes the current ClipSession, dispatches the AnalysisWindow to the
+     * Evaluation container, and stores the result.
+     *
+     * When isAdmin is true the request carries X-Debug: true and the Evaluation
+     * container includes a debug field in its response. The debug payload is
+     * stored in session state and exposed via getLastDebug(). Non-admin sessions
+     * never send the header — the Evaluation container bears no overhead of
+     * assembling debug output for sessions that will not use it.
+     */
+    async flushSession(sessionId: string, isAdmin: boolean = false): Promise<void> {
         const state = this.sessions.get(sessionId);
         if (!state) return;
 
@@ -107,7 +131,7 @@ export class Coordinator {
         const window = await Promise.race([state.clipSession, timeout]);
         if (window === null) return;
 
-        await this.dispatchWindow(sessionId, state, window);
+        await this.dispatchWindow(sessionId, state, window, isAdmin);
     }
 
     async resetSession(sessionId: string, nextClip: ClipMetadata | null): Promise<void> {
@@ -148,6 +172,15 @@ export class Coordinator {
         return this.sessions.get(sessionId)?.lastTranscript ?? null;
     }
 
+    /**
+     * Returns the debug payload from the most recent evaluation dispatch for
+     * this session, or null if the session is not admin, no evaluation has run,
+     * or the evaluation fell back to neutral.
+     */
+    getLastDebug(sessionId: string): EvalDebugPayload | null {
+        return this.sessions.get(sessionId)?.lastDebug ?? null;
+    }
+
     // ── Internal ──────────────────────────────────────────────────────────────
 
     private makeClipSession(
@@ -178,22 +211,43 @@ export class Coordinator {
         sessionId: string,
         state:     SessionState,
         window:    AnalysisWindow,
+        isAdmin:   boolean,
     ): Promise<void> {
         state.lastTranscript = window.transcript || null;
+        state.lastDebug      = null;
+
+        const headers: Record<string, string> = {
+            "Content-Type":  "application/json",
+            "Authorization": this.authHeader,
+        };
+        if (isAdmin) {
+            headers["X-Debug"] = "true";
+        }
 
         try {
             const res = await fetch(`${this.evalRouter.getUrl(sessionId)}/evaluate/analyse`, {
-                method:  "POST",
-                headers: {
-                    "Content-Type":  "application/json",
-                    "Authorization": this.authHeader,
-                },
-                body: JSON.stringify(window),
+                method: "POST",
+                headers,
+                body:   JSON.stringify(window),
             });
 
             if (!res.ok) return;
 
-            state.lastResult = await res.json() as BehaviourResult;
+            const body = await res.json() as BehaviourResult & {
+                debug?: { analyser_id: string; stages: unknown };
+            };
+
+            // Separate the debug field (admin only) from the BehaviourResult.
+            // The debug field is not part of BehaviourResult — strip it before storing.
+            const { debug, ...result } = body;
+            state.lastResult = result as BehaviourResult;
+
+            if (isAdmin && debug) {
+                state.lastDebug = {
+                    analyser_id: debug.analyser_id,
+                    stages:      debug.stages,
+                };
+            }
 
         } catch {}
     }

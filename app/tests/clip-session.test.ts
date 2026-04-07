@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ClipSession } from "../src/clip-session.js";
-import type { ClipMetadata, VideoFrame, AudioChunk } from "@ar-training/shared";
+import type { ClipMetadata, VideoFrame, AudioChunk, WordTiming } from "@ar-training/shared";
 import { EventEmitter } from "events";
 
 // ─── Mock WebSocket ───────────────────────────────────────────────────────────
@@ -25,11 +25,21 @@ const AUTH_HEADER       = "Bearer test-key";
 
 function makeClip(clipId = "clip_01"): ClipMetadata {
     return {
-        clip_id:           clipId,
-        scenario_id:       "scenario_01",
-        transcript:        "Test transcript",
-        notable_features:  [],
-        branch_conditions: [{ min_score: -1.0, max_score: 1.01, next_clip: null }],
+        clip_id:                  clipId,
+        scenario_id:              "scenario_01",
+        video_url:                `/scenarios/scenario_01/${clipId}.mp4`,
+        transcript:               "Test transcript",
+        clip_duration_seconds:    10.0,
+        notable_features:         [],
+        scoring_mode:             "rubric",
+        de_escalation_rubric:     [],
+        escalation_rubric:        [],
+        critical_failures:        [],
+        score_range:              { min: -1.0, max: 1.0 },
+        clip_learning_objectives: [],
+        ideal_response:           null,
+        response_warnings:        [],
+        branch_conditions:        [{ min_score: -1.0, max_score: 1.01, next_clip: null }],
     };
 }
 
@@ -57,7 +67,12 @@ function makeChunk(chunkId: number): AudioChunk {
     };
 }
 
-function emitTranscript(ws: MockWebSocket, text: string, isFinal: boolean) {
+function emitTranscript(
+    ws:      MockWebSocket,
+    text:    string,
+    isFinal: boolean,
+    words:   WordTiming[] = [],
+) {
     ws.emit("message", Buffer.from(JSON.stringify({
         type:       "transcript",
         session_id: "s1",
@@ -65,6 +80,7 @@ function emitTranscript(ws: MockWebSocket, text: string, isFinal: boolean) {
         window_seq: 1,
         is_final:   isFinal,
         confidence: 0.95,
+        words,
     })));
 }
 
@@ -270,6 +286,56 @@ describe("ClipSession", () => {
             await Promise.resolve();
             expect(resolved).toBe(false);
         });
+
+        it("resolved window contains empty words array when no timings received", async () => {
+            const ws = new MockWebSocket();
+            const session = new ClipSession("s1", makeClip(), TRANSCRIPTION_URL, AUTH_HEADER, makeWsFactory(ws));
+            ws.open();
+            session.onFrame(makeFrame(1));
+
+            session.flush();
+            emitTranscript(ws, "tekst", true); // no words field → defaults to []
+
+            const window = await session;
+            expect(window.words).toEqual([]);
+        });
+
+        it("accumulates word timings from all received messages", async () => {
+            const ws = new MockWebSocket();
+            const session = new ClipSession("s1", makeClip(), TRANSCRIPTION_URL, AUTH_HEADER, makeWsFactory(ws));
+            ws.open();
+            session.onFrame(makeFrame(1));
+
+            const w1: WordTiming = { word: "hallo",  start: 0.0, end: 0.4 };
+            const w2: WordTiming = { word: "wereld", start: 0.5, end: 1.0 };
+            const w3: WordTiming = { word: "!",      start: 1.1, end: 1.2 };
+
+            emitTranscript(ws, "hallo",  false, [w1]);
+            emitTranscript(ws, "wereld", false, [w2]);
+            session.flush();
+            emitTranscript(ws, "!",      true,  [w3]);
+
+            const window = await session;
+            expect(window.words).toHaveLength(3);
+            expect(window.words[0]).toMatchObject({ word: "hallo",  start: 0.0, end: 0.4 });
+            expect(window.words[1]).toMatchObject({ word: "wereld", start: 0.5, end: 1.0 });
+            expect(window.words[2]).toMatchObject({ word: "!",      start: 1.1, end: 1.2 });
+        });
+
+        it("words from empty-text messages are not accumulated", async () => {
+            const ws = new MockWebSocket();
+            const session = new ClipSession("s1", makeClip(), TRANSCRIPTION_URL, AUTH_HEADER, makeWsFactory(ws));
+            ws.open();
+            session.onFrame(makeFrame(1));
+
+            emitTranscript(ws, "", false, []); // silent window
+            session.flush();
+            emitTranscript(ws, "tekst", true, [{ word: "tekst", start: 1.0, end: 1.5 }]);
+
+            const window = await session;
+            expect(window.words).toHaveLength(1);
+            expect(window.words[0].word).toBe("tekst");
+        });
     });
 
     // ── flush() ───────────────────────────────────────────────────────────────
@@ -371,6 +437,29 @@ describe("ClipSession", () => {
             expect(() => {
                 ws.emit("message", Buffer.from(JSON.stringify({ type: "unknown" })));
             }).not.toThrow();
+        });
+
+        it("handles transcript message with missing words field gracefully", async () => {
+            const ws = new MockWebSocket();
+            const session = new ClipSession("s1", makeClip(), TRANSCRIPTION_URL, AUTH_HEADER, makeWsFactory(ws));
+            ws.open();
+            session.onFrame(makeFrame(1));
+
+            // Emit a message without the words field (old wire format compatibility)
+            ws.emit("message", Buffer.from(JSON.stringify({
+                type:       "transcript",
+                session_id: "s1",
+                text:       "tekst",
+                window_seq: 1,
+                is_final:   true,
+                confidence: 0.9,
+                // no words field
+            })));
+            session.flush();
+
+            const window = await session;
+            expect(window.transcript).toBe("tekst");
+            expect(window.words).toEqual([]);
         });
     });
 });

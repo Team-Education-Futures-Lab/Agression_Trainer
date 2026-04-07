@@ -5,12 +5,44 @@
     "language": "nl",
     "entry_clip": "clip_01_intro",
     "coaching_context": "De student oefent de rol van MBO-docent die wordt geconfronteerd door een ouder die het niet eens is met de beoordeling van zijn kind en emotioneel reageert. Het doel is de ouder serieus te nemen, rustig te blijven en het gesprek constructief te houden zonder de eigen professionele positie te ondermijnen.",
+    "learning_objectives": [
+        "professionele grenzen bewaken",
+        "empathie tonen",
+        "emotieregulatie",
+        "open vragen stellen",
+        "actief luisteren"
+    ],
+    "target_audience": "MBO niveau 3-4, pedagogisch-didactische context",
 
     "clips": {
         "clip_01_intro": {
             "file": "clip_01_intro.mp4",
             "transcript": "Ik wil weten wat hier aan de hand is. Mijn zoon heeft voor uw vak een onvoldoende gekregen en hij heeft echt zijn best gedaan. Hij heeft er nachten voor gewerkt. Ik snap er niets van en ik wil een uitleg.",
+            "clip_duration_seconds": 14.0,
             "notable_features": ["raised_voice", "direct_eye_contact", "aggressive_posture"],
+            "scoring_mode": "rubric",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",     "weight": 0.9 },
+                { "signal": "empathy_phrase", "weight": 1.0 },
+                { "signal": "open_question",  "weight": 0.8 },
+                { "signal": "open_posture",   "weight": 0.5 },
+                { "signal": "measured_pace",  "weight": 0.6 }
+            ],
+            "escalation_rubric": [
+                { "signal": "raised_voice",   "weight": 1.0 },
+                { "signal": "negative_tone",  "weight": 0.9 },
+                { "signal": "fast_speech",    "weight": 0.6 },
+                { "signal": "turning_away",   "weight": 0.5 }
+            ],
+            "critical_failures": [],
+            "score_range": { "min": -0.9, "max": 0.9 },
+            "clip_learning_objectives": ["empathie tonen", "emotieregulatie"],
+            "ideal_response": "Erken de bezorgdheid van de ouder oprecht en zonder in de verdediging te schieten. Spreek rustig en kalm: 'Ik hoor dat u zich zorgen maakt over uw zoon — dat begrijp ik goed.' Stel dan een open vraag om het gesprek te openen, zoals 'Kunt u me vertellen wat hij u heeft verteld over de opdracht?'",
+            "response_warnings": [
+                "ga niet meteen de beoordeling verdedigen — luister eerst",
+                "benoem de onvoldoende niet als eindoordeel zonder context te geven",
+                "vermijd een defensieve of formele toon die de afstand vergroot"
+            ],
             "branch_conditions": [
                 { "min_score": -1.0,  "max_score": -0.2, "next_clip": "clip_02_open_gesprek" },
                 { "min_score": -0.2,  "max_score":  0.3, "next_clip": "clip_02_weerstand" },
@@ -21,7 +53,29 @@
         "clip_02_open_gesprek": {
             "file": "clip_02_open_gesprek.mp4",
             "transcript": "Goed... dat klinkt eerlijk. Ik ben misschien wat overhaast binnengekomen. Maar u begrijpt toch wel dat ik me zorgen maak? Hij vertelt thuis zo weinig over school. Kunt u me vertellen wat hij precies moet verbeteren?",
+            "clip_duration_seconds": 16.0,
             "notable_features": ["calm_voice", "open_posture", "direct_eye_contact"],
+            "scoring_mode": "rubric",
+            "de_escalation_rubric": [
+                { "signal": "validation",        "weight": 1.0 },
+                { "signal": "open_question",     "weight": 0.9 },
+                { "signal": "active_listening",  "weight": 0.8 },
+                { "signal": "calm_voice",        "weight": 0.7 },
+                { "signal": "positive_tone",     "weight": 0.6 }
+            ],
+            "escalation_rubric": [
+                { "signal": "negative_tone",  "weight": 0.9 },
+                { "signal": "fast_speech",    "weight": 0.5 },
+                { "signal": "no_empathy",     "weight": 0.8 }
+            ],
+            "critical_failures": [],
+            "score_range": { "min": -0.9, "max": 0.8 },
+            "clip_learning_objectives": ["actief luisteren", "open vragen stellen"],
+            "ideal_response": "Ga in op de bezorgdheid van de ouder over de communicatie thuis en bied concrete verbeterpunten aan. Wees positief over de inzet van de leerling: 'Ik zie dat hij zijn best doet — hier zijn de specifieke punten waar hij aan kan werken.' Betrek de ouder als partner.",
+            "response_warnings": [
+                "stel de ouder niet verantwoordelijk voor de communicatie thuis",
+                "geef geen algemene of vage feedback — wees concreet"
+            ],
             "branch_conditions": [
                 { "min_score": -1.0, "max_score":  0.2, "next_clip": "clip_03_constructief" },
                 { "min_score":  0.2, "max_score":  1.01,"next_clip": "clip_03_lichte_spanning" }
@@ -31,7 +85,30 @@
         "clip_02_weerstand": {
             "file": "clip_02_weerstand.mp4",
             "transcript": "U zegt dat, maar ik zie het anders. Hij heeft die opdracht echt af gehad. Ik heb het zelf gezien. Misschien heeft u het niet goed nagekeken. Dat kan toch ook?",
+            "clip_duration_seconds": 13.0,
             "notable_features": ["crossed_arms", "direct_eye_contact", "raised_voice"],
+            "scoring_mode": "rubric",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",     "weight": 0.9 },
+                { "signal": "validation",      "weight": 1.0 },
+                { "signal": "open_question",  "weight": 0.8 },
+                { "signal": "measured_pace",  "weight": 0.6 },
+                { "signal": "open_posture",   "weight": 0.5 }
+            ],
+            "escalation_rubric": [
+                { "signal": "raised_voice",   "weight": 1.0 },
+                { "signal": "negative_tone",  "weight": 0.9 },
+                { "signal": "fast_speech",    "weight": 0.6 }
+            ],
+            "critical_failures": [],
+            "score_range": { "min": -0.8, "max": 0.9 },
+            "clip_learning_objectives": ["professionele grenzen bewaken", "empathie tonen"],
+            "ideal_response": "Erken de bezorgdheid van de ouder zonder de eigen beoordeling in te trekken. 'Ik begrijp dat u dat gevoel heeft — dat is een logische reactie als ouder. Ik heb de opdracht zorgvuldig nagekeken en kan u uitleggen wat ik heb beoordeeld.' Blijf feitelijk en rustig.",
+            "response_warnings": [
+                "ga niet in de verdediging over je eigen zorgvuldigheid op een boze manier",
+                "stel de opdracht niet opnieuw ter discussie zonder bewijs",
+                "laat je professionele beoordeling niet ondermijnen door de druk"
+            ],
             "branch_conditions": [
                 { "min_score": -1.0,  "max_score": -0.1, "next_clip": "clip_03_lichte_spanning" },
                 { "min_score": -0.1,  "max_score":  0.3, "next_clip": "clip_03_patstelling" },
@@ -42,7 +119,28 @@
         "clip_02_escalatie": {
             "file": "clip_02_escalatie.mp4",
             "transcript": "Dit is echt te gek voor woorden. Ik ga dit melden bij de schoolleiding. Mijn kind wordt hier benadeeld en u staat er gewoon bij. Ik ga niet weg voordat ik de directeur heb gesproken.",
+            "clip_duration_seconds": 12.0,
             "notable_features": ["raised_voice", "aggressive_posture", "pointing_gesture"],
+            "scoring_mode": "threshold",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",    "weight": 1.0 },
+                { "signal": "open_posture",  "weight": 0.7 },
+                { "signal": "measured_pace", "weight": 0.8 }
+            ],
+            "escalation_rubric": [
+                { "signal": "raised_voice",  "weight": 1.0 },
+                { "signal": "fast_speech",   "weight": 0.8 },
+                { "signal": "negative_tone", "weight": 0.9 }
+            ],
+            "critical_failures": ["raised_voice"],
+            "score_range": { "min": -0.4, "max": 1.0 },
+            "clip_learning_objectives": ["emotieregulatie", "professionele grenzen bewaken"],
+            "ideal_response": "Blijf kalm en ga niet mee in de escalatie. Erken het recht van de ouder om de directeur te spreken en faciliteer dat neutraal: 'Dat is uw recht, en ik kan zorgen dat dat geregeld wordt. Laten we even rustig gaan zitten.' Niet verdedigen, niet capituleren.",
+            "response_warnings": [
+                "ga niet in discussie over de claim dat het kind wordt benadeeld",
+                "blokkeer het verzoek om de directeur niet — dat vergroot de spanning",
+                "verhef de stem niet om de controle terug te nemen"
+            ],
             "branch_conditions": [
                 { "min_score": -1.0, "max_score":  0.2, "next_clip": "clip_03_confrontatie" },
                 { "min_score":  0.2, "max_score":  1.01,"next_clip": "clip_03_einde_slecht" }
@@ -52,7 +150,20 @@
         "clip_03_constructief": {
             "file": "clip_03_constructief.mp4",
             "transcript": "Dat helpt me echt. Ik wist niet dat hij zoveel moeite had met de schrijfopdrachten. Ik zal er thuis met hem over praten. En als hij vastloopt, mag hij dan bij u langskomen?",
+            "clip_duration_seconds": 12.0,
             "notable_features": ["calm_voice", "open_posture", "backing_away"],
+            "scoring_mode": "rubric",
+            "de_escalation_rubric": [
+                { "signal": "positive_tone",    "weight": 0.8 },
+                { "signal": "calm_voice",       "weight": 0.7 },
+                { "signal": "active_listening", "weight": 0.6 }
+            ],
+            "escalation_rubric": [],
+            "critical_failures": [],
+            "score_range": { "min": -1.0, "max": 0.2 },
+            "clip_learning_objectives": [],
+            "ideal_response": "Bevestig de open houding van de ouder en zeg volmondig ja op het verzoek om langs te komen. Sluit positief en concreet af: 'Zeker, hij is altijd welkom. En ik waardeer dat u hier naartoe bent gekomen — zo werken we als team.'",
+            "response_warnings": [],
             "branch_conditions": [
                 { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
             ]
@@ -61,7 +172,26 @@
         "clip_03_lichte_spanning": {
             "file": "clip_03_lichte_spanning.mp4",
             "transcript": "Oké. Ik hoor wat u zegt. Ik ben het er niet helemaal mee eens, maar ik snap dat u uw redenen heeft. Kunt u hem dan in ieder geval een herkansing geven? Hij verdient een eerlijke kans.",
+            "clip_duration_seconds": 14.0,
             "notable_features": ["crossed_arms", "calm_voice", "direct_eye_contact"],
+            "scoring_mode": "threshold",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",    "weight": 0.9 },
+                { "signal": "open_posture",  "weight": 0.6 },
+                { "signal": "positive_tone", "weight": 0.7 }
+            ],
+            "escalation_rubric": [
+                { "signal": "negative_tone",  "weight": 0.9 },
+                { "signal": "fast_speech",    "weight": 0.5 }
+            ],
+            "critical_failures": [],
+            "score_range": { "min": -0.3, "max": 1.0 },
+            "clip_learning_objectives": [],
+            "ideal_response": "Reageer rustig op het verzoek om een herkansing en geef een eerlijk antwoord over wat de procedure is. Vermijd beloftes die je niet kunt waarmaken, maar houd de toon constructief: 'Ik kijk of dat mogelijk is — ik neem contact op zodra ik het weet.'",
+            "response_warnings": [
+                "beloof geen herkansing als het beleid dat niet toestaat",
+                "wijs het verzoek niet af zonder alternatief te bieden"
+            ],
             "branch_conditions": [
                 { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
             ]
@@ -70,7 +200,26 @@
         "clip_03_patstelling": {
             "file": "clip_03_patstelling.mp4",
             "transcript": "We draaien in cirkels. U zegt dat hij het niet goed heeft gedaan, ik zeg van wel. Ik weet niet hoe we hieruit komen. Misschien moet er toch iemand anders bij.",
+            "clip_duration_seconds": 12.0,
             "notable_features": ["silence", "crossed_arms", "backing_away"],
+            "scoring_mode": "threshold",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",          "weight": 0.9 },
+                { "signal": "appropriate_silence", "weight": 0.7 },
+                { "signal": "open_posture",        "weight": 0.6 }
+            ],
+            "escalation_rubric": [
+                { "signal": "negative_tone",  "weight": 0.9 },
+                { "signal": "fast_speech",    "weight": 0.6 }
+            ],
+            "critical_failures": [],
+            "score_range": { "min": -0.3, "max": 1.0 },
+            "clip_learning_objectives": [],
+            "ideal_response": "Accepteer de patstelling en stem in met het voorstel voor een derde partij: 'Dat lijkt me een goede stap — ik stel voor dat we de mentor of afdelingsleider erbij betrekken.' Presenteer het als samenwerking, niet als overgave.",
+            "response_warnings": [
+                "ga niet opnieuw hetzelfde argument herhalen — dat vergroot de impasse",
+                "wijs het voorstel voor een derde partij niet af"
+            ],
             "branch_conditions": [
                 { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
             ]
@@ -79,7 +228,28 @@
         "clip_03_confrontatie": {
             "file": "clip_03_confrontatie.mp4",
             "transcript": "U bent de docent, u zou toch professioneel moeten zijn. Ik verwacht dat u dit oplost. Als mijn zoon zakt dit jaar, dan ligt dat aan u.",
+            "clip_duration_seconds": 10.0,
             "notable_features": ["raised_voice", "pointing_gesture", "direct_eye_contact"],
+            "scoring_mode": "threshold",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",    "weight": 1.0 },
+                { "signal": "open_posture",  "weight": 0.7 },
+                { "signal": "measured_pace", "weight": 0.8 }
+            ],
+            "escalation_rubric": [
+                { "signal": "raised_voice",   "weight": 1.0 },
+                { "signal": "negative_tone",  "weight": 0.9 },
+                { "signal": "fast_speech",    "weight": 0.7 }
+            ],
+            "critical_failures": ["raised_voice"],
+            "score_range": { "min": -0.3, "max": 1.0 },
+            "clip_learning_objectives": [],
+            "ideal_response": "Slik de persoonlijke aanval in en reageer professioneel en kalm: 'Ik begrijp dat u zich zorgen maakt over zijn voortgang. Ik doe mijn uiterste best om hem te ondersteunen.' Laat de beschuldiging niet los, maar maak er ook geen discussie van.",
+            "response_warnings": [
+                "ga niet in discussie over wie verantwoordelijk is als de leerling zakt",
+                "verdedig je professionaliteit niet op een geagiteerde manier",
+                "reageer niet op de dreiging als dreiging — behandel het als bezorgdheid"
+            ],
             "branch_conditions": [
                 { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
             ]
@@ -88,7 +258,26 @@
         "clip_03_einde_slecht": {
             "file": "clip_03_einde_slecht.mp4",
             "transcript": "Ik ga nu naar de directeur. Dit gesprek heeft geen zin. U luistert toch niet.",
+            "clip_duration_seconds": 7.0,
             "notable_features": ["raised_voice", "aggressive_posture", "backing_away"],
+            "scoring_mode": "threshold",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",    "weight": 1.0 },
+                { "signal": "measured_pace", "weight": 0.7 },
+                { "signal": "open_posture",  "weight": 0.5 }
+            ],
+            "escalation_rubric": [
+                { "signal": "raised_voice",  "weight": 1.0 },
+                { "signal": "negative_tone", "weight": 0.9 }
+            ],
+            "critical_failures": [],
+            "score_range": { "min": -0.2, "max": 1.0 },
+            "clip_learning_objectives": [],
+            "ideal_response": "Laat de ouder rustig gaan en blokkeer niets. Een korte, waardige afsluiting: 'Dat is uw goed recht. Ik sta beschikbaar als u daarna nog met mij wilt spreken.' Niet verdedigen, niet terugroepen.",
+            "response_warnings": [
+                "blokkeer of ontmoedig de ouder niet om naar de directeur te gaan",
+                "roep de ouder niet terug op een indringende manier"
+            ],
             "branch_conditions": [
                 { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
             ]

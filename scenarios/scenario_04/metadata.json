@@ -5,12 +5,44 @@
     "language": "nl",
     "entry_clip": "clip_01_intro",
     "coaching_context": "De student oefent de rol van teamleider die wordt geconfronteerd door een medewerker die hem beschuldigt van voorkeursbehandeling. Het doel is de medewerker serieus te nemen zonder de beschuldiging te bevestigen, de emoties te erkennen en het gesprek naar een constructieve richting te sturen.",
+    "learning_objectives": [
+        "emotieregulatie",
+        "neutraliteit bewaren",
+        "actief luisteren",
+        "valideren zonder bevestigen",
+        "constructief doorvragen"
+    ],
+    "target_audience": "MBO niveau 4, management en leidinggeven",
 
     "clips": {
         "clip_01_intro": {
             "file": "clip_01_intro.mp4",
             "transcript": "Ik wil het hier even over hebben, want ik word er écht moe van. Elke keer als er een interessant project is, gaat het naar Sanne. Elke keer. En ik zie hoe jullie met elkaar omgaan — dat is toch geen toeval? U speelt gewoon favorieten en iedereen ziet het, behalve u blijkbaar.",
+            "clip_duration_seconds": 16.0,
             "notable_features": ["raised_voice", "direct_eye_contact", "aggressive_posture", "pointing_gesture"],
+            "scoring_mode": "rubric",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",     "weight": 0.9 },
+                { "signal": "empathy_phrase", "weight": 1.0 },
+                { "signal": "open_question",  "weight": 0.8 },
+                { "signal": "active_listening","weight": 0.7 },
+                { "signal": "open_posture",   "weight": 0.5 }
+            ],
+            "escalation_rubric": [
+                { "signal": "raised_voice",   "weight": 1.0 },
+                { "signal": "negative_tone",  "weight": 0.9 },
+                { "signal": "fast_speech",    "weight": 0.6 },
+                { "signal": "turning_away",   "weight": 0.5 }
+            ],
+            "critical_failures": [],
+            "score_range": { "min": -0.9, "max": 0.9 },
+            "clip_learning_objectives": ["emotieregulatie", "valideren zonder bevestigen"],
+            "ideal_response": "Erken de frustratie van de medewerker oprecht zonder de beschuldiging te bevestigen of te weerleggen. Zeg iets als: 'Ik hoor dat dit al een tijdje speelt en dat het impact heeft op je. Vertel me meer.' Spreek rustig en houd oogcontact zonder defensief te worden.",
+            "response_warnings": [
+                "zeg niet meteen dat de beschuldiging onjuist is — dat sluit het gesprek",
+                "noem Sanne niet bij naam in een verdedigende context",
+                "vermijd een managementtoon die de medewerker het gevoel geeft niet serieus te worden genomen"
+            ],
             "branch_conditions": [
                 { "min_score": -1.0, "max_score": 0.2,  "next_clip": "clip_02_gedeeltelijk_kalmer" },
                 { "min_score":  0.2, "max_score": 1.01, "next_clip": "clip_02_verharding" }
@@ -20,7 +52,29 @@
         "clip_02_gedeeltelijk_kalmer": {
             "file": "clip_02_gedeeltelijk_kalmer.mp4",
             "transcript": "Oké. Misschien heb ik me niet goed laten horen. Maar ik meen het wel. Ik doe mijn best, ik lever goed werk, en ik krijg het gevoel dat het niet gezien wordt. Dat doet wat met je, na een tijdje.",
+            "clip_duration_seconds": 14.0,
             "notable_features": ["calm_voice", "crossed_arms", "direct_eye_contact"],
+            "scoring_mode": "rubric",
+            "de_escalation_rubric": [
+                { "signal": "validation",        "weight": 1.0 },
+                { "signal": "open_question",     "weight": 0.9 },
+                { "signal": "active_listening",  "weight": 0.8 },
+                { "signal": "calm_voice",        "weight": 0.7 },
+                { "signal": "measured_pace",     "weight": 0.5 }
+            ],
+            "escalation_rubric": [
+                { "signal": "negative_tone",  "weight": 0.9 },
+                { "signal": "no_empathy",     "weight": 0.8 },
+                { "signal": "fast_speech",    "weight": 0.5 }
+            ],
+            "critical_failures": [],
+            "score_range": { "min": -0.9, "max": 0.8 },
+            "clip_learning_objectives": ["actief luisteren", "constructief doorvragen"],
+            "ideal_response": "Valideer de ervaring van de medewerker ('Ik begrijp dat dit gevoel van niet gezien worden echt iets met je doet') en stel een open vraag om dieper te komen: 'Kun je me een concreet voorbeeld geven?' Houd de houding open en niet defensief.",
+            "response_warnings": [
+                "weerleg het gevoel niet met feiten — eerst erkennen, dan eventueel verduidelijken",
+                "ga nu niet al in de probleemoplossende modus — luister eerst"
+            ],
             "branch_conditions": [
                 { "min_score": -1.0, "max_score": 0.2,  "next_clip": "clip_03_gesprek_open" },
                 { "min_score":  0.2, "max_score": 1.01, "next_clip": "clip_03_gesprek_moeizaam" }
@@ -30,7 +84,28 @@
         "clip_02_verharding": {
             "file": "clip_02_verharding.mp4",
             "transcript": "U ontkent het gewoon. Dat is precies het probleem — u luistert niet. Ik heb dit al drie keer geprobeerd aan te kaarten en elke keer wordt het weggewoven. Ik ga dit escaleren naar HR als dit zo doorgaat.",
+            "clip_duration_seconds": 13.0,
             "notable_features": ["raised_voice", "aggressive_posture", "pointing_gesture"],
+            "scoring_mode": "threshold",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",    "weight": 1.0 },
+                { "signal": "open_posture",  "weight": 0.7 },
+                { "signal": "measured_pace", "weight": 0.8 }
+            ],
+            "escalation_rubric": [
+                { "signal": "raised_voice",  "weight": 1.0 },
+                { "signal": "negative_tone", "weight": 0.9 },
+                { "signal": "fast_speech",   "weight": 0.7 }
+            ],
+            "critical_failures": [],
+            "score_range": { "min": -0.4, "max": 1.0 },
+            "clip_learning_objectives": ["emotieregulatie", "neutraliteit bewaren"],
+            "ideal_response": "Reageer kalm op de HR-dreiging zonder die te weerleggen of te negeren: 'Het staat je vrij dat te doen — en ik wil ook graag dat we dit goed oplossen. Laten we kijken of we er samen uit kunnen komen.' Niet defensief, maar ook niet capituleren.",
+            "response_warnings": [
+                "verdedig jezelf niet tegen de beschuldiging dat je niet luistert",
+                "ga niet in discussie over de eerdere gesprekken",
+                "reageer niet afwijzend op de HR-dreiging"
+            ],
             "branch_conditions": [
                 { "min_score": -1.0, "max_score": 0.15, "next_clip": "clip_03_gesprek_moeizaam" },
                 { "min_score":  0.15, "max_score": 1.01, "next_clip": "clip_03_breuk" }
@@ -40,7 +115,27 @@
         "clip_03_gesprek_open": {
             "file": "clip_03_gesprek_open.mp4",
             "transcript": "Dat... dat is fijn om te horen, eigenlijk. Ik wilde het even kwijt. Ik wil gewoon weten waar ik aan toe ben. Als er iets is wat ik anders moet doen, zeg het me dan gewoon.",
+            "clip_duration_seconds": 13.0,
             "notable_features": ["calm_voice", "open_posture", "direct_eye_contact"],
+            "scoring_mode": "rubric",
+            "de_escalation_rubric": [
+                { "signal": "positive_tone",    "weight": 0.9 },
+                { "signal": "open_question",    "weight": 0.8 },
+                { "signal": "calm_voice",       "weight": 0.7 },
+                { "signal": "active_listening", "weight": 0.6 }
+            ],
+            "escalation_rubric": [
+                { "signal": "negative_tone",  "weight": 0.9 },
+                { "signal": "fast_speech",    "weight": 0.5 }
+            ],
+            "critical_failures": [],
+            "score_range": { "min": -0.9, "max": 0.8 },
+            "clip_learning_objectives": ["constructief doorvragen", "actief luisteren"],
+            "ideal_response": "Bevestig de openheid van de medewerker en stel een concrete vervolgstap voor, zoals een individueel gesprek op korte termijn. Wees duidelijk en positief: 'Ik stel voor dat we volgende week een goed gesprek plannen over jouw ontwikkeling en projectkeuzes.'",
+            "response_warnings": [
+                "maak nu geen beloftes over toekomstige projecten die je niet kunt nakomen",
+                "sluit niet af zonder een concreet vervolg — anders voelt het hol"
+            ],
             "branch_conditions": [
                 { "min_score": -1.0, "max_score": 0.2,  "next_clip": "clip_04_constructief_einde" },
                 { "min_score":  0.2, "max_score": 1.01, "next_clip": "clip_04_wankelend_einde" }
@@ -50,7 +145,26 @@
         "clip_03_gesprek_moeizaam": {
             "file": "clip_03_gesprek_moeizaam.mp4",
             "transcript": "Ik geloof u, maar ik geloof u ook niet helemaal. U zegt de juiste dingen, maar ik zie het in de praktijk toch anders. Ik wacht het nog even af. Maar als het volgende project weer naar Sanne gaat, dan is voor mij het bewijs geleverd.",
+            "clip_duration_seconds": 15.0,
             "notable_features": ["crossed_arms", "silence", "direct_eye_contact"],
+            "scoring_mode": "threshold",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",    "weight": 0.9 },
+                { "signal": "open_posture",  "weight": 0.6 },
+                { "signal": "positive_tone", "weight": 0.7 }
+            ],
+            "escalation_rubric": [
+                { "signal": "negative_tone",  "weight": 0.9 },
+                { "signal": "fast_speech",    "weight": 0.5 }
+            ],
+            "critical_failures": [],
+            "score_range": { "min": -0.3, "max": 1.0 },
+            "clip_learning_objectives": [],
+            "ideal_response": "Accepteer de sceptische afsluiting zonder erin mee te gaan of hem weg te redeneren. Bevestig de afspraak rustig: 'Ik begrijp dat je het wilt zien in de praktijk — dat lijkt me eerlijk. Laten we het gesprek sowieso plannen.' Houd de deur open.",
+            "response_warnings": [
+                "ga niet in discussie over de toekomstige projectverdeling",
+                "accepteer de ultieme voorwaarde niet als een deal — benoem dat je het gesprek wilt, niet de uitkomst"
+            ],
             "branch_conditions": [
                 { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
             ]
@@ -59,7 +173,26 @@
         "clip_03_breuk": {
             "file": "clip_03_breuk.mp4",
             "transcript": "Ik ga dit niet verder met u bespreken. U begrijpt het niet en u wilt het niet begrijpen. Ik heb dit gesprek al te vaak gevoerd. Ik stuur vandaag nog een mail naar HR.",
+            "clip_duration_seconds": 11.0,
             "notable_features": ["raised_voice", "aggressive_posture", "backing_away"],
+            "scoring_mode": "threshold",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",    "weight": 1.0 },
+                { "signal": "measured_pace", "weight": 0.8 },
+                { "signal": "open_posture",  "weight": 0.6 }
+            ],
+            "escalation_rubric": [
+                { "signal": "raised_voice",  "weight": 1.0 },
+                { "signal": "negative_tone", "weight": 0.9 }
+            ],
+            "critical_failures": [],
+            "score_range": { "min": -0.2, "max": 1.0 },
+            "clip_learning_objectives": [],
+            "ideal_response": "Laat de medewerker vertrekken zonder het gesprek te forceren of de HR-dreiging te reageren. Een korte, rustige afsluiting: 'Ik respecteer dat. De deur staat open als je toch wilt praten.' Meer is hier niet productief.",
+            "response_warnings": [
+                "roep de medewerker niet terug",
+                "reageer niet op de HR-mail als dreiging of bedreiging voor je positie"
+            ],
             "branch_conditions": [
                 { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
             ]
@@ -68,7 +201,20 @@
         "clip_04_constructief_einde": {
             "file": "clip_04_constructief_einde.mp4",
             "transcript": "Oké. Ik ga erover nadenken. En ik kom volgende week terug voor dat gesprek. Dank u wel dat u de tijd heeft genomen — dat waardeer ik echt.",
+            "clip_duration_seconds": 10.0,
             "notable_features": ["calm_voice", "open_posture", "backing_away"],
+            "scoring_mode": "rubric",
+            "de_escalation_rubric": [
+                { "signal": "positive_tone",    "weight": 0.8 },
+                { "signal": "calm_voice",       "weight": 0.7 },
+                { "signal": "active_listening", "weight": 0.6 }
+            ],
+            "escalation_rubric": [],
+            "critical_failures": [],
+            "score_range": { "min": -1.0, "max": 0.2 },
+            "clip_learning_objectives": [],
+            "ideal_response": "Ontvang de dankbaarheid oprecht en bevestig de afspraak nog één keer concreet: 'Goed. Ik zet het in de agenda. Tot volgende week.' Sluit warm maar professioneel af.",
+            "response_warnings": [],
             "branch_conditions": [
                 { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
             ]
@@ -77,7 +223,26 @@
         "clip_04_wankelend_einde": {
             "file": "clip_04_wankelend_einde.mp4",
             "transcript": "Misschien. Ik weet het niet. Ik ga er nog even over nadenken. Maar ik heb het gevoel dat ik dit gesprek al eerder heb gehad en dat er nooit iets verandert. We zien wel.",
+            "clip_duration_seconds": 12.0,
             "notable_features": ["silence", "crossed_arms", "backing_away"],
+            "scoring_mode": "threshold",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",    "weight": 0.9 },
+                { "signal": "open_posture",  "weight": 0.6 },
+                { "signal": "positive_tone", "weight": 0.7 }
+            ],
+            "escalation_rubric": [
+                { "signal": "negative_tone",  "weight": 0.9 },
+                { "signal": "fast_speech",    "weight": 0.5 }
+            ],
+            "critical_failures": [],
+            "score_range": { "min": -0.3, "max": 1.0 },
+            "clip_learning_objectives": [],
+            "ideal_response": "Laat de ambiguïteit staan zonder erin mee te gaan of de medewerker te overtuigen. Bevestig rustig de openstaande uitnodiging: 'Ik begrijp het. De uitnodiging staat open.' Dring niet aan.",
+            "response_warnings": [
+                "dring niet aan op een antwoord of commitment",
+                "ga niet in discussie over 'wat er eerder veranderd had moeten zijn'"
+            ],
             "branch_conditions": [
                 { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
             ]

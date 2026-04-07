@@ -28,6 +28,22 @@ export type WindowID = string;
  */
 export type MfccMatrix = number[][];
 
+/**
+ * A single recognised word with its start and end time relative to clip start.
+ * Produced by the Transcription container with session-level timing (seconds
+ * from the last clip reset) and accumulated by the App container across all
+ * TranscriptMessages for the clip.
+ * Forwarded in AnalysisWindow to the Evaluation container for accurate
+ * silence_ratio and speech_pace computation.
+ */
+export interface WordTiming {
+    word:  string;
+    /** Seconds from clip start (session-level, reset on each clip reset). */
+    start: number;
+    /** Seconds from clip start (session-level, reset on each clip reset). */
+    end:   number;
+}
+
 // ─── Client → Server (WebSocket) ─────────────────────────────────────────────
 
 /**
@@ -56,7 +72,7 @@ export interface VideoFrame {
  * One chunk of audio data from the microphone, covering approximately 2 seconds.
  *
  * Contains both raw PCM (for Whisper transcription server-side) and pre-computed
- * MFCCs (for the behavior classifier). Sending both avoids duplicating the
+ * MFCCs (for the behaviour analyser). Sending both avoids duplicating the
  * bandwidth cost — raw audio is ~64KB per chunk, MFCCs are ~3KB.
  */
 export interface AudioChunk {
@@ -195,6 +211,9 @@ export interface ScenarioSummary {
  * Sent in response to a `request_clip` message.
  * Contains all information the client needs to load and display the clip,
  * including the video URL and branch conditions for preloading candidates.
+ *
+ * Does not include rubric or scoring fields from ClipMetadata — those are
+ * evaluation/feedback-internal and must not be exposed to the student.
  */
 export interface ClipData {
     type: "clip_data";
@@ -209,7 +228,7 @@ export interface ClipData {
     video_url: string;
     /** Verbatim transcript of the dialogue in this clip. */
     transcript: string;
-    /** Observable behaviors in the clip relevant to de-escalation. */
+    /** Observable behaviors of the actor in the clip relevant to de-escalation. */
     notable_features: string[];
     branch_conditions: BranchCondition[];
 }
@@ -281,6 +300,68 @@ export interface FeedbackToken {
     token: string;
 }
 
+/**
+ * Sent immediately after `clip_selected` for **admin sessions only**.
+ * Never sent to non-admin sessions.
+ *
+ * Carries the full evaluation result for the completed clip, together with
+ * App-level capture statistics and implementation-specific intermediate data
+ * from the Evaluation container's analysis pipeline.
+ *
+ * `analyser_id` identifies the BehaviourAnalyser implementation. Clients must
+ * use this value to interpret `stages`. When `analyser_id` is unrecognised the
+ * client should treat `stages` as an opaque object and not attempt to parse it
+ * against a known schema.
+ *
+ * See `docs/api_contract.md` → "Debug messages (admin sessions only)" for the
+ * full wire format including known `stages` shapes.
+ */
+export interface DebugEval {
+    type: "debug_eval";
+    session_id: string;
+    window_id: string;
+
+    /** App-level capture statistics for this clip. */
+    capture: {
+        /** VideoFrame messages received for this clip. */
+        frame_count: number;
+        /** AudioChunk messages received for this clip. */
+        audio_chunk_count: number;
+        /** Word timing entries forwarded to Evaluation. */
+        word_timing_count: number;
+        /**
+         * True if the neutral fallback score was used because Evaluation
+         * returned a non-2xx response or was unreachable.
+         */
+        eval_fallback: boolean;
+        /** Round-trip time for POST /evaluate/analyse, in milliseconds. */
+        eval_latency_ms: number;
+    };
+
+    /** Final accumulated transcript and word timings for the clip. */
+    transcript: {
+        final_text: string;
+        words: WordTiming[];
+    };
+
+    /** Full BehaviourResult returned by the Evaluation container. */
+    result: BehaviourResult;
+
+    /**
+     * Stable identifier for the BehaviourAnalyser implementation.
+     * e.g. `"stub"` or `"production"`.
+     */
+    analyser_id: string;
+
+    /**
+     * Implementation-specific intermediate data from the evaluation pipeline.
+     * Shape is determined by `analyser_id`. May be null when debug data was
+     * unavailable (e.g. eval fallback). May be large — do not assume it is
+     * small enough to render inline without truncation.
+     */
+    stages: unknown;
+}
+
 /** Sent by the App container when a recoverable or fatal error occurs. */
 export interface ServerError {
     type: "error";
@@ -303,6 +384,7 @@ export type ServerMessage =
     | ClipSelected
     | SessionComplete
     | FeedbackToken
+    | DebugEval
     | ServerError;
 
 // ─── HTTP — Session management ────────────────────────────────────────────────
@@ -384,11 +466,37 @@ export interface BranchCondition {
 }
 
 /**
+ * A single entry in a clip's de-escalation or escalation rubric.
+ * Pairs a signal name from the controlled vocabulary with a weight indicating
+ * how important that signal is on this clip relative to others.
+ * See `docs/scenario_schema.md` for the signal vocabulary.
+ */
+export interface RubricEntry {
+    /** Signal name from the controlled vocabulary, e.g. `"calm_voice"`, `"raised_voice"`. */
+    signal: string;
+    /** Relative importance of this signal on this clip. 0.0 to 1.0. */
+    weight: number;
+}
+
+/**
+ * Constrains the `escalation_score` output range for a specific clip.
+ * Applied by the Evaluation container after the weighted scorer runs.
+ * Defaults to `{ min: -1.0, max: 1.0 }` when absent from the metadata.
+ */
+export interface ScoreRange {
+    min: number;
+    max: number;
+}
+
+/**
  * Metadata for a single clip within a scenario.
  *
- * Used internally by the App container and forwarded to the Evaluation and
- * Feedback containers as part of `AnalysisWindow` and `ConversationTurn`.
- * `video_url` is constructed by the App and ignored by Evaluation and Feedback.
+ * Forwarded in full to the Evaluation container as part of `AnalysisWindow`.
+ * A subset of fields (excluding all evaluation-only scoring fields) is
+ * forwarded to the Feedback container as part of `ConversationTurn`.
+ * `video_url` is constructed by the App and ignored by both AI containers.
+ *
+ * See `docs/scenario_schema.md` for field propagation details.
  */
 export interface ClipMetadata {
     clip_id: string;
@@ -399,14 +507,59 @@ export interface ClipMetadata {
      * e.g. `/scenarios/scenario_01/clip_01_intro.mp4`
      */
     video_url: string;
-    /** Verbatim transcript of the dialogue in this clip. */
+    /** Verbatim transcript of the actor's dialogue in this clip. */
     transcript: string;
     /**
-     * Observable behaviors in the clip relevant to de-escalation,
-     * e.g. `"raised_voice"`, `"aggressive_posture"`. Used as context by the
-     * classifier and LLM. See `docs/scenario_schema.md` for recommended values.
+     * Expected duration of the clip in seconds.
+     * Used by the Evaluation container to normalise rate-based signals
+     * (silence_ratio, speech_pace, head_nod_frequency).
+     * The Evaluation container does not read video files.
+     */
+    clip_duration_seconds: number;
+    /**
+     * Observable behaviours of the actor in this clip — the stimulus the student
+     * is responding to. Used as context by the scorer and the Feedback LLM.
+     * See `docs/scenario_schema.md` for recommended values.
      */
     notable_features: string[];
+    /**
+     * Controls how the Evaluation container scores this clip.
+     * `"rubric"` — graded score from weighted positive and negative signals.
+     * `"threshold"` — only checks for clear escalation; absence of positive signals is not penalised.
+     */
+    scoring_mode: "rubric" | "threshold";
+    /** Weighted positive signals for this clip. Used by the Evaluation scorer. */
+    de_escalation_rubric: RubricEntry[];
+    /** Weighted negative signals for this clip. Used by the Evaluation scorer. */
+    escalation_rubric: RubricEntry[];
+    /**
+     * Signal names that apply a hard score penalty when detected, regardless of
+     * positive signals. Used by the Evaluation scorer only.
+     * When triggered, the signal name is appended to `SignalSummary.notable_signals`
+     * as `"critical_failure:<signal_name>"`.
+     */
+    critical_failures: string[];
+    /**
+     * Clamps the escalation_score output for this clip.
+     * Applied after the weighted scorer runs. Defaults to `{ min: -1.0, max: 1.0 }`.
+     */
+    score_range: ScoreRange;
+    /**
+     * De-escalation competency labels specifically targeted by this clip.
+     * Used by the Feedback LLM to anchor turn-level coaching advice.
+     * When absent, the Feedback container falls back to scenario-level learning_objectives.
+     */
+    clip_learning_objectives: string[];
+    /**
+     * Brief description of what a good student response to this clip looks like.
+     * Used by the Feedback LLM only — not used by the Evaluation scorer.
+     */
+    ideal_response: string | null;
+    /**
+     * Behaviours or phrases the student should avoid when responding to this clip.
+     * Used by the Feedback LLM only — not used by the Evaluation scorer.
+     */
+    response_warnings: string[];
     branch_conditions: BranchCondition[];
 }
 
@@ -427,43 +580,96 @@ export interface AnalysisWindow {
     mfccs:         MfccMatrix;
     /** Complete transcript of the student's response for this clip. */
     transcript:    string;
+    /**
+     * Word-level timings for the student's response, accumulated from all
+     * TranscriptMessages received during the clip. Times are session-level
+     * (seconds from clip start, reset on each clip reset).
+     * Used by the Evaluation container to compute silence_ratio and speech_pace
+     * accurately from actual speech boundaries rather than total clip duration.
+     * Empty array when using the stub Transcription pool or when no speech was detected.
+     */
+    words:         WordTiming[];
     clip_metadata: ClipMetadata;
 }
 
 // ─── Evaluation — cross-container results ────────────────────────────────────
 
 /**
- * A summary of the multimodal signals detected in a single analysis window.
- * Produced by the Evaluation container, forwarded to the Feedback container
- * as part of each ConversationTurn.
+ * The computed multimodal signals produced by the Evaluation container's
+ * signal-extraction pipeline for a single clip.
+ *
+ * These are the raw extracted values before the scorer maps them to an
+ * escalation_score. Forwarded to the Feedback container as part of each
+ * ConversationTurn so the LLM has interpretable signal evidence to reference.
+ *
+ * See `docs/architecture.md` for how each signal is computed.
  */
 export interface SignalSummary {
-    /** 0.0 (relaxed) to 1.0 (tense). */
-    voice_tension: number;
-    /** Syllables per second. */
+    /** 0.0 (relaxed) to 1.0 (tense). Derived from MFCC energy variance and audio emotion arousal. */
+    vocal_tension: number;
+    /** Syllables per second of actual speech (speech duration from word timings, not clip duration). */
     speech_pace: number;
-    /** Average landmark movement per frame. */
-    hand_velocity: number;
-    /** 0.0 (erratic) to 1.0 (steady). */
-    gaze_stability: number;
-    /** Ratio of frames where an open palm is detected. */
-    open_palm_ratio: number;
-    /** Notable signals detected, e.g. `"raised_voice"`, `"stub_mode"`. */
+    /** Variance of wrist and fingertip landmark displacement across the clip. */
+    gesture_activity: number;
+    /**
+     * Fraction of hand-detected frames with open-hand configuration.
+     * Null when hands were detected in fewer than 50% of frames — distinguishes
+     * a genuinely closed hand from hands that were off-camera.
+     */
+    open_gesture_ratio: number | null;
+    /** Frequency of vertical head oscillation in Hz, from face landmark Y-coordinates. */
+    head_nod_frequency: number;
+    /**
+     * Fraction of frames where the face is estimated to be forward-facing,
+     * based on the horizontal symmetry of left/right face mesh landmarks.
+     * 1.0 = fully facing the camera, 0.0 = fully turned away.
+     * Note: computed from MediaPipe face mesh (478 landmarks), not body pose.
+     * Shoulder landmarks are not available from the client's capture pipeline.
+     */
+    facing_ratio: number;
+    /**
+     * Fraction of clip_duration_seconds where no student speech was detected.
+     * Computed from word timing boundaries vs. declared clip duration.
+     * Requires word timings from the Transcription container; falls back to 0.0
+     * when words are unavailable (stub pool or empty transcript).
+     */
+    silence_ratio: number;
+    /** Matched Dutch empathy/validation/open-question phrases from the transcript. Empty array if none matched. */
+    lexical_markers: string[];
+    /** Broad sentiment classification of the student's transcript. */
+    response_tone: "positive" | "neutral" | "negative";
+    /**
+     * Notable signals detected during scoring.
+     * e.g. `"stub_mode"`, `"no_hands_detected"`, `"critical_failure:raised_voice"`.
+     */
     notable_signals: string[];
 }
 
 /**
- * The result of analyzing a clip's complete AnalysisWindow.
+ * The result of analysing a clip's complete AnalysisWindow.
  * Produced by the Evaluation container, consumed by the App container
  * (for clip branching) and the Feedback container (for debrief).
  */
 export interface BehaviourResult {
     window_id: WindowID;
     session_id: string;
-    /** -1.0 = strongly de-escalating, 1.0 = strongly escalating. */
+    /**
+     * -1.0 = strongly de-escalating, 1.0 = strongly escalating.
+     * Produced by the deterministic weighted scorer from the signal summary
+     * and the clip's rubric. Clamped to the clip's declared `score_range`.
+     */
     escalation_score: number;
+    /**
+     * Dominant emotion label derived from the audio emotion classifier (Stage A).
+     * Values: "calm" | "anxious" | "frustrated" | "neutral" | "distressed".
+     * Not derived from facial expression recognition.
+     */
     dominant_emotion: string;
-    /** 0.0 to 1.0. */
+    /**
+     * 0.0 to 1.0. Reflects the proportion of rubric signals for which a reliable
+     * measurement was available. Reduced when, e.g., hands were off-camera or the
+     * transcript was empty.
+     */
     confidence: number;
     signal_summary: SignalSummary;
 }
@@ -471,15 +677,32 @@ export interface BehaviourResult {
 // ─── Feedback — cross-container types ────────────────────────────────────────
 
 /**
+ * The subset of ClipMetadata fields forwarded to the Feedback container.
+ * Evaluation-only fields (scoring_mode, de_escalation_rubric, escalation_rubric,
+ * critical_failures, score_range, clip_duration_seconds) are stripped by the App
+ * container before the FeedbackRequest is assembled — they are machine-scoring
+ * inputs with no value to the LLM.
+ */
+export interface ClipMetadataForFeedback {
+    clip_id: string;
+    scenario_id: string;
+    transcript: string;
+    notable_features: string[];
+    clip_learning_objectives: string[];
+    ideal_response: string | null;
+    response_warnings: string[];
+}
+
+/**
  * A single turn in the conversation — one clip the student responded to,
- * paired with the behavior analysis of their response.
+ * paired with the behaviour analysis of their response.
  *
  * Accumulated by the App container during a session and compiled into a
  * FeedbackRequest at session end.
  */
 export interface ConversationTurn {
     turn_id: number;
-    clip: ClipMetadata;
+    clip: ClipMetadataForFeedback;
     student_response: BehaviourResult;
     student_transcript: string;
 }
@@ -501,14 +724,22 @@ export interface FeedbackRequest {
      * context the student is practising. Used by the Feedback container to
      * frame its coaching prompt for the scenario.
      *
-     * e.g. `"De student oefent het de-escaleren van een boze persoon in de
-     * rol van docent in het MBO."`
-     *
      * When absent the Feedback container falls back to a generic Dutch
      * de-escalation training description. Populated from the scenario's
      * `coaching_context` metadata field when present.
      */
     coaching_context?: string;
+    /**
+     * De-escalation competencies this scenario trains.
+     * The Feedback LLM uses these to anchor its advice to the educator's
+     * intended outcomes. When absent, advice is based on general principles.
+     */
+    learning_objectives?: string[];
+    /**
+     * MBO level or professional context the scenario targets.
+     * Used by the Feedback LLM to calibrate vocabulary and complexity.
+     */
+    target_audience?: string;
 }
 
 /**
