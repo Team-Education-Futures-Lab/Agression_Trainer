@@ -9,6 +9,23 @@
 #
 # Requires: NVIDIA Container Toolkit on the host and the `deploy.resources`
 # section in docker-compose.yml to expose the GPU to this container.
+#
+# Model download strategy
+# -----------------------
+# The HuggingFace sentiment model is NOT baked into the image.
+# It is downloaded once at runtime by BehaviourAnalyser.warm_up(), which is
+# called from the FastAPI lifespan handler after uvicorn is already listening.
+# This keeps the image lean and ensures the healthcheck endpoint responds
+# immediately on startup regardless of download speed.
+#
+# The model is cached in the HuggingFace default cache dir inside the
+# container (~/.cache/huggingface). To persist it across container
+# recreations, bind-mount a host directory:
+#
+#   volumes:
+#     - ./models/hf_cache:/root/.cache/huggingface
+#
+# Once cached, warm_up() loads from disk and completes in a few seconds.
 # =============================================================================
 
 FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
@@ -32,24 +49,15 @@ RUN apt-get update \
 
 WORKDIR /app
 
-
-# ── Model pre-download (optional build-time cache) ───────────────────────────
-# Bakes the sentiment model into the image at build time so the first request
-# doesn't stall on a download.
-#
-# The emotion model (opensmile eGeMAPS) requires no download — it ships with
-# the opensmile package.
-#
-# To override the model at build time:
-#   docker compose build --build-arg SENTIMENT_MODEL=some/other-model evaluation
-#
-ARG SENTIMENT_MODEL=lxyuan/distilbert-base-multilingual-cased-sentiments-student
-ENV SENTIMENT_MODEL=${SENTIMENT_MODEL}
-RUN python3 -c " \
-import os \
-from transformers import pipeline \
-pipeline('text-classification', model=os.environ['SENTIMENT_MODEL']) \
-"
+# ── PyTorch with CUDA ─────────────────────────────────────────────────────────
+# Install torch and torchaudio from the official CUDA wheel index first so they
+# pick up the correct CUDA variant. This layer is cached unless the versions change.
+# torch is NOT listed in requirements.txt to avoid version conflicts — this is
+# the single source of truth for the torch version.
+RUN pip install --no-cache-dir \
+    torch==2.5.1+cu124 \
+    torchaudio==2.5.1+cu124 \
+    --index-url https://download.pytorch.org/whl/cu124
 
 # ── Python dependencies ───────────────────────────────────────────────────────
 COPY evaluation/requirements.txt .
@@ -60,17 +68,5 @@ COPY evaluation/src ./src
 COPY evaluation/evaluation_config.toml ./evaluation_config.toml
 
 EXPOSE 8001
-
-# ── Model pre-download (optional build-time cache) ───────────────────────────
-# Uncomment to bake the sentiment model into the image at build time.
-# The emotion model (opensmile eGeMAPS) requires no download — it ships with
-# the opensmile package. The sentiment model ships safetensors so it loads
-# cleanly regardless of torch version.
-#
-# ARG SENTIMENT_MODEL=lxyuan/distilbert-base-multilingual-cased-sentiments-student
-# RUN python3 -c "
-# from transformers import pipeline
-# pipeline('text-classification', model='${SENTIMENT_MODEL}')
-# "
 
 CMD ["python", "src/main.py"]

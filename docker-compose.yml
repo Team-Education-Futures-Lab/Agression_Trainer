@@ -61,6 +61,12 @@ services:
       context: .
       dockerfile: evaluation/Dockerfile
     env_file: evaluation/.env
+    volumes:
+      # Persist the HuggingFace model cache across container recreations.
+      # On first start the sentiment model is downloaded during warm_up().
+      # Subsequent starts load from disk in a few seconds.
+      # Remove this volume mount if you prefer a clean download on every start.
+      - ./models/hf_cache:/root/.cache/huggingface
     expose:
       - "8001"
     healthcheck:
@@ -68,7 +74,11 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
-      start_period: 15s
+      # The healthcheck passes immediately after uvicorn starts because
+      # warm_up() runs in the background. start_period only needs to cover
+      # the time for uvicorn itself to bind — a few seconds at most.
+      # The generous window here is a safety margin for slow hosts.
+      start_period: 30s
     restart: unless-stopped
 
   # ── Feedback ─────────────────────────────────────────────────────────────────

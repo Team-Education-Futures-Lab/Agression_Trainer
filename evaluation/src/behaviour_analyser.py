@@ -19,21 +19,34 @@ Runs the four-stage evaluation pipeline described in docs/architecture.md:
 
   Stage C — Transcript Feature Extraction
     Input:  transcript (str) + words (WordTiming[]) from AnalysisWindow
-    Model:  cardiffnlp/twitter-xlm-roberta-base-sentiment (via transformers
-            pipeline). Downloaded on first use; cached in ~/.cache/huggingface.
+    Model:  lxyuan/distilbert-base-multilingual-cased-sentiments-student
+            (via transformers pipeline). Downloaded during warm_up() and
+            cached in ~/.cache/huggingface.
     Rule-based: silence_ratio, speech_pace, lexical_markers.
 
   Scorer — Deterministic Weighted Scorer
     Maps computed signals to rubric entries, applies weights, computes
     escalation_score, clamps to score_range.
 
+Startup sequence
+----------------
+__init__() performs only fast, synchronous setup:
+  - load and validate evaluation_config.toml
+  - instantiate opensmile (no download, ships with package)
+  - compile lexical regex patterns
+  - create the ThreadPoolExecutor
+
+warm_up() is called once by the lifespan handler after the HTTP server is
+already listening. It downloads and initialises the sentiment model in the
+background so the healthcheck URL is available immediately on startup.
+model_ready flips to True when warm_up() completes.
+
+analyse() awaits the ready event set by the lifespan handler before
+processing the first request, so a request that arrives during warm-up
+waits rather than fails.
+
 Stages A, B, C run concurrently via asyncio.gather; scorer runs after all
 three complete.
-
-All model/tool loading happens once at construction time so the container
-fails fast on startup rather than on the first request.
-All synchronous compute runs in a ThreadPoolExecutor so the asyncio event
-loop is never blocked.
 """
 
 from __future__ import annotations
@@ -296,15 +309,22 @@ class _ScorerResult:
 
 class BehaviourAnalyser(BehaviourAnalyserInterface):
     """
-    Production implementation. Loads all tools at construction time.
-    All compute is async-safe via run_in_executor.
+    Production implementation. Fast __init__; deferred model loading in warm_up().
+
+    __init__() loads config, opensmile, and compiles lexical patterns — all fast
+    and synchronous with no network I/O.
+
+    warm_up() downloads and initialises the HuggingFace sentiment model.  It is
+    called once by the lifespan handler after the HTTP server is already listening,
+    so the healthcheck endpoint is available immediately on container start.
+
+    analyse() awaits the ready event before processing its first request.
     """
 
     analyser_id = "production"
 
     def __init__(self, cfg: EvaluationConfig) -> None:
         import opensmile
-        from transformers import pipeline
 
         _env_dir  = Path(__file__).parent.parent
         toml_path = Path(
@@ -312,15 +332,10 @@ class BehaviourAnalyser(BehaviourAnalyserInterface):
         )
         self._thresholds, self._lexical_config = _load_analyser_config(toml_path)
 
-        self._device_str = cfg.device
+        self._cfg        = cfg
         self._executor   = ThreadPoolExecutor(
             max_workers        = 4,
             thread_name_prefix = "eval-worker",
-        )
-
-        logger.info(
-            "Loading evaluation tools on device=%s (sentiment=%s)",
-            cfg.device, cfg.sentiment_model,
         )
 
         # Stage A — opensmile eGeMAPS feature extractor.
@@ -332,18 +347,7 @@ class BehaviourAnalyser(BehaviourAnalyserInterface):
             feature_level= opensmile.FeatureLevel.Functionals,
         )
 
-        # Stage C — multilingual sentiment classifier.
-        # transformers + huggingface_hub pinned in requirements.txt to a
-        # tested compatible pair; this model has no config.json issues.
-        self._sentiment_pipeline = pipeline(
-            "text-classification",
-            model      = cfg.sentiment_model,
-            device     = 0 if cfg.device == "cuda" else -1,
-            truncation = True,
-            max_length = 512,
-        )
-
-        # Stage C — compile lexical patterns once at startup.
+        # Stage C — lexical patterns compiled once at startup (no download).
         self._lexical_patterns: list[tuple[str, re.Pattern]] = []
         lm = self._lexical_config
         for phrase in lm.empathy_phrases:
@@ -359,10 +363,48 @@ class BehaviourAnalyser(BehaviourAnalyserInterface):
                 ("validation", re.compile(rf"\b{re.escape(phrase)}\b", re.IGNORECASE))
             )
 
+        # Sentiment pipeline — populated by warm_up(), None until then.
+        self._sentiment_pipeline = None
+        self._model_ready        = False
+
         logger.info(
-            "Evaluation tools loaded — %d lexical patterns compiled",
+            "BehaviourAnalyser initialised (opensmile + config loaded, "
+            "%d lexical patterns compiled) — sentiment model download deferred to warm_up()",
             len(self._lexical_patterns),
         )
+
+    # ── Warm-up ───────────────────────────────────────────────────────────────
+
+    async def warm_up(self) -> None:
+        """
+        Download and initialise the HuggingFace sentiment model.
+        Called once by the lifespan handler after uvicorn is already listening.
+        Runs the blocking pipeline() call in the executor so the event loop
+        stays responsive during the download.
+        """
+        logger.info(
+            "warm_up: downloading / loading sentiment model %r on device=%s",
+            self._cfg.sentiment_model, self._cfg.device,
+        )
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(self._executor, self._load_sentiment_model)
+        self._model_ready = True
+        logger.info("warm_up: sentiment model ready")
+
+    def _load_sentiment_model(self) -> None:
+        """Synchronous helper — runs in executor thread during warm_up()."""
+        from transformers import pipeline
+        self._sentiment_pipeline = pipeline(
+            "text-classification",
+            model      = self._cfg.sentiment_model,
+            device     = 0 if self._cfg.device == "cuda" else -1,
+            truncation = True,
+            max_length = 512,
+        )
+
+    @property
+    def model_ready(self) -> bool:
+        return self._model_ready
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -372,6 +414,8 @@ class BehaviourAnalyser(BehaviourAnalyserInterface):
         *,
         collect_debug: bool = False,
     ) -> tuple[BehaviourResult, DebugStages | None]:
+        # warm_up() must have completed before we reach here.
+        # The lifespan handler in main.py guarantees this via _ready.wait().
         loop = asyncio.get_running_loop()
 
         audio_task = loop.run_in_executor(
@@ -492,23 +536,18 @@ class BehaviourAnalyser(BehaviourAnalyserInterface):
         shimmer    = _feat("shimmerLocaldB_sma3nz_amean")
 
         # Map features to arousal (0–1) and valence (−1–1).
-        # High energy + high F0 variation → high arousal (stressed/angry).
-        # High HNR (clean, harmonic voice) → positive valence proxy.
-        # High jitter/shimmer → voice irregularity → tension.
         energy_norm = float(np.clip(energy / 0.5, 0.0, 1.0))
         f0_var_norm = float(np.clip(f0_std / 30.0, 0.0, 1.0))
         jitter_norm = float(np.clip(jitter / 0.05, 0.0, 1.0))
         shimmer_norm= float(np.clip(shimmer / 3.0, 0.0, 1.0))
-        hnr_norm    = float(np.clip(hnr / 25.0, 0.0, 1.0))  # 0 dB=noisy, 25 dB=clean
+        hnr_norm    = float(np.clip(hnr / 25.0, 0.0, 1.0))
 
         arousal = float(np.clip(
             0.45 * energy_norm + 0.35 * f0_var_norm + 0.20 * jitter_norm,
             0.0, 1.0,
         ))
-        # High HNR = clear/positive voice; low HNR + high shimmer = tense
         valence = float(np.clip(hnr_norm - shimmer_norm, -1.0, 1.0))
 
-        # vocal_tension: primary driver is energy + jitter/shimmer stress markers
         vocal_tension = float(np.clip(
             0.50 * energy_norm + 0.25 * jitter_norm + 0.25 * shimmer_norm,
             0.0, 1.0,
@@ -660,7 +699,7 @@ class BehaviourAnalyser(BehaviourAnalyserInterface):
         sentiment_raw_label = "neutral"
         sentiment_raw_score = 1.0
         response_tone       = "neutral"
-        if transcript.strip():
+        if transcript.strip() and self._sentiment_pipeline is not None:
             try:
                 res                 = self._sentiment_pipeline(transcript[:512])
                 sentiment_raw_label = res[0]["label"]

@@ -4,10 +4,23 @@ Evaluation container entrypoint.
 Wires config → analyser → FastAPI routes.
 All business logic lives in BehaviourAnalyserInterface implementations;
 this file stays thin.
+
+Startup sequence
+----------------
+1. create_app() instantiates the analyser synchronously.
+   For the production analyser this is fast — only opensmile and config
+   loading happen here.  The sentiment model download is deferred.
+2. uvicorn starts listening.  GET /evaluate/health returns immediately
+   with model_ready=False while warm-up is still running.
+3. The lifespan handler spawns warm_up() as a background task.
+   When warm_up() completes, model_ready flips to True.
+4. GET /evaluate/analyse blocks on the warm-up event if a request
+   arrives before warm-up finishes, then proceeds normally.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -189,13 +202,37 @@ def create_app() -> FastAPI:
 
     verify_token = make_verify_token(cfg.internal_api_key)
 
+    # asyncio.Event that is set once warm_up() completes.
+    # analyse() awaits this before processing any request, so a request that
+    # arrives before warm-up finishes will wait rather than fail.
+    _ready = asyncio.Event()
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         logger.info(
             "Evaluation container starting — analyser=%s device=%s",
             cfg.analyser_impl, cfg.device,
         )
+
+        async def _run_warmup() -> None:
+            try:
+                await analyser.warm_up()
+                logger.info("Analyser warm-up complete — model_ready=True")
+            except Exception:
+                logger.exception(
+                    "Analyser warm-up failed — POST /evaluate/analyse will be "
+                    "unavailable until the container is restarted"
+                )
+            finally:
+                # Set the event regardless so that a failed warm-up doesn't
+                # leave analyse() waiting forever; the analyser itself will
+                # raise on the first real request if the model never loaded.
+                _ready.set()
+
+        asyncio.create_task(_run_warmup())
+
         yield
+
         logger.info("Evaluation container shutting down")
 
     app = FastAPI(title="AR Training — Evaluation", lifespan=lifespan)
@@ -214,10 +251,15 @@ def create_app() -> FastAPI:
         Analyse a complete clip window and return a BehaviourResult.
         Called exactly once per clip by the App container.
 
+        Blocks until warm_up() has completed so that the first request never
+        races against model initialisation.
+
         When the request carries X-Debug: true (admin sessions only), the
         response includes an additional top-level `debug` field with
         analyser_id and implementation-specific stage intermediates.
         """
+        await _ready.wait()
+
         collect_debug = x_debug is not None and x_debug.lower() == "true"
         window        = _to_analysis_window(body)
         result, stages = await analyser.analyse(window, collect_debug=collect_debug)
@@ -250,8 +292,19 @@ def create_app() -> FastAPI:
 
     @app.get("/evaluate/health")
     async def health():
-        """Report analyser implementation and inference device."""
-        status = HealthStatus(status="ok", device=cfg.device)
+        """
+        Report analyser implementation, inference device, and model readiness.
+
+        model_ready is False while the production analyser is still downloading
+        or initialising its sentiment model.  The container responds immediately
+        on startup so the Docker healthcheck never times out; the App container
+        treats model_ready=False as degraded rather than unreachable.
+        """
+        status = HealthStatus(
+            status      = "ok",
+            device      = cfg.device,
+            model_ready = analyser.model_ready,
+        )
         return asdict(status)
 
     # ── GET /evaluate/debug/config ────────────────────────────────────────────

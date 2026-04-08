@@ -215,9 +215,19 @@ DebugStages = dict  # dict | None
 
 @dataclass
 class HealthStatus:
-    """Response body for GET /evaluate/health."""
-    status: str         # "ok"
-    device: str = "cpu" # "cpu" | "cuda"
+    """
+    Response body for GET /evaluate/health.
+
+    model_ready is False while the production analyser is downloading or
+    initialising its sentiment model in the background after startup.
+    It is always True for the stub analyser (no model to load).
+    The App container's health aggregation treats model_ready=False as
+    degraded rather than unreachable — the container is up and will serve
+    requests once warm-up completes.
+    """
+    status:      str        # "ok"
+    device:      str = "cpu"  # "cpu" | "cuda"
+    model_ready: bool = True  # False while warm_up() is still running
 
 
 # ─── Interface ────────────────────────────────────────────────────────────────
@@ -233,9 +243,12 @@ class BehaviourAnalyserInterface(ABC):
     a result. The stages dict is only assembled when collect_debug=True so that
     non-debug sessions bear no overhead from intermediate data collection.
 
-    The production implementation runs the four-stage pipeline
-    (audio emotion extraction, landmark feature extraction, transcript feature
-    extraction, deterministic weighted scorer) described in docs/architecture.md.
+    Lifecycle
+    ---------
+    warm_up() is called once by the lifespan handler after the HTTP server is
+    already listening. It must complete before analyse() is called. The default
+    implementation is a no-op; the production analyser uses it to download and
+    initialise the sentiment model without blocking startup.
 
     Implementations:
       - StubBehaviourAnalyser  (stubs/stub_behaviour_analyser.py)
@@ -249,6 +262,13 @@ class BehaviourAnalyserInterface(ABC):
 
     analyser_id: str  # must be set on every concrete subclass
 
+    async def warm_up(self) -> None:
+        """
+        Called once by the lifespan handler after the HTTP server starts.
+        Default is a no-op. Override to perform deferred model loading.
+        Must be idempotent.
+        """
+
     @abstractmethod
     async def analyse(
         self,
@@ -258,6 +278,9 @@ class BehaviourAnalyserInterface(ABC):
     ) -> tuple[BehaviourResult, DebugStages | None]:
         """
         Analyse a complete clip window and return a (result, stages) tuple.
+
+        analyse() must not be called before warm_up() has completed.
+        The lifespan handler in main.py guarantees this ordering.
 
         Args:
             window:        All frames, MFCCs, transcript, word timings, and
@@ -277,3 +300,12 @@ class BehaviourAnalyserInterface(ABC):
                                 None when collect_debug=False.
         """
         ...
+
+    @property
+    def model_ready(self) -> bool:
+        """
+        True once warm_up() has completed successfully.
+        Reflected in GET /evaluate/health as model_ready.
+        Always True for the stub analyser.
+        """
+        return True
