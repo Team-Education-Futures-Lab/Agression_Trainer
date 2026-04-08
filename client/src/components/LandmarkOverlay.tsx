@@ -1,12 +1,17 @@
 // =============================================================================
 // LandmarkOverlay
 //
-// Canvas drawn on top of the webcam feed. Renders the MediaPipe face mesh
-// connections + dots and hand skeleton connections + dots.
+// Imperative canvas drawn on top of the webcam feed. Renders the MediaPipe
+// face mesh connections + dots and hand skeleton connections + dots.
 // Positioned absolutely so it overlays the <video> element exactly.
+//
+// The component exposes a `draw(frame)` method via an imperative ref handle
+// rather than being driven by React state. The parent calls draw() directly
+// from inside the frame consumer loop so this component never re-renders
+// after its initial mount.
 // =============================================================================
 
-import { useEffect, useRef } from "react";
+import { forwardRef, useImperativeHandle, useRef } from "react";
 import type { Landmark } from "@ar-training/shared";
 
 const FACE_CONNECTIONS: [number, number][] = [
@@ -27,62 +32,82 @@ const HAND_CONNECTIONS: [number, number][] = [
     [5,9],[9,13],[13,17],
 ];
 
+export interface LandmarkFrame {
+    face_landmarks: Landmark[];
+    left_hand:      Landmark[];
+    right_hand:     Landmark[];
+}
+
+export interface LandmarkOverlayHandle {
+    /** Draw one frame imperatively. Never triggers a React re-render. */
+    draw(frame: LandmarkFrame): void;
+    /** Clear the canvas (e.g. when capture stops). */
+    clear(): void;
+}
+
 interface LandmarkOverlayProps {
-    frame: {
-        face_landmarks: Landmark[];
-        left_hand:      Landmark[];
-        right_hand:     Landmark[];
-    };
     width:  number;
     height: number;
 }
 
-export function LandmarkOverlay({ frame, width, height }: LandmarkOverlayProps) {
-    const canvasRef = useRef<HTMLCanvasElement | null>(null);
+export const LandmarkOverlay = forwardRef<LandmarkOverlayHandle, LandmarkOverlayProps>(
+    function LandmarkOverlay({ width, height }, ref) {
+        const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
-    useEffect(() => {
-        const canvas = canvasRef.current;
-        if (!canvas) return;
-        const ctx = canvas.getContext("2d");
-        if (!ctx) return;
+        useImperativeHandle(ref, () => ({
+            draw(frame: LandmarkFrame) {
+                const canvas = canvasRef.current;
+                if (!canvas) return;
+                const ctx = canvas.getContext("2d");
+                if (!ctx) return;
 
-        ctx.clearRect(0, 0, width, height);
+                ctx.clearRect(0, 0, width, height);
 
-        // Face — cyan connections + small dots
-        drawConnections(ctx, frame.face_landmarks, FACE_CONNECTIONS, width, height, "#22d3ee", 0.8);
-        for (const lm of frame.face_landmarks) {
-            drawDot(ctx, lm.x * width, lm.y * height, "#67e8f9", 1.5);
-        }
+                // Face — cyan connections + small dots
+                drawConnections(ctx, frame.face_landmarks, FACE_CONNECTIONS, width, height, "#22d3ee", 0.8);
+                for (const lm of frame.face_landmarks) {
+                    drawDot(ctx, lm.x * width, lm.y * height, "#67e8f9", 1.5);
+                }
 
-        // Left hand — purple
-        drawConnections(ctx, frame.left_hand, HAND_CONNECTIONS, width, height, "#a78bfa", 1.5);
-        for (const lm of frame.left_hand) {
-            drawDot(ctx, lm.x * width, lm.y * height, "#c4b5fd", 3);
-        }
+                // Left hand — purple
+                drawConnections(ctx, frame.left_hand, HAND_CONNECTIONS, width, height, "#a78bfa", 1.5);
+                for (const lm of frame.left_hand) {
+                    drawDot(ctx, lm.x * width, lm.y * height, "#c4b5fd", 3);
+                }
 
-        // Right hand — green
-        drawConnections(ctx, frame.right_hand, HAND_CONNECTIONS, width, height, "#34d399", 1.5);
-        for (const lm of frame.right_hand) {
-            drawDot(ctx, lm.x * width, lm.y * height, "#6ee7b7", 3);
-        }
-    }, [frame, width, height]);
+                // Right hand — green
+                drawConnections(ctx, frame.right_hand, HAND_CONNECTIONS, width, height, "#34d399", 1.5);
+                for (const lm of frame.right_hand) {
+                    drawDot(ctx, lm.x * width, lm.y * height, "#6ee7b7", 3);
+                }
+            },
+            clear() {
+                const canvas = canvasRef.current;
+                if (!canvas) return;
+                const ctx = canvas.getContext("2d");
+                ctx?.clearRect(0, 0, width, height);
+            },
+        }), [width, height]);
 
-    return (
-        <canvas
-            ref={canvasRef}
-            width={width}
-            height={height}
-            style={{
-                position:      "absolute",
-                top:           0,
-                left:          0,
-                width:         "100%",
-                height:        "100%",
-                pointerEvents: "none",
-            }}
-        />
-    );
-}
+        return (
+            <canvas
+                ref={canvasRef}
+                width={width}
+                height={height}
+                style={{
+                    position:      "absolute",
+                    top:           0,
+                    left:          0,
+                    width:         "100%",
+                    height:        "100%",
+                    pointerEvents: "none",
+                }}
+            />
+        );
+    }
+);
+
+// ─── Canvas helpers ───────────────────────────────────────────────────────────
 
 function drawDot(
     ctx:    CanvasRenderingContext2D,
