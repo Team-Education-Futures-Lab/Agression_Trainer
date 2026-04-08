@@ -1,9 +1,43 @@
-numpy~=2.4.4
-pytest~=9.0.2
-fastapi~=0.135.3
-python-dotenv~=1.2.2
-torch~=2.11.0
-uvicorn~=0.44.0
-pydantic~=2.12.5
-librosa
-transformers
+# =============================================================================
+# AR Training — Evaluation Container — Python dependencies
+#
+# torch and torchaudio are intentionally absent — they are installed separately
+# in the Dockerfile from the official CUDA wheel index (torch==2.5.1+cu124).
+#
+# ALL ML libraries must be pinned. Unpinned versions break silently on rebuild:
+#
+#   transformers>=4.41 enforces torch>=2.6 for .bin model loading (CVE-2025-32434).
+#   We pin to 4.40.2, the last version before that enforcement was added.
+#   The sentiment model is also chosen to ship safetensors (not .bin) so this
+#   restriction becomes irrelevant — but the pin keeps future rebuilds stable.
+#
+#   huggingface_hub>=0.24 introduced strict int validation on config.json fields
+#   that breaks certain models. 0.23.4 is the last clean version for our use.
+# =============================================================================
+
+numpy>=1.26,<3.0
+scipy>=1.13,<2.0
+
+# Web framework
+fastapi>=0.115,<1.0
+uvicorn>=0.30,<1.0
+pydantic>=2.7,<3.0
+python-dotenv>=1.0,<2.0
+
+# Testing
+pytest>=8.0,<10.0
+pytest-asyncio>=0.23,<1.0
+httpx>=0.27,<1.0
+
+# Audio feature extraction — Stage A
+# opensmile ships with its eGeMAPS feature definitions — no model download needed.
+opensmile>=2.5,<3.0
+librosa>=0.10,<1.0
+
+# NLP — Stage C sentiment
+# Pin to a torch-2.5-compatible version of transformers.
+# The sentiment model (lxyuan/distilbert-base-multilingual-cased-sentiments-student)
+# ships with model.safetensors so .bin torch.load security restrictions never apply.
+transformers==4.40.2
+huggingface_hub==0.23.4
+tokenizers>=0.19,<0.20

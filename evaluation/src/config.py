@@ -1,12 +1,11 @@
 """
 Configuration loader for the Evaluation container.
 Reads environment variables and returns a typed EvaluationConfig.
-Mirrors the pattern in transcription/src/config.py.
 
 Only infrastructure configuration lives here (device, API key, model names).
 Implementation-specific tuning config (thresholds, lexical patterns) is the
 responsibility of each BehaviourAnalyserInterface implementation and is loaded
-directly by that implementation, not here.
+directly by that implementation from evaluation_config.toml.
 """
 from __future__ import annotations
 
@@ -17,10 +16,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Load .env from the evaluation/ directory (one level up from src/).
-# Has no effect when variables are already set in the environment (e.g. Docker).
 _ENV_DIR = Path(__file__).parent.parent
 load_dotenv(_ENV_DIR / ".env")
+
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -30,6 +28,7 @@ def _require_env(key: str) -> str:
         raise RuntimeError(f"Missing required environment variable: {key}")
     return val
 
+
 def _int_env(key: str, fallback: int) -> int:
     val = os.environ.get(key)
     if not val:
@@ -38,6 +37,7 @@ def _int_env(key: str, fallback: int) -> int:
         return int(val)
     except ValueError:
         raise RuntimeError(f"Environment variable {key} must be an integer, got {val!r}")
+
 
 def _enum_env(key: str, allowed: list[str], fallback: str) -> str:
     val = os.environ.get(key)
@@ -49,6 +49,7 @@ def _enum_env(key: str, allowed: list[str], fallback: str) -> str:
         )
     return val
 
+
 def _secret_env(key: str, known_bad_value: str = "CHANGE_ME") -> str:
     val = _require_env(key)
     if val == known_bad_value:
@@ -59,8 +60,10 @@ def _secret_env(key: str, known_bad_value: str = "CHANGE_ME") -> str:
         )
     return val
 
+
 def _optional_env(key: str, fallback: str) -> str:
     return os.environ.get(key) or fallback
+
 
 # ─── Config dataclass ─────────────────────────────────────────────────────────
 
@@ -71,17 +74,12 @@ class EvaluationConfig:
     analyser_impl:    str   # "stub" | "production"
     device:           str   # "cpu" | "cuda"
     """
-    HuggingFace model ID for the dimensional audio emotion classifier.
-    Loaded by BehaviourAnalyser during startup.
-    Default: audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim
-    """
-    emotion_model:    str
-    """
     HuggingFace model ID for the multilingual text sentiment classifier.
-    Loaded by BehaviourAnalyser during startup.
-    Default: cardiffnlp/twitter-xlm-roberta-base-sentiment
+    Used by Stage C of the production BehaviourAnalyser.
+    Stage A (audio emotion) uses opensmile eGeMAPS features with no model
+    download — no emotion_model field is needed.
     """
-    sentiment_model:  str
+    sentiment_model: str
 
 
 # ─── Public factory ───────────────────────────────────────────────────────────
@@ -92,12 +90,10 @@ def load_config() -> EvaluationConfig:
         internal_api_key = _secret_env("INTERNAL_API_KEY", "CHANGE_ME"),
         analyser_impl    = _enum_env("BEHAVIOUR_ANALYSER", ["stub", "production"], "stub"),
         device           = _enum_env("DEVICE", ["cpu", "cuda"], "cpu"),
-        emotion_model    = _optional_env(
-            "EMOTION_MODEL",
-            "audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim",
-        ),
         sentiment_model  = _optional_env(
             "SENTIMENT_MODEL",
-            "cardiffnlp/twitter-xlm-roberta-base-sentiment",
+            # distilbert multilingual sentiment — small, fast, ships safetensors.
+            # Compatible with torch 2.5.x (no .bin loading required).
+            "lxyuan/distilbert-base-multilingual-cased-sentiments-student",
         ),
     )

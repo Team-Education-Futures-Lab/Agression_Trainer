@@ -3,41 +3,37 @@ Production implementation of BehaviourAnalyserInterface.
 
 Runs the four-stage evaluation pipeline described in docs/architecture.md:
 
-  Stage A — Audio Emotion Extraction
+  Stage A — Audio Emotion / Prosodic Feature Extraction
     Input:  mfccs [n_frames][13] from AnalysisWindow
-    Models: audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim
-            Outputs arousal (0-1) and valence (-1-1); arousal + MFCC energy
-            variance feed vocal_tension. Dominant emotion label from the
-            classifier head.
-    Note:   The model expects raw float32 audio at 16 kHz. MFCCs are
-            reconstructed to approximate audio via librosa inverse MFCC.
-            The reconstruction is lossy but preserves the prosodic features
-            that emotion classifiers depend on.
+    Tool:   opensmile (eGeMAPS feature set)
+    No model download required — feature definitions ship with the package.
+    MFCCs are reconstructed to approximate audio via librosa Griffin-Lim,
+    then opensmile extracts eGeMAPS prosodic features: F0 (pitch), energy,
+    jitter, shimmer, HNR. These map directly to arousal/tension proxies.
 
   Stage B — Landmark Feature Extraction
     Input:  frames [VideoFrame] from AnalysisWindow
-    Purely deterministic signal processing — no model needed.
+    Purely deterministic signal processing — no model or download needed.
     Extracts: gesture_activity, open_gesture_ratio, head_nod_frequency,
               facing_ratio.
 
   Stage C — Transcript Feature Extraction
     Input:  transcript (str) + words (WordTiming[]) from AnalysisWindow
-    Models: cardiffnlp/twitter-xlm-roberta-base-sentiment
-            Three-class (negative/neutral/positive) multilingual sentiment.
+    Model:  cardiffnlp/twitter-xlm-roberta-base-sentiment (via transformers
+            pipeline). Downloaded on first use; cached in ~/.cache/huggingface.
     Rule-based: silence_ratio, speech_pace, lexical_markers.
 
   Scorer — Deterministic Weighted Scorer
-    Input:  SignalSummary + clip_metadata rubric
-    Maps computed signals to rubric signal names, applies rubric weights,
-    computes escalation_score, clamps to score_range.
+    Maps computed signals to rubric entries, applies weights, computes
+    escalation_score, clamps to score_range.
 
-Stages A, B, C run concurrently via asyncio.gather; the scorer runs after
-all three complete.
+Stages A, B, C run concurrently via asyncio.gather; scorer runs after all
+three complete.
 
-Models are loaded once at construction time (during app lifespan startup)
-so the container fails fast on missing models rather than on first request.
-All synchronous model inference runs in a ThreadPoolExecutor to avoid
-blocking the asyncio event loop.
+All model/tool loading happens once at construction time so the container
+fails fast on startup rather than on the first request.
+All synchronous compute runs in a ThreadPoolExecutor so the asyncio event
+loop is never blocked.
 """
 
 from __future__ import annotations
@@ -66,60 +62,41 @@ from interfaces import (
 )
 
 if TYPE_CHECKING:
-    import torch
+    pass
 
 logger = logging.getLogger(__name__)
 
-# ─── Implementation-detail constants (not tuning parameters) ──────────────────
-# These are algorithmic parameters that affect measurement reliability and
-# signal processing quality. They are not pedagogical thresholds and must
-# not be moved to the config file.
+# ─── Implementation-detail constants ──────────────────────────────────────────
 
-# Face mesh landmark indices used for lateral symmetry (facing_ratio).
-# MediaPipe face mesh indices for approximate cheekbone/ear region.
-# Left side: 234 (left cheek), 93 (left ear region approximation)
-# Right side: 454 (right cheek), 323 (right ear region approximation)
-# Note: these are face mesh (478-point) indices, not body pose landmarks.
-# Shoulder landmarks are not available from the client's capture pipeline.
 _FACE_LEFT_INDICES  = [234, 93]
 _FACE_RIGHT_INDICES = [454, 323]
-
-# Hand landmark indices for wrists and fingertips.
-_WRIST_INDEX      = 0
-_FINGERTIP_INDICES = [4, 8, 12, 16, 20]
-
-# Nose tip and forehead landmark indices for head nod Y-oscillation.
-_NOSE_TIP_INDEX = 1
-_FOREHEAD_INDEX = 10
-
-# Rolling window size (frames) for smoothing head landmark Y coordinates
-# before FFT. This is an FFT pre-processing parameter, not a pedagogy setting.
-_NOD_SMOOTH_WINDOW = 5
-
-# Hand presence below this fraction of frames → open_gesture_ratio = None.
-# This is a measurement reliability threshold: when hands are detected in fewer
-# than this fraction of frames, open_gesture_ratio is too noisy to use for
-# scoring. It is not a threshold over student behaviour.
+_WRIST_INDEX        = 0
+_FINGERTIP_INDICES  = [4, 8, 12, 16, 20]
+_NOSE_TIP_INDEX     = 1
+_FOREHEAD_INDEX     = 10
+_NOD_SMOOTH_WINDOW  = 5
 _MIN_HAND_DETECTION_RATIO = 0.50
 
+# Sample rate expected by opensmile and librosa reconstruction.
+_SAMPLE_RATE = 16_000
+
+
 # ─── TOML config dataclasses and loader ───────────────────────────────────────
-# These are private to BehaviourAnalyser. EvaluationConfig carries only
-# infrastructure config; implementation-specific tuning lives here.
 
 @dataclass(frozen=True)
 class _SignalThresholds:
-    raised_voice_tension_threshold:  float
-    calm_voice_tension_threshold:    float
-    fast_speech_pace_threshold:      float   # syl/s
-    measured_pace_threshold:         float   # syl/s
-    closed_gesture_threshold:        float
-    open_gesture_threshold:          float
-    nod_frequency_threshold:         float   # Hz
-    turning_away_threshold:          float
-    open_posture_threshold:          float
-    long_silence_threshold:          float
-    appropriate_silence_min:         float
-    appropriate_silence_max:         float
+    raised_voice_tension_threshold: float
+    calm_voice_tension_threshold:   float
+    fast_speech_pace_threshold:     float
+    measured_pace_threshold:        float
+    closed_gesture_threshold:       float
+    open_gesture_threshold:         float
+    nod_frequency_threshold:        float
+    turning_away_threshold:         float
+    open_posture_threshold:         float
+    long_silence_threshold:         float
+    appropriate_silence_min:        float
+    appropriate_silence_max:        float
 
 
 @dataclass(frozen=True)
@@ -159,12 +136,10 @@ def _phrase_list(sec: str, key: str, val: object) -> list[str]:
 
 
 def _load_analyser_config(path: Path) -> tuple[_SignalThresholds, _LexicalMarkers]:
-    """Load and validate evaluation_config.toml. Raises RuntimeError on any problem."""
     if not path.exists():
         raise RuntimeError(
             f"BehaviourAnalyser tuning config not found: {path}\n"
-            "Ensure evaluation_config.toml is present in the evaluation/ directory, "
-            "or set EVALUATION_CONFIG to its location."
+            "Ensure evaluation_config.toml is present in the evaluation/ directory."
         )
     try:
         with open(path, "rb") as fh:
@@ -263,18 +238,20 @@ def _load_analyser_config(path: Path) -> tuple[_SignalThresholds, _LexicalMarker
     return thresholds, markers
 
 
-# ─── Stage A intermediate results ─────────────────────────────────────────────
+# ─── Stage intermediate result types ──────────────────────────────────────────
 
 @dataclass
-class _AudioEmotionResult:
-    arousal:          float  # 0.0–1.0 from dimensional head
-    valence:          float  # -1.0–1.0 from dimensional head
-    dominant_emotion: str    # "calm" | "anxious" | "frustrated" | "neutral" | "distressed"
-    vocal_tension:    float  # derived from arousal + MFCC energy variance, 0.0–1.0
-    energy_var_norm:  float  # normalised MFCC energy variance (debug only)
+class _AudioResult:
+    arousal:          float   # 0.0–1.0 derived from eGeMAPS energy/F0 features
+    valence:          float   # -1.0–1.0 approximated from HNR and jitter
+    dominant_emotion: str     # "calm" | "anxious" | "frustrated" | "neutral" | "distressed"
+    vocal_tension:    float   # 0.0–1.0 fed to the scorer
+    # debug fields
+    f0_mean:          float
+    f0_std:           float
+    energy_mean:      float
+    hnr_mean:         float
 
-
-# ─── Stage B intermediate results ─────────────────────────────────────────────
 
 @dataclass
 class _LandmarkResult:
@@ -283,85 +260,81 @@ class _LandmarkResult:
     head_nod_frequency:   float
     facing_ratio:         float
     hands_detected_ratio: float
-    facing_frame_count:   int    # debug: frames where face was forward-facing
-    total_frame_count:    int    # debug: total frames processed
-    nod_fft_peak_hz:      float  # debug: same as head_nod_frequency; named for clarity
+    facing_frame_count:   int
+    total_frame_count:    int
+    nod_fft_peak_hz:      float
     notable_signals:      list[str]
 
 
-# ─── Stage C intermediate results ─────────────────────────────────────────────
-
 @dataclass
 class _TranscriptResult:
-    speech_pace:        float
-    silence_ratio:      float
-    lexical_markers:    list[str]  # category labels: "empathy_phrase", "open_question", "validation"
-    response_tone:      str        # "positive" | "neutral" | "negative"
-    speech_duration_s:  float      # debug: cumulative speech time from word timings
-    silence_duration_s: float      # debug: clip_duration - speech_duration
-    word_count:         int        # debug
-    syllable_count:     int        # debug
-    sentiment_raw_label: str       # debug: raw classifier label
-    sentiment_raw_score: float     # debug: classifier confidence
+    speech_pace:         float
+    silence_ratio:       float
+    lexical_markers:     list[str]
+    response_tone:       str
+    speech_duration_s:   float
+    silence_duration_s:  float
+    word_count:          int
+    syllable_count:      int
+    sentiment_raw_label: str
+    sentiment_raw_score: float
 
-
-# ─── Scorer intermediate results ──────────────────────────────────────────────
 
 @dataclass
 class _ScorerResult:
-    escalation_score:   float
-    confidence:         float
-    detected_signals:   set[str]   # rubric signal names that fired
-    de_score:           float      # weighted sum of detected de-escalation signals
-    esc_score:          float      # weighted sum of detected escalation signals
-    de_weight_total:    float      # sum of all de_escalation_rubric weights
-    esc_weight_total:   float      # sum of all escalation_rubric weights
-    raw_score_pre_clamp: float     # score before score_range clamping
+    escalation_score:    float
+    confidence:          float
+    detected_signals:    set[str]
+    de_score:            float
+    esc_score:           float
+    de_weight_total:     float
+    esc_weight_total:    float
+    raw_score_pre_clamp: float
 
 
 # ─── BehaviourAnalyser ────────────────────────────────────────────────────────
 
 class BehaviourAnalyser(BehaviourAnalyserInterface):
     """
-    Production implementation. Loads models at construction time.
-    All inference is async-safe via run_in_executor.
+    Production implementation. Loads all tools at construction time.
+    All compute is async-safe via run_in_executor.
     """
 
     analyser_id = "production"
 
     def __init__(self, cfg: EvaluationConfig) -> None:
-        import torch
-        from transformers import pipeline, AutoProcessor, AutoModelForAudioClassification
+        import opensmile
+        from transformers import pipeline
 
-        # Load implementation-specific tuning config (thresholds + lexical patterns).
-        # The path defaults to evaluation_config.toml alongside the container's .env;
-        # override with EVALUATION_CONFIG if the file lives elsewhere.
-        _env_dir = Path(__file__).parent.parent
-        toml_path = Path(os.environ.get("EVALUATION_CONFIG") or str(_env_dir / "evaluation_config.toml"))
+        _env_dir  = Path(__file__).parent.parent
+        toml_path = Path(
+            os.environ.get("EVALUATION_CONFIG") or str(_env_dir / "evaluation_config.toml")
+        )
         self._thresholds, self._lexical_config = _load_analyser_config(toml_path)
 
-        self._device_str   = cfg.device
-        self._torch_device = torch.device("cuda" if cfg.device == "cuda" else "cpu")
-        self._executor     = ThreadPoolExecutor(
+        self._device_str = cfg.device
+        self._executor   = ThreadPoolExecutor(
             max_workers        = 4,
             thread_name_prefix = "eval-worker",
         )
 
         logger.info(
-            "Loading evaluation models on device=%s (emotion=%s, sentiment=%s)",
-            cfg.device, cfg.emotion_model, cfg.sentiment_model,
+            "Loading evaluation tools on device=%s (sentiment=%s)",
+            cfg.device, cfg.sentiment_model,
         )
 
-        # Stage A — dimensional emotion model
-        # Outputs arousal, dominance, valence as continuous values.
-        self._emotion_processor = AutoProcessor.from_pretrained(cfg.emotion_model)
-        self._emotion_model = AutoModelForAudioClassification.from_pretrained(
-            cfg.emotion_model,
-        ).to(self._torch_device)
-        self._emotion_model.eval()
+        # Stage A — opensmile eGeMAPS feature extractor.
+        # Ships with the opensmile package — no model download, no internet,
+        # no HuggingFace dependency. eGeMAPS is the standard acoustic feature
+        # set for speech emotion research: F0, energy, jitter, shimmer, HNR.
+        self._smile = opensmile.Smile(
+            feature_set  = opensmile.FeatureSet.eGeMAPSv02,
+            feature_level= opensmile.FeatureLevel.Functionals,
+        )
 
-        # Stage C — multilingual sentiment classifier
-        # Outputs negative / neutral / positive.
+        # Stage C — multilingual sentiment classifier.
+        # transformers + huggingface_hub pinned in requirements.txt to a
+        # tested compatible pair; this model has no config.json issues.
         self._sentiment_pipeline = pipeline(
             "text-classification",
             model      = cfg.sentiment_model,
@@ -370,9 +343,7 @@ class BehaviourAnalyser(BehaviourAnalyserInterface):
             max_length = 512,
         )
 
-        # Stage C — compile lexical patterns from the loaded phrase lists.
-        # Each phrase is compiled with word-boundary anchors so partial words
-        # do not match. Multi-word phrases work correctly with this approach.
+        # Stage C — compile lexical patterns once at startup.
         self._lexical_patterns: list[tuple[str, re.Pattern]] = []
         lm = self._lexical_config
         for phrase in lm.empathy_phrases:
@@ -389,7 +360,7 @@ class BehaviourAnalyser(BehaviourAnalyserInterface):
             )
 
         logger.info(
-            "Evaluation models loaded — %d lexical patterns compiled",
+            "Evaluation tools loaded — %d lexical patterns compiled",
             len(self._lexical_patterns),
         )
 
@@ -403,7 +374,6 @@ class BehaviourAnalyser(BehaviourAnalyserInterface):
     ) -> tuple[BehaviourResult, DebugStages | None]:
         loop = asyncio.get_running_loop()
 
-        # Stages A, B, C run concurrently.
         audio_task = loop.run_in_executor(
             self._executor, self._stage_a, window.mfccs,
         )
@@ -411,155 +381,169 @@ class BehaviourAnalyser(BehaviourAnalyserInterface):
             self._executor, self._stage_b, window.frames,
         )
         transcript_task = loop.run_in_executor(
-            self._executor, self._stage_c, window.transcript, window.words,
+            self._executor, self._stage_c,
+            window.transcript, window.words,
             window.clip_metadata.clip_duration_seconds,
         )
 
-        audio_result, landmark_result, transcript_result = await asyncio.gather(
+        audio_r, landmark_r, transcript_r = await asyncio.gather(
             audio_task, landmark_task, transcript_task,
         )
 
         signal_summary = SignalSummary(
-            vocal_tension      = audio_result.vocal_tension,
-            speech_pace        = transcript_result.speech_pace,
-            gesture_activity   = landmark_result.gesture_activity,
-            open_gesture_ratio = landmark_result.open_gesture_ratio,
-            head_nod_frequency = landmark_result.head_nod_frequency,
-            facing_ratio       = landmark_result.facing_ratio,
-            silence_ratio      = transcript_result.silence_ratio,
-            lexical_markers    = transcript_result.lexical_markers,
-            response_tone      = transcript_result.response_tone,
-            notable_signals    = landmark_result.notable_signals,
+            vocal_tension      = audio_r.vocal_tension,
+            speech_pace        = transcript_r.speech_pace,
+            gesture_activity   = landmark_r.gesture_activity,
+            open_gesture_ratio = landmark_r.open_gesture_ratio,
+            head_nod_frequency = landmark_r.head_nod_frequency,
+            facing_ratio       = landmark_r.facing_ratio,
+            silence_ratio      = transcript_r.silence_ratio,
+            lexical_markers    = transcript_r.lexical_markers,
+            response_tone      = transcript_r.response_tone,
+            notable_signals    = landmark_r.notable_signals,
         )
 
-        scorer_result = self._scorer(
-            signal_summary = signal_summary,
-            metadata       = window.clip_metadata,
-        )
+        scorer_r = self._scorer(signal_summary, window.clip_metadata)
 
         result = BehaviourResult(
             window_id        = window.window_id,
             session_id       = window.session_id,
-            escalation_score = scorer_result.escalation_score,
-            dominant_emotion = audio_result.dominant_emotion,
-            confidence       = scorer_result.confidence,
+            escalation_score = scorer_r.escalation_score,
+            dominant_emotion = audio_r.dominant_emotion,
+            confidence       = scorer_r.confidence,
             signal_summary   = signal_summary,
         )
 
         stages: DebugStages | None = None
         if collect_debug:
-            stages = self._build_debug_stages(
-                audio_result, landmark_result, transcript_result, scorer_result,
-            )
+            stages = self._build_debug_stages(audio_r, landmark_r, transcript_r, scorer_r)
 
         return result, stages
 
-    # ── Stage A — Audio Emotion Extraction ───────────────────────────────────
+    # ── Stage A — Prosodic Feature Extraction ────────────────────────────────
 
-    def _stage_a(self, mfccs: list[list[float]]) -> _AudioEmotionResult:
+    def _stage_a(self, mfccs: list[list[float]]) -> _AudioResult:
         """
-        Convert MFCCs to approximate audio, run the dimensional emotion model,
-        and derive vocal_tension from arousal + MFCC energy variance.
+        Reconstruct approximate audio from MFCCs, then run opensmile eGeMAPS
+        to extract prosodic features. Map those features to arousal/tension.
 
-        Returns neutral/zero values when the MFCC matrix is empty (no audio).
+        eGeMAPS functionals used:
+          - F0semitoneFrom27.5Hz_sma3nz_*: pitch mean/std (arousal proxy)
+          - loudness_sma3_*:               energy/loudness (tension proxy)
+          - HNRdBACF_sma3nz_*:             harmonics-to-noise (voice quality)
+          - jitterLocal_sma3nz_*:          pitch irregularity (stress marker)
+          - shimmerLocaldB_sma3nz_*:       amplitude irregularity (stress marker)
+
+        Returns a fallback neutral result when MFCCs are empty or feature
+        extraction fails.
         """
-        import torch
         import librosa
 
+        _neutral = _AudioResult(
+            arousal=0.4, valence=0.0, dominant_emotion="neutral",
+            vocal_tension=0.0, f0_mean=0.0, f0_std=0.0,
+            energy_mean=0.0, hnr_mean=0.0,
+        )
+
         if not mfccs:
-            return _AudioEmotionResult(
-                arousal          = 0.5,
-                valence          = 0.0,
-                dominant_emotion = "neutral",
-                vocal_tension    = 0.0,
-                energy_var_norm  = 0.0,
-            )
+            return _neutral
 
         mfcc_array = np.array(mfccs, dtype=np.float32)  # [n_frames, 13]
-        mfcc_t     = mfcc_array.T                        # [13, n_frames]
 
-        # Reconstruct approximate audio from MFCCs.
-        # Griffin-Lim via librosa's inverse MFCC, 16 kHz.
+        # Reconstruct approximate audio from MFCCs via Griffin-Lim.
         try:
             audio = librosa.feature.inverse.mfcc_to_audio(
-                mfcc_t,
-                sr       = 16_000,
-                n_mels   = 128,
-                n_iter   = 32,
+                mfcc_array.T,
+                sr     = _SAMPLE_RATE,
+                n_mels = 128,
+                n_iter = 32,
             )
+            peak = np.abs(audio).max()
+            if peak > 1e-6:
+                audio = (audio / peak).astype(np.float32)
+            else:
+                return _neutral
         except Exception as exc:
-            logger.warning("MFCC→audio reconstruction failed: %s — using silence proxy", exc)
-            audio = np.zeros(16_000, dtype=np.float32)
+            logger.warning("MFCC→audio reconstruction failed: %s", exc)
+            return _neutral
 
-        # Normalise to float32 in [-1, 1].
-        peak = np.abs(audio).max()
-        if peak > 0:
-            audio = audio / peak
+        # Extract eGeMAPS functionals with opensmile.
+        try:
+            features = self._smile.process_signal(audio, _SAMPLE_RATE)
+            cols     = features.columns.tolist()
+            row      = features.iloc[0]
+        except Exception as exc:
+            logger.warning("opensmile feature extraction failed: %s", exc)
+            return _neutral
 
-        # Run dimensional emotion model.
-        inputs = self._emotion_processor(
-            audio,
-            sampling_rate  = 16_000,
-            return_tensors = "pt",
-            padding        = True,
-        )
-        inputs = {k: v.to(self._torch_device) for k, v in inputs.items()}
+        def _feat(prefix: str) -> float:
+            """Return the first eGeMAPS column whose name starts with prefix, or 0."""
+            for c in cols:
+                if c.startswith(prefix):
+                    v = float(row[c])
+                    return v if math.isfinite(v) else 0.0
+            return 0.0
 
-        with torch.no_grad():
-            outputs = self._emotion_model(**inputs)
+        f0_mean    = _feat("F0semitoneFrom27.5Hz_sma3nz_amean")
+        f0_std     = _feat("F0semitoneFrom27.5Hz_sma3nz_stddevNorm")
+        energy     = _feat("loudness_sma3_amean")
+        hnr        = _feat("HNRdBACF_sma3nz_amean")
+        jitter     = _feat("jitterLocal_sma3nz_amean")
+        shimmer    = _feat("shimmerLocaldB_sma3nz_amean")
 
-        # audeering model outputs logits in order [arousal, dominance, valence].
-        logits  = outputs.logits[0].cpu().float().numpy()
-        arousal = float(np.clip(logits[0], 0.0, 1.0))
-        valence = float(np.clip(logits[2], -1.0, 1.0))
+        # Map features to arousal (0–1) and valence (−1–1).
+        # High energy + high F0 variation → high arousal (stressed/angry).
+        # High HNR (clean, harmonic voice) → positive valence proxy.
+        # High jitter/shimmer → voice irregularity → tension.
+        energy_norm = float(np.clip(energy / 0.5, 0.0, 1.0))
+        f0_var_norm = float(np.clip(f0_std / 30.0, 0.0, 1.0))
+        jitter_norm = float(np.clip(jitter / 0.05, 0.0, 1.0))
+        shimmer_norm= float(np.clip(shimmer / 3.0, 0.0, 1.0))
+        hnr_norm    = float(np.clip(hnr / 25.0, 0.0, 1.0))  # 0 dB=noisy, 25 dB=clean
 
-        # MFCC energy variance as a secondary tension proxy.
-        energy_per_frame = np.mean(mfcc_array ** 2, axis=1)
-        energy_var       = float(np.var(energy_per_frame))
-        # Normalise variance to [0, 1] using a soft sigmoid-like mapping.
-        energy_var_norm  = float(1.0 / (1.0 + math.exp(-10.0 * (energy_var - 0.1))))
+        arousal = float(np.clip(
+            0.45 * energy_norm + 0.35 * f0_var_norm + 0.20 * jitter_norm,
+            0.0, 1.0,
+        ))
+        # High HNR = clear/positive voice; low HNR + high shimmer = tense
+        valence = float(np.clip(hnr_norm - shimmer_norm, -1.0, 1.0))
 
-        # Combine arousal and energy variance; arousal is the dominant signal.
-        vocal_tension = float(np.clip(0.7 * arousal + 0.3 * energy_var_norm, 0.0, 1.0))
+        # vocal_tension: primary driver is energy + jitter/shimmer stress markers
+        vocal_tension = float(np.clip(
+            0.50 * energy_norm + 0.25 * jitter_norm + 0.25 * shimmer_norm,
+            0.0, 1.0,
+        ))
 
         dominant_emotion = _arousal_valence_to_emotion(arousal, valence)
 
-        return _AudioEmotionResult(
+        return _AudioResult(
             arousal          = arousal,
             valence          = valence,
             dominant_emotion = dominant_emotion,
             vocal_tension    = vocal_tension,
-            energy_var_norm  = energy_var_norm,
+            f0_mean          = f0_mean,
+            f0_std           = f0_std,
+            energy_mean      = energy,
+            hnr_mean         = hnr,
         )
 
     # ── Stage B — Landmark Feature Extraction ────────────────────────────────
 
     def _stage_b(self, frames: list) -> _LandmarkResult:
-        """
-        Extract gesture_activity, open_gesture_ratio, head_nod_frequency,
-        and facing_ratio from VideoFrame landmark arrays.
-
-        All computation is deterministic signal processing — no model needed.
-        Returns zero/None values when frames are empty.
-        """
         notable: list[str] = []
 
         if not frames:
             return _LandmarkResult(
-                gesture_activity     = 0.0,
-                open_gesture_ratio   = None,
-                head_nod_frequency   = 0.0,
-                facing_ratio         = 0.0,
-                hands_detected_ratio = 0.0,
-                facing_frame_count   = 0,
-                total_frame_count    = 0,
-                nod_fft_peak_hz      = 0.0,
-                notable_signals      = ["no_frames"],
+                gesture_activity=0.0, open_gesture_ratio=None,
+                head_nod_frequency=0.0, facing_ratio=0.0,
+                hands_detected_ratio=0.0, facing_frame_count=0,
+                total_frame_count=0, nod_fft_peak_hz=0.0,
+                notable_signals=["no_frames"],
             )
 
         n_frames = len(frames)
 
-        # ── Gesture activity (wrist + fingertip displacement variance) ────────
+        # ── Gesture activity ──────────────────────────────────────────────────
         all_displacements: list[float] = []
         prev_points: dict[str, np.ndarray] = {}
 
@@ -568,29 +552,27 @@ class BehaviourAnalyser(BehaviourAnalyserInterface):
                 if not landmarks:
                     continue
                 indices = [_WRIST_INDEX] + _FINGERTIP_INDICES
-                pts = np.array([
-                    [landmarks[i].x, landmarks[i].y]
-                    for i in indices if i < len(landmarks)
-                ], dtype=np.float32)
+                pts = np.array(
+                    [[landmarks[i].x, landmarks[i].y] for i in indices if i < len(landmarks)],
+                    dtype=np.float32,
+                )
                 if pts.size == 0:
                     continue
                 key = f"hand_{side}"
                 if key in prev_points:
-                    delta = np.linalg.norm(pts - prev_points[key], axis=1)
-                    all_displacements.extend(delta.tolist())
+                    all_displacements.extend(
+                        np.linalg.norm(pts - prev_points[key], axis=1).tolist()
+                    )
                 prev_points[key] = pts
 
         gesture_activity = float(np.var(all_displacements)) if all_displacements else 0.0
 
         # ── Hand detection ratio + open gesture ratio ─────────────────────────
-        n_hand_detected = sum(
-            1 for f in frames if f.left_hand or f.right_hand
-        )
+        n_hand_detected      = sum(1 for f in frames if f.left_hand or f.right_hand)
         hands_detected_ratio = n_hand_detected / n_frames
 
         if hands_detected_ratio >= _MIN_HAND_DETECTION_RATIO:
-            open_count   = 0
-            total_hand_f = 0
+            open_count = total_hand_f = 0
             for frame in frames:
                 for landmarks in [frame.left_hand, frame.right_hand]:
                     if not landmarks or len(landmarks) < 21:
@@ -598,45 +580,33 @@ class BehaviourAnalyser(BehaviourAnalyserInterface):
                     total_hand_f += 1
                     if _is_open_hand(landmarks):
                         open_count += 1
-            open_gesture_ratio = (open_count / total_hand_f) if total_hand_f > 0 else None
+            open_gesture_ratio: float | None = (
+                (open_count / total_hand_f) if total_hand_f > 0 else None
+            )
         else:
             open_gesture_ratio = None
             notable.append("no_hands_detected")
 
-        # ── Head nod frequency (Y-oscillation peak frequency) ─────────────────
-        nose_y_values: list[float] = []
+        # ── Head nod frequency ────────────────────────────────────────────────
+        nose_y: list[float] = []
         for frame in frames:
             fl = frame.face_landmarks
             if fl and len(fl) > max(_NOSE_TIP_INDEX, _FOREHEAD_INDEX):
-                y_nose = fl[_NOSE_TIP_INDEX].y
-                y_fore = fl[_FOREHEAD_INDEX].y
-                nose_y_values.append((y_nose + y_fore) / 2.0)
+                nose_y.append((fl[_NOSE_TIP_INDEX].y + fl[_FOREHEAD_INDEX].y) / 2.0)
 
-        nod_fft_peak_hz    = _compute_peak_frequency(nose_y_values, fps=30.0)
-        head_nod_frequency = nod_fft_peak_hz
+        nod_fft_peak_hz = _compute_peak_frequency(nose_y, fps=30.0)
 
-        # ── Facing ratio (face mesh lateral symmetry) ─────────────────────────
-        # Uses MediaPipe face mesh cheekbone/ear-region landmarks to estimate
-        # whether the student is facing the camera. When facing forward, left
-        # and right landmarks are roughly equidistant from centre; when turned,
-        # they cluster to one side.
-        facing_count = 0
-        facing_total = 0
+        # ── Facing ratio ──────────────────────────────────────────────────────
+        facing_count = facing_total = 0
         max_idx = max(_FACE_LEFT_INDICES + _FACE_RIGHT_INDICES)
         for frame in frames:
             fl = frame.face_landmarks
             if not fl or len(fl) <= max_idx:
                 continue
             facing_total += 1
-            left_x  = np.mean([fl[i].x for i in _FACE_LEFT_INDICES])
-            right_x = np.mean([fl[i].x for i in _FACE_RIGHT_INDICES])
-            # In normalised image coordinates the face centre is ~0.5.
-            # When facing forward: left_x < 0.5 < right_x, spread is large.
-            # When turned: both landmarks cluster on one side.
-            spread       = abs(right_x - left_x)
-            centre       = (left_x + right_x) / 2.0
-            is_symmetric = spread > 0.15 and 0.3 < centre < 0.7
-            if is_symmetric:
+            left_x  = float(np.mean([fl[i].x for i in _FACE_LEFT_INDICES]))
+            right_x = float(np.mean([fl[i].x for i in _FACE_RIGHT_INDICES]))
+            if abs(right_x - left_x) > 0.15 and 0.3 < (left_x + right_x) / 2.0 < 0.7:
                 facing_count += 1
 
         facing_ratio = (facing_count / facing_total) if facing_total > 0 else 0.5
@@ -644,7 +614,7 @@ class BehaviourAnalyser(BehaviourAnalyserInterface):
         return _LandmarkResult(
             gesture_activity     = gesture_activity,
             open_gesture_ratio   = open_gesture_ratio,
-            head_nod_frequency   = head_nod_frequency,
+            head_nod_frequency   = nod_fft_peak_hz,
             facing_ratio         = facing_ratio,
             hands_detected_ratio = hands_detected_ratio,
             facing_frame_count   = facing_count,
@@ -661,16 +631,6 @@ class BehaviourAnalyser(BehaviourAnalyserInterface):
         words:           list[WordTiming],
         clip_duration_s: float,
     ) -> _TranscriptResult:
-        """
-        Compute silence_ratio, speech_pace, lexical_markers, and response_tone
-        from the student's transcript and word timings.
-
-        lexical_markers carries rubric category labels ("empathy_phrase",
-        "open_question", "validation"), not raw matched text. This allows the
-        scorer to add them directly to the detected-signals set without any
-        re-parsing. Each category appears at most once.
-        """
-        # ── Silence ratio and speech pace ─────────────────────────────────────
         if words:
             speech_duration  = sum(max(0.0, w.end - w.start) for w in words)
             silence_duration = max(0.0, clip_duration_s - speech_duration)
@@ -679,42 +639,35 @@ class BehaviourAnalyser(BehaviourAnalyserInterface):
             speech_pace      = float(syllable_count / speech_duration) if speech_duration > 0 else 0.0
             word_count       = len(words)
         else:
-            # Fallback when word timings are unavailable (stub pool).
-            speech_duration  = 0.0
-            silence_duration = clip_duration_s
+            speech_duration = silence_duration = 0.0
             if transcript.strip():
                 syllable_count = _count_syllables_nl(transcript)
                 speech_pace    = float(syllable_count / clip_duration_s) if clip_duration_s > 0 else 0.0
                 silence_ratio  = 0.0
-                silence_duration = 0.0
             else:
                 syllable_count = 0
                 speech_pace    = 0.0
                 silence_ratio  = 1.0
+                silence_duration = clip_duration_s
             word_count = len(transcript.split()) if transcript.strip() else 0
 
-        # ── Lexical de-escalation markers ─────────────────────────────────────
-        # Emit category labels, not raw text. Duplicates collapsed.
         detected_categories: set[str] = set()
         for category, pattern in self._lexical_patterns:
             if pattern.search(transcript):
                 detected_categories.add(category)
-        lexical_markers = sorted(detected_categories)  # deterministic order
+        lexical_markers = sorted(detected_categories)
 
-        # ── Response tone (sentiment classifier) ──────────────────────────────
         sentiment_raw_label = "neutral"
         sentiment_raw_score = 1.0
+        response_tone       = "neutral"
         if transcript.strip():
             try:
-                result              = self._sentiment_pipeline(transcript[:512])
-                sentiment_raw_label = result[0]["label"]
-                sentiment_raw_score = float(result[0]["score"])
+                res                 = self._sentiment_pipeline(transcript[:512])
+                sentiment_raw_label = res[0]["label"]
+                sentiment_raw_score = float(res[0]["score"])
                 response_tone       = _normalise_sentiment_label(sentiment_raw_label)
             except Exception as exc:
                 logger.warning("Sentiment classification failed: %s", exc)
-                response_tone = "neutral"
-        else:
-            response_tone = "neutral"
 
         return _TranscriptResult(
             speech_pace         = speech_pace,
@@ -729,133 +682,92 @@ class BehaviourAnalyser(BehaviourAnalyserInterface):
             sentiment_raw_score = sentiment_raw_score,
         )
 
-    # ── Scorer Stage ──────────────────────────────────────────────────────────
+    # ── Scorer ────────────────────────────────────────────────────────────────
 
-    def _scorer(
-        self,
-        signal_summary: SignalSummary,
-        metadata,               # ClipMetadata — avoiding circular import in type hint
-    ) -> _ScorerResult:
-        """
-        Map computed signals to rubric entries, apply weighted scoring,
-        and return a _ScorerResult with all intermediate values.
-
-        In "rubric" mode: (esc_score - de_score) / total_weight, normalised.
-        In "threshold" mode: only penalise clearly escalating signals; absence
-          of positive signals is not penalised.
-
-        Confidence reflects the fraction of rubric signals that had a reliable
-        measurement. Hand-based signals reduce confidence when hands were
-        off-camera.
-        """
-        ss = signal_summary
-        t  = self._thresholds
-
-        # ── Map computed signals to rubric vocabulary ──────────────────────────
+    def _scorer(self, ss: SignalSummary, metadata) -> _ScorerResult:
+        t = self._thresholds
         detected: set[str] = set()
 
-        # vocal_tension → calm_voice / raised_voice
         if ss.vocal_tension <= t.calm_voice_tension_threshold:
             detected.add("calm_voice")
         elif ss.vocal_tension >= t.raised_voice_tension_threshold:
             detected.add("raised_voice")
 
-        # speech_pace → measured_pace / fast_speech
         if ss.speech_pace > 0:
             if ss.speech_pace <= t.measured_pace_threshold:
                 detected.add("measured_pace")
             elif ss.speech_pace >= t.fast_speech_pace_threshold:
                 detected.add("fast_speech")
 
-        # open_gesture_ratio → open_gesture / closed_gesture (only when available)
         if ss.open_gesture_ratio is not None:
             if ss.open_gesture_ratio >= t.open_gesture_threshold:
                 detected.add("open_gesture")
             elif ss.open_gesture_ratio <= t.closed_gesture_threshold:
                 detected.add("closed_gesture")
 
-        # head_nod_frequency → active_listening
         if ss.head_nod_frequency >= t.nod_frequency_threshold:
             detected.add("active_listening")
 
-        # facing_ratio → open_posture / turning_away
         if ss.facing_ratio >= t.open_posture_threshold:
             detected.add("open_posture")
         elif ss.facing_ratio <= t.turning_away_threshold:
             detected.add("turning_away")
 
-        # silence_ratio → appropriate_silence / long_silence
         if t.appropriate_silence_min <= ss.silence_ratio <= t.appropriate_silence_max:
             detected.add("appropriate_silence")
         elif ss.silence_ratio >= t.long_silence_threshold:
             detected.add("long_silence")
 
-        # lexical_markers — already rubric category labels; add directly.
-        # Add "no_empathy" when none of the lexical categories were detected.
         for marker in ss.lexical_markers:
             detected.add(marker)
         if not any(m in ss.lexical_markers for m in ("empathy_phrase", "open_question", "validation")):
             detected.add("no_empathy")
 
-        # response_tone → positive_tone / negative_tone
         if ss.response_tone == "positive":
             detected.add("positive_tone")
         elif ss.response_tone == "negative":
             detected.add("negative_tone")
 
-        # ── Compute weighted score ─────────────────────────────────────────────
         de_rubric  = metadata.de_escalation_rubric
         esc_rubric = metadata.escalation_rubric
+        de_score   = sum(e.weight for e in de_rubric  if e.signal in detected)
+        esc_score  = sum(e.weight for e in esc_rubric if e.signal in detected)
+        de_total   = sum(e.weight for e in de_rubric)
+        esc_total  = sum(e.weight for e in esc_rubric)
+        total_w    = de_total + esc_total
 
-        de_score  = sum(e.weight for e in de_rubric  if e.signal in detected)
-        esc_score = sum(e.weight for e in esc_rubric if e.signal in detected)
-
-        de_total     = sum(e.weight for e in de_rubric)
-        esc_total    = sum(e.weight for e in esc_rubric)
-        total_weight = de_total + esc_total
-
-        if total_weight == 0:
-            raw_score = 0.0
+        if total_w == 0:
+            raw = 0.0
         elif metadata.scoring_mode == "threshold":
-            raw_score = esc_score / esc_total if esc_total > 0 else 0.0
+            raw = esc_score / esc_total if esc_total > 0 else 0.0
         else:
-            raw_score = (esc_score - de_score) / total_weight
+            raw = (esc_score - de_score) / total_w
 
-        raw_score_pre_clamp = raw_score
+        raw_pre_clamp = raw
 
-        # ── Apply critical_failures penalty ───────────────────────────────────
         notable_additions: list[str] = []
         for sig in metadata.critical_failures:
             if sig in detected:
-                raw_score = min(raw_score + 0.4, 1.0)
+                raw = min(raw + 0.4, 1.0)
                 notable_additions.append(f"critical_failure:{sig}")
                 logger.debug("critical_failure triggered: %s", sig)
-
         if notable_additions:
             ss.notable_signals.extend(notable_additions)
 
-        # ── Clamp to score_range ───────────────────────────────────────────────
-        score = float(np.clip(raw_score, metadata.score_range.min, metadata.score_range.max))
+        score = float(np.clip(raw, metadata.score_range.min, metadata.score_range.max))
 
-        # ── Confidence ────────────────────────────────────────────────────────
         hand_signals         = {"open_gesture", "closed_gesture"}
-        unavailable          = 0
         total_rubric_signals = len(de_rubric) + len(esc_rubric)
-
+        unavailable          = 0
         if ss.open_gesture_ratio is None:
-            unavailable += sum(
-                1 for e in (list(de_rubric) + list(esc_rubric))
-                if e.signal in hand_signals
+            unavailable = sum(
+                1 for e in list(de_rubric) + list(esc_rubric) if e.signal in hand_signals
             )
 
-        if not metadata.de_escalation_rubric and not metadata.escalation_rubric:
+        if total_rubric_signals == 0:
             confidence = 1.0
-        elif total_rubric_signals > 0:
-            confidence = float(1.0 - (unavailable / total_rubric_signals))
         else:
-            confidence = 1.0
-
-        confidence = float(np.clip(confidence, 0.0, 1.0))
+            confidence = float(np.clip(1.0 - (unavailable / total_rubric_signals), 0.0, 1.0))
 
         return _ScorerResult(
             escalation_score    = score,
@@ -865,29 +777,28 @@ class BehaviourAnalyser(BehaviourAnalyserInterface):
             esc_score           = esc_score,
             de_weight_total     = de_total,
             esc_weight_total    = esc_total,
-            raw_score_pre_clamp = raw_score_pre_clamp,
+            raw_score_pre_clamp = raw_pre_clamp,
         )
 
-    # ── Debug stages builder ──────────────────────────────────────────────────
+    # ── Debug ─────────────────────────────────────────────────────────────────
 
     def _build_debug_stages(
         self,
-        audio:      _AudioEmotionResult,
+        audio:      _AudioResult,
         landmark:   _LandmarkResult,
         transcript: _TranscriptResult,
         scorer:     _ScorerResult,
     ) -> DebugStages:
-        """
-        Assemble the debug stages dict from the four intermediate results.
-        Only called when collect_debug=True (admin sessions).
-        Shape matches docs/admin_and_tooling_api.md → "stages for analyser_id: production".
-        """
         return {
-            "stage_a_audio_emotion": {
-                "audio_emotion_label": audio.dominant_emotion,
-                "arousal":             audio.arousal,
-                "valence":             audio.valence,
-                "energy_var_norm":     audio.energy_var_norm,
+            "stage_a_audio_prosodic": {
+                "dominant_emotion": audio.dominant_emotion,
+                "arousal":          audio.arousal,
+                "valence":          audio.valence,
+                "vocal_tension":    audio.vocal_tension,
+                "f0_mean":          audio.f0_mean,
+                "f0_std":           audio.f0_std,
+                "energy_mean":      audio.energy_mean,
+                "hnr_mean":         audio.hnr_mean,
             },
             "stage_b_landmark_features": {
                 "hands_detected_ratio": landmark.hands_detected_ratio,
@@ -914,13 +825,7 @@ class BehaviourAnalyser(BehaviourAnalyserInterface):
             },
         }
 
-    # ── Debug config accessor ─────────────────────────────────────────────────
-
     def debug_config(self) -> dict:
-        """
-        Return the active threshold and lexical config for GET /evaluate/debug/config.
-        Only called by the route handler on the production analyser.
-        """
         t  = self._thresholds
         lm = self._lexical_config
         return {
@@ -950,15 +855,8 @@ class BehaviourAnalyser(BehaviourAnalyserInterface):
 # ─── Pure helpers ─────────────────────────────────────────────────────────────
 
 def _is_open_hand(landmarks: list) -> bool:
-    """
-    Return True if the hand appears to be open (fingers extended).
-    Uses the relative y-position of each finger's MCP (base) vs tip landmark.
-    In normalised image coordinates, a tip above its MCP (tip.y < mcp.y)
-    indicates an extended finger. Checks all four non-thumb fingers.
-    """
-    finger_pairs = [(5, 8), (9, 12), (13, 16), (17, 20)]
     extended = 0
-    for mcp_i, tip_i in finger_pairs:
+    for mcp_i, tip_i in [(5, 8), (9, 12), (13, 16), (17, 20)]:
         if mcp_i >= len(landmarks) or tip_i >= len(landmarks):
             continue
         if landmarks[tip_i].y < landmarks[mcp_i].y - 0.04:
@@ -967,64 +865,32 @@ def _is_open_hand(landmarks: list) -> bool:
 
 
 def _compute_peak_frequency(values: list[float], fps: float = 30.0) -> float:
-    """
-    Estimate the dominant oscillation frequency (Hz) of a 1D signal using FFT.
-    Returns 0.0 when the signal is too short or flat.
-    Only considers physiologically plausible nod frequencies: 0.5–3 Hz.
-    """
     if len(values) < 10:
         return 0.0
-
     y = np.array(values, dtype=np.float32)
-    y -= y.mean()  # remove DC
-
+    y -= y.mean()
     if np.std(y) < 1e-6:
         return 0.0
-
     if len(y) >= _NOD_SMOOTH_WINDOW:
         kernel = np.ones(_NOD_SMOOTH_WINDOW) / _NOD_SMOOTH_WINDOW
         y      = np.convolve(y, kernel, mode="same")
-
     fft_mag = np.abs(np.fft.rfft(y))
     freqs   = np.fft.rfftfreq(len(y), d=1.0 / fps)
-
-    mask = (freqs >= 0.5) & (freqs <= 3.0)
+    mask    = (freqs >= 0.5) & (freqs <= 3.0)
     if not np.any(mask):
         return 0.0
-
     return float(freqs[mask][np.argmax(fft_mag[mask])])
 
 
 def _count_syllables_nl(text: str) -> int:
-    """
-    Estimate syllable count for Dutch text using a vowel-group heuristic.
-    Dutch syllables cluster around vowel groups (a, e, i, o, u, y).
-    This is an approximation — consistent and fast, not exhaustive.
-    """
     if not text:
         return 0
-    count = len(re.findall(r"[aeiouy]+", text.lower()))
-    return max(1, count)
+    return max(1, len(re.findall(r"[aeiouy]+", text.lower())))
 
 
 def _arousal_valence_to_emotion(arousal: float, valence: float) -> str:
-    """
-    Map dimensional arousal/valence to a categorical emotion label using
-    a simplified circumplex model.
-
-    Quadrants:
-      High arousal + negative valence → "frustrated" or "anxious"
-      High arousal + positive valence → "calm" (animated but positive)
-      Low arousal  + negative valence → "distressed"
-      Low arousal  + positive valence → "calm"
-    """
     if arousal >= 0.6:
-        if valence < -0.2:
-            return "frustrated"
-        elif valence < 0.2:
-            return "anxious"
-        else:
-            return "calm"
+        return "frustrated" if valence < -0.2 else ("anxious" if valence < 0.2 else "calm")
     elif arousal >= 0.35:
         return "anxious" if valence < -0.2 else "neutral"
     else:
@@ -1032,12 +898,6 @@ def _arousal_valence_to_emotion(arousal: float, valence: float) -> str:
 
 
 def _normalise_sentiment_label(label: str) -> str:
-    """
-    Map the raw model label to the canonical response_tone vocabulary.
-    cardiffnlp/twitter-xlm-roberta-base-sentiment outputs:
-      "negative", "neutral", "positive"
-    Some model variants output "LABEL_0/1/2" or star ratings.
-    """
     label = label.lower().strip()
     if "neg" in label or label in ("label_0", "1 star", "2 stars"):
         return "negative"
