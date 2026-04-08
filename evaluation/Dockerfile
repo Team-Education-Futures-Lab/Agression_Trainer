@@ -32,15 +32,24 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# ── PyTorch with CUDA ─────────────────────────────────────────────────────────
-# Install torch and torchaudio from the official CUDA wheel index first so they
-# pick up the correct CUDA variant. This layer is cached unless the versions change.
-# torch is NOT listed in requirements.txt to avoid version conflicts — this is
-# the single source of truth for the torch version.
-RUN pip install --no-cache-dir \
-    torch==2.5.1+cu124 \
-    torchaudio==2.5.1+cu124 \
-    --index-url https://download.pytorch.org/whl/cu124
+
+# ── Model pre-download (optional build-time cache) ───────────────────────────
+# Bakes the sentiment model into the image at build time so the first request
+# doesn't stall on a download.
+#
+# The emotion model (opensmile eGeMAPS) requires no download — it ships with
+# the opensmile package.
+#
+# To override the model at build time:
+#   docker compose build --build-arg SENTIMENT_MODEL=some/other-model evaluation
+#
+ARG SENTIMENT_MODEL=lxyuan/distilbert-base-multilingual-cased-sentiments-student
+ENV SENTIMENT_MODEL=${SENTIMENT_MODEL}
+RUN python3 -c " \
+import os \
+from transformers import pipeline \
+pipeline('text-classification', model=os.environ['SENTIMENT_MODEL']) \
+"
 
 # ── Python dependencies ───────────────────────────────────────────────────────
 COPY evaluation/requirements.txt .
