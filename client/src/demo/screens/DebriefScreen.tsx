@@ -83,7 +83,7 @@ const severityStyle: Record<string, React.CSSProperties> = {
     high:   { background: "#7f1d1d", color: "#fca5a5" },
 };
 
-const s = {
+const s: Record<string, React.CSSProperties> = {
     root: {
         minHeight:      "100vh",
         display:        "flex",
@@ -109,15 +109,15 @@ const s = {
     title: {
         margin:     0,
         fontSize:   "22px",
-        fontWeight: "700" as const,
+        fontWeight: "700",
         color:      "#f1f5f9",
     },
     badge: {
         padding:       "3px 10px",
         borderRadius:  "999px",
         fontSize:      "12px",
-        fontWeight:    "600" as const,
-        textTransform: "uppercase" as const,
+        fontWeight:    "600",
+        textTransform: "uppercase",
         letterSpacing: "0.05em",
     },
     adviceBox: {
@@ -132,7 +132,7 @@ const s = {
         fontSize:   "15px",
         color:      "#cbd5e1",
         lineHeight: 1.7,
-        whiteSpace: "pre-wrap" as const,
+        whiteSpace: "pre-wrap",
     },
     placeholder: {
         color:     "#475569",
@@ -149,7 +149,7 @@ const s = {
         margin:        "0 0 8px",
         fontSize:      "11px",
         color:         "#475569",
-        textTransform: "uppercase" as const,
+        textTransform: "uppercase",
         letterSpacing: "0.08em",
     },
     highlightsList: {
@@ -179,11 +179,11 @@ const s = {
         width:        "100%",
         padding:      "13px",
         fontSize:     "15px",
-        fontWeight:   "600" as const,
+        fontWeight:   "600",
         background:   "#6366f1",
         color:        "#fff",
         border:       "none",
         borderRadius: "8px",
         cursor:       "pointer",
     },
-} as const;
+};

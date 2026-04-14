@@ -136,7 +136,7 @@ export function PlayerScreen({ videoRef, currentClipId, clipMeta, onClipEnded }:
     );
 }
 
-const s = {
+const s: Record<string, React.CSSProperties> = {
     root: {
         minHeight:           "100vh",
         display:             "grid",
@@ -145,11 +145,11 @@ const s = {
     },
     left: {
         display:       "flex",
-        flexDirection: "column" as const,
+        flexDirection: "column",
         gap:           "16px",
         padding:       "24px",
         borderRight:   "1px solid #1e293b",
-        overflowY:     "auto" as const,
+        overflowY:     "auto",
     },
     scenarioVideo: {
         width:        "100%",
@@ -167,7 +167,7 @@ const s = {
         borderRadius:   "10px",
         border:         "1px dashed #334155",
         display:        "flex",
-        flexDirection:  "column" as const,
+        flexDirection:  "column",
         alignItems:     "center",
         justifyContent: "center",
         gap:            "6px",
@@ -180,7 +180,7 @@ const s = {
         borderRadius:   "10px",
         border:         "1px solid #334155",
         display:        "flex",
-        flexDirection:  "column" as const,
+        flexDirection:  "column",
         alignItems:     "center",
         justifyContent: "center",
         gap:            "6px",
@@ -189,7 +189,7 @@ const s = {
     fallbackLabel: {
         fontSize:      "12px",
         color:         "#475569",
-        textTransform: "uppercase" as const,
+        textTransform: "uppercase",
         letterSpacing: "0.08em",
     },
     fallbackClipId: {
@@ -222,7 +222,7 @@ const s = {
     },
     featureTags: {
         display:   "flex",
-        flexWrap:  "wrap" as const,
+        flexWrap:  "wrap",
         gap:       "6px",
         marginTop: "8px",
     },
@@ -236,19 +236,19 @@ const s = {
     },
     right: {
         display:       "flex",
-        flexDirection: "column" as const,
+        flexDirection: "column",
         gap:           "16px",
         padding:       "24px",
     },
     webcamCard: {
         display:       "flex",
-        flexDirection: "column" as const,
+        flexDirection: "column",
         gap:           "8px",
     },
     webcam: {
         width:        "100%",
         aspectRatio:  "4/3",
-        objectFit:    "cover" as const,
+        objectFit:    "cover",
         borderRadius: "8px",
         display:      "block",
         background:   "#0c1221",
@@ -259,7 +259,7 @@ const s = {
         display:       "block",
         fontSize:      "10px",
         color:         "#475569",
-        textTransform: "uppercase" as const,
+        textTransform: "uppercase",
         letterSpacing: "0.1em",
         marginBottom:  "2px",
     },
@@ -267,7 +267,7 @@ const s = {
         width:        "100%",
         padding:      "14px",
         fontSize:     "15px",
-        fontWeight:   "600" as const,
+        fontWeight:   "600",
         background:   "#6366f1",
         color:        "#fff",
         border:       "none",
@@ -285,4 +285,4 @@ const s = {
         color:      "#475569",
         lineHeight: 1.5,
     },
-} as const;
+};

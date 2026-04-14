@@ -49,7 +49,7 @@ export function ScenarioScreen({ scenarios, onSelect }: ScenarioScreenProps) {
     );
 }
 
-const s = {
+const s: Record<string, React.CSSProperties> = {
     root: {
         minHeight:      "100vh",
         display:        "flex",
@@ -65,7 +65,7 @@ const s = {
     title: {
         margin:     "0 0 10px",
         fontSize:   "24px",
-        fontWeight: "700" as const,
+        fontWeight: "700",
         color:      "#f1f5f9",
     },
     subtitle: {
@@ -76,7 +76,7 @@ const s = {
     },
     loadingWrap: {
         display:        "flex",
-        flexDirection:  "column" as const,
+        flexDirection:  "column",
         alignItems:     "center",
         gap:            "16px",
         padding:        "40px 0",
@@ -97,13 +97,13 @@ const s = {
     },
     list: {
         display:       "flex",
-        flexDirection: "column" as const,
+        flexDirection: "column",
         gap:           "12px",
     },
     card: {
         display:       "flex",
-        flexDirection: "column" as const,
-        alignItems:    "flex-start" as const,
+        flexDirection: "column",
+        alignItems:    "flex-start",
         gap:           "6px",
         width:         "100%",
         padding:       "20px 22px",
@@ -111,12 +111,12 @@ const s = {
         border:        "1px solid #334155",
         borderRadius:  "10px",
         cursor:        "pointer",
-        textAlign:     "left" as const,
+        textAlign:     "left",
         transition:    "border-color 0.15s",
     },
     cardTitle: {
         fontSize:   "16px",
-        fontWeight: "600" as const,
+        fontWeight: "600",
         color:      "#f1f5f9",
     },
     cardDesc: {
@@ -127,7 +127,7 @@ const s = {
     cardCta: {
         marginTop:  "6px",
         fontSize:   "13px",
-        fontWeight: "600" as const,
+        fontWeight: "600",
         color:      "#6366f1",
     },
-} as const;
+};

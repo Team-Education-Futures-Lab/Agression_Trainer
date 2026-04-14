@@ -59,9 +59,9 @@ function Kv({ k, v }: { k: string; v: string }) {
     );
 }
 
-const st = {
+const st: Record<string, React.CSSProperties> = {
     row:   { display: "flex", gap: "12px", alignItems: "center" },
     kv:    { fontSize: "11px", display: "inline-flex", gap: "4px" },
     kvKey: { color: "#666" },
     kvVal: { color: "#e0e0e0" },
-} as const;
+};

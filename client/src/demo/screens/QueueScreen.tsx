@@ -33,7 +33,7 @@ export function QueueScreen({ queuePos }: QueueScreenProps) {
 
 const RING_SIZE = 56;
 
-const s = {
+const s: Record<string, React.CSSProperties> = {
     root: {
         minHeight:      "100vh",
         display:        "flex",
@@ -42,7 +42,7 @@ const s = {
         background:     "#0f172a",
     },
     card: {
-        textAlign:    "center" as const,
+        textAlign:    "center",
         padding:      "48px 40px",
         background:   "#1e293b",
         borderRadius: "12px",
@@ -66,7 +66,7 @@ const s = {
     title: {
         margin:     "0 0 10px",
         fontSize:   "20px",
-        fontWeight: "600" as const,
+        fontWeight: "600",
         color:      "#f1f5f9",
     },
     subtitle: {
@@ -79,4 +79,4 @@ const s = {
         fontSize: "12px",
         color:    "#475569",
     },
-} as const;
+};

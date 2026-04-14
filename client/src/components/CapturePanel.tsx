@@ -121,16 +121,16 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
     return <div style={st.sectionLabel}>{children}</div>;
 }
 
-const st = {
-    panel:           { display: "flex", flexDirection: "column" as const, gap: "12px" },
-    videoWrap:       { position: "relative" as const, width: "628px", height: "471px", background: "#000", flexShrink: 0 },
-    video:           { width: "100%", height: "100%", objectFit: "cover" as const, display: "block" },
+const st: Record<string, React.CSSProperties> = {
+    panel:           { display: "flex", flexDirection: "column", gap: "12px" },
+    videoWrap:       { position: "relative", width: "628px", height: "471px", background: "#000", flexShrink: 0 },
+    video:           { width: "100%", height: "100%", objectFit: "cover", display: "block" },
     controlRow:      { display: "flex", alignItems: "center", gap: "12px" },
     checkLabel:      { fontSize: "12px", cursor: "pointer" },
-    spectrogramWrap: { display: "flex", flexDirection: "column" as const, gap: "4px" },
-    sectionLabel:    { fontSize: "10px", color: "#555", textTransform: "uppercase" as const, letterSpacing: "0.07em", marginBottom: "4px" },
-    controlGroup:    { display: "flex", flexDirection: "column" as const, gap: "2px" },
-    row:             { display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap" as const },
+    spectrogramWrap: { display: "flex", flexDirection: "column", gap: "4px" },
+    sectionLabel:    { fontSize: "10px", color: "#555", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: "4px" },
+    controlGroup:    { display: "flex", flexDirection: "column", gap: "2px" },
+    row:             { display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap" },
     btn:             { padding: "5px 10px", fontSize: "12px", cursor: "pointer", background: "#2c2c2c", color: "#e0e0e0", border: "1px solid #444", borderRadius: "4px" },
     errorBox:        { background: "#4a1a1a", border: "1px solid #822", borderRadius: "4px", padding: "6px 10px", fontSize: "12px", color: "#f88" },
-} as const;
+};

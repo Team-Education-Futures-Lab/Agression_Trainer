@@ -199,11 +199,11 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
     return <div style={st.sectionLabel}>{children}</div>;
 }
 
-const st = {
-    panel:         { display: "flex", flexDirection: "column" as const, gap: "12px" },
-    controlGroup:  { display: "flex", flexDirection: "column" as const, gap: "2px" },
-    sectionLabel:  { fontSize: "10px", color: "#555", textTransform: "uppercase" as const, letterSpacing: "0.07em", marginBottom: "4px" },
-    row:           { display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap" as const },
+const st: Record<string, React.CSSProperties> = {
+    panel:         { display: "flex", flexDirection: "column", gap: "12px" },
+    controlGroup:  { display: "flex", flexDirection: "column", gap: "2px" },
+    sectionLabel:  { fontSize: "10px", color: "#555", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: "4px" },
+    row:           { display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap" },
     btn:           { padding: "5px 10px", fontSize: "12px", cursor: "pointer", background: "#2c2c2c", color: "#e0e0e0", border: "1px solid #444", borderRadius: "4px" },
     btnDanger:     { background: "#4a1a1a", borderColor: "#822" },
     btnPrimary:    { background: "#1a2a4a", borderColor: "#2a4a8a", color: "#7ab0f0" },
@@ -211,4 +211,4 @@ const st = {
     select:        { padding: "5px 8px", fontSize: "12px", background: "#2c2c2c", color: "#e0e0e0", border: "1px solid #444", borderRadius: "4px", maxWidth: "340px" },
     adminKeyInput: { border: "1px solid #7a5400", color: "#f5a623" } as React.CSSProperties,
     adminKeyHint:  { fontSize: "11px", color: "#f5a623", opacity: 0.8 } as React.CSSProperties,
-} as const;
+};

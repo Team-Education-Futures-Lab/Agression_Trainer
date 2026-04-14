@@ -13,6 +13,7 @@
   "dependencies": {
     "@ar-training/shared": "file:../shared",
     "@mediapipe/tasks-vision": "^0.10.22",
+    "jszip": "^3.10.1",
     "meyda": "^5.6.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"

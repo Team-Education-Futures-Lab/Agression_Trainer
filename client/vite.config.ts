@@ -9,8 +9,9 @@ export default defineConfig({
     rollupOptions: {
       input: {
         // Main app entry points
-        main: resolve(__dirname, "index.html"),
-        demo: resolve(__dirname, "demo.html"),
+        main:  resolve(__dirname, "index.html"),
+        demo:  resolve(__dirname, "demo.html"),
+        admin: resolve(__dirname, "admin.html"),
         // AudioWorklet — compiled to a plain JS file, referenced at
         // runtime via new URL("/worklets/pcm-processor.js", import.meta.url)
         "worklets/pcm-processor": resolve(

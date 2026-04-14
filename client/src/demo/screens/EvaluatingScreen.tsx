@@ -30,7 +30,7 @@ export function EvaluatingScreen() {
     );
 }
 
-const s = {
+const s: Record<string, React.CSSProperties> = {
     root: {
         minHeight:      "100vh",
         display:        "flex",
@@ -39,7 +39,7 @@ const s = {
         background:     "#0f172a",
     },
     card: {
-        textAlign:    "center" as const,
+        textAlign:    "center",
         padding:      "48px 40px",
         background:   "#1e293b",
         borderRadius: "12px",
@@ -66,4 +66,4 @@ const s = {
         fontSize: "15px",
         color:    "#94a3b8",
     },
-} as const;
+};

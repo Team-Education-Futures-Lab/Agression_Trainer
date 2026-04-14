@@ -24,7 +24,8 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true,
 
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+      "allowSyntheticDefaultImports": true
   },
   "include": ["src"],
   "exclude": ["src/worklets"]

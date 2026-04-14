@@ -362,8 +362,8 @@ function StageIntermediates({ analyser_id, stages }: { analyser_id: string; stag
         };
         return (
             <div>
-                {(["stage_a", "stage_b", "stage_c", "scorer"] as const).map(k => {
-                    const data = s[k] as Record<string, unknown> | undefined;
+                {(["stage_a", "stage_b", "stage_c", "scorer"]).map(k => {
+                    const data = (s as unknown as Record<string, Record<string, unknown>>)[k];
                     if (!data) return null;
                     return (
                         <div key={k} style={ed.stageBlock}>
@@ -539,109 +539,109 @@ function MetaCell({ label, value }: { label: string; value: string }) {
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
-const st = {
-    col:            { padding: "16px", overflowY: "auto" as const },
-    transcriptText: { fontSize: "12px", whiteSpace: "pre-wrap" as const, lineHeight: 1.5 },
+const st: Record<string, React.CSSProperties> = {
+    col:            { padding: "16px", overflowY: "auto" },
+    transcriptText: { fontSize: "12px", whiteSpace: "pre-wrap", lineHeight: 1.5 },
     candidateRow:   { display: "flex", alignItems: "center", gap: "10px", padding: "4px 0", borderBottom: "1px solid #2a2a2a" },
     mono:           { fontSize: "11px", color: "#888", minWidth: "120px", flexShrink: 0, fontFamily: "monospace" },
     dimText:        { fontSize: "11px", color: "#555" },
     btn:            { padding: "5px 10px", fontSize: "12px", cursor: "pointer", background: "#2c2c2c", color: "#e0e0e0", border: "1px solid #444", borderRadius: "4px" },
     btnSmall:       { padding: "3px 8px", fontSize: "11px" },
-    errorEntry:     { fontSize: "11px", color: "#f88", marginBottom: "2px", whiteSpace: "pre-wrap" as const },
-    empty:          { fontSize: "12px", color: "#444", fontStyle: "italic" as const },
-} as const;
+    errorEntry:     { fontSize: "11px", color: "#f88", marginBottom: "2px", whiteSpace: "pre-wrap" },
+    empty:          { fontSize: "12px", color: "#444", fontStyle: "italic" },
+};
 
-const cp = {
+const cp: Record<string, React.CSSProperties> = {
     panel:   { background: "#252525", border: "1px solid #333", borderRadius: "4px", marginBottom: "8px" },
     danger:  { background: "#2a1a1a", borderColor: "#822" },
     header:  { width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 10px", background: "none", border: "none", cursor: "pointer", color: "inherit" },
-    label:   { fontSize: "11px", color: "#666", textTransform: "uppercase" as const, letterSpacing: "0.06em" },
+    label:   { fontSize: "11px", color: "#666", textTransform: "uppercase", letterSpacing: "0.06em" },
     chevron: { fontSize: "11px", color: "#555" },
     body:    { padding: "6px 10px 10px" },
-} as const;
+};
 
-const cv = {
+const cv: Record<string, React.CSSProperties> = {
     root:       { padding: "4px 0" },
-    idRow:      { display: "flex", alignItems: "baseline", gap: "10px", marginBottom: "6px", flexWrap: "wrap" as const },
-    clipId:     { fontSize: "13px", fontWeight: "bold" as const, color: "#e0e0e0" },
+    idRow:      { display: "flex", alignItems: "baseline", gap: "10px", marginBottom: "6px", flexWrap: "wrap" },
+    clipId:     { fontSize: "13px", fontWeight: "bold", color: "#e0e0e0" },
     scenarioId: { fontSize: "11px", color: "#666" },
-    videoLink:  { fontSize: "11px", color: "#5b8dee", textDecoration: "none", overflow: "hidden" as const, textOverflow: "ellipsis" as const, whiteSpace: "nowrap" as const, maxWidth: "260px" },
+    videoLink:  { fontSize: "11px", color: "#5b8dee", textDecoration: "none", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "260px" },
     transcript: { margin: "0 0 6px", fontSize: "12px", color: "#94a3b8", lineHeight: 1.5, fontStyle: "italic" },
-    tagRow:     { display: "flex", flexWrap: "wrap" as const, gap: "4px", marginBottom: "8px" },
+    tagRow:     { display: "flex", flexWrap: "wrap", gap: "4px", marginBottom: "8px" },
     tag:        { padding: "1px 7px", borderRadius: "999px", fontSize: "11px", background: "#2c3040", color: "#7a90b0", border: "1px solid #3a4a60" },
-    table:      { width: "100%", borderCollapse: "collapse" as const, fontSize: "11px" },
-    th:         { textAlign: "left" as const, color: "#555", padding: "2px 6px", fontWeight: "normal" as const, borderBottom: "1px solid #2a2a2a" },
+    table:      { width: "100%", borderCollapse: "collapse", fontSize: "11px" },
+    th:         { textAlign: "left", color: "#555", padding: "2px 6px", fontWeight: "normal", borderBottom: "1px solid #2a2a2a" },
     td:         { padding: "2px 6px", color: "#b0c4de", borderBottom: "1px solid #222" },
-    tdNull:     { color: "#8e44ad", fontStyle: "italic" as const },
-} as const;
+    tdNull:     { color: "#8e44ad", fontStyle: "italic" },
+};
 
-const cs = {
+const cs: Record<string, React.CSSProperties> = {
     root:      { padding: "4px 0" },
     row:       { display: "flex", alignItems: "center", gap: "10px", marginBottom: "4px" },
     label:     { fontSize: "11px", color: "#666", minWidth: "100px" },
     value:     { fontSize: "12px" },
     clipId:    { color: "#e0e0e0", fontFamily: "monospace" },
-    terminal:  { color: "#8e44ad", fontStyle: "italic" as const },
-    scoreNum:  { fontFamily: "monospace", fontWeight: "bold" as const, fontSize: "13px" },
+    terminal:  { color: "#8e44ad", fontStyle: "italic" },
+    scoreNum:  { fontFamily: "monospace", fontWeight: "bold", fontSize: "13px" },
     barWrap:   { marginTop: "6px" },
-    barTrack:  { position: "relative" as const, height: "6px", background: "#2a2a2a", borderRadius: "3px", overflow: "hidden" as const },
-    barMid:    { position: "absolute" as const, left: "50%", top: 0, width: "1px", height: "100%", background: "#444" },
-    barFill:   { position: "absolute" as const, left: 0, top: 0, height: "100%", borderRadius: "3px", transition: "width 0.3s ease" },
+    barTrack:  { position: "relative", height: "6px", background: "#2a2a2a", borderRadius: "3px", overflow: "hidden" },
+    barMid:    { position: "absolute", left: "50%", top: 0, width: "1px", height: "100%", background: "#444" },
+    barFill:   { position: "absolute", left: 0, top: 0, height: "100%", borderRadius: "3px", transition: "width 0.3s ease" },
     barLabels: { display: "flex", justifyContent: "space-between", fontSize: "10px", color: "#555", marginTop: "2px" },
-} as const;
+};
 
-const sc = {
+const sc: Record<string, React.CSSProperties> = {
     root:   { padding: "4px 0" },
     header: { marginBottom: "6px" },
-    badge:  { fontSize: "12px", fontWeight: "bold" as const, letterSpacing: "0.05em" },
-    advice: { margin: "0 0 8px", fontSize: "12px", color: "#cbd5e1", lineHeight: 1.6, whiteSpace: "pre-wrap" as const },
+    badge:  { fontSize: "12px", fontWeight: "bold", letterSpacing: "0.05em" },
+    advice: { margin: "0 0 8px", fontSize: "12px", color: "#cbd5e1", lineHeight: 1.6, whiteSpace: "pre-wrap" },
     list:   { margin: 0, padding: "0 0 0 14px" },
     item:   { fontSize: "11px", color: "#94a3b8", lineHeight: 1.6, marginBottom: "2px" },
-} as const;
+};
 
-const he = {
+const he: Record<string, React.CSSProperties> = {
     row:          { borderBottom: "1px solid #2a2a2a", padding: "5px 0" },
-    mainRow:      { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" as const },
+    mainRow:      { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" },
     turn:         { fontSize: "11px", color: "#555", minWidth: "24px", flexShrink: 0 },
     endedClip:    { fontSize: "11px", color: "#e0e0e0", fontFamily: "monospace", flexShrink: 0 },
-    score:        { fontSize: "12px", fontFamily: "monospace", fontWeight: "bold" as const, flexShrink: 0 },
-    miniBarTrack: { position: "relative" as const, width: "60px", height: "4px", background: "#2a2a2a", borderRadius: "2px", overflow: "hidden" as const, flexShrink: 0 },
-    miniBarMid:   { position: "absolute" as const, left: "50%", top: 0, width: "1px", height: "100%", background: "#444" },
-    miniBarFill:  { position: "absolute" as const, left: 0, top: 0, height: "100%", borderRadius: "2px" },
+    score:        { fontSize: "12px", fontFamily: "monospace", fontWeight: "bold", flexShrink: 0 },
+    miniBarTrack: { position: "relative", width: "60px", height: "4px", background: "#2a2a2a", borderRadius: "2px", overflow: "hidden", flexShrink: 0 },
+    miniBarMid:   { position: "absolute", left: "50%", top: 0, width: "1px", height: "100%", background: "#444" },
+    miniBarFill:  { position: "absolute", left: 0, top: 0, height: "100%", borderRadius: "2px" },
     arrow:        { fontSize: "11px", color: "#555", flexShrink: 0 },
     nextClip:     { fontSize: "11px", color: "#7ab0f0", fontFamily: "monospace" },
-    terminal:     { fontSize: "11px", color: "#8e44ad", fontStyle: "italic" as const },
+    terminal:     { fontSize: "11px", color: "#8e44ad", fontStyle: "italic" },
     debugTag:     { fontSize: "10px", color: "#f5a623", border: "1px solid #7a5400", borderRadius: "3px", padding: "0 4px", background: "#2a1a00" },
     txRow:        { paddingLeft: "32px", marginTop: "2px" },
     txText:       { fontSize: "11px", color: "#666", lineHeight: 1.4 },
-} as const;
+};
 
-const ed = {
-    turnRow:         { display: "flex", flexWrap: "wrap" as const, gap: "4px", marginBottom: "10px" },
+const ed: Record<string, React.CSSProperties> = {
+    turnRow:         { display: "flex", flexWrap: "wrap", gap: "4px", marginBottom: "10px" },
     turnBtn:         { padding: "2px 8px", fontSize: "11px", cursor: "pointer", background: "#2c2c2c", color: "#888", border: "1px solid #3a3a3a", borderRadius: "3px" },
     turnBtnActive:   { background: "#1e2a1e", color: "#7ab87a", border: "1px solid #3a6a3a" },
-    payloadRoot:     { display: "flex", flexDirection: "column" as const, gap: "10px" },
+    payloadRoot:     { display: "flex", flexDirection: "column", gap: "10px" },
     section:         { background: "#1e1e1e", border: "1px solid #2a2a2a", borderRadius: "3px", padding: "8px 10px" },
-    sectionTitle:    { fontSize: "10px", color: "#666", textTransform: "uppercase" as const, letterSpacing: "0.07em", marginBottom: "6px" },
+    sectionTitle:    { fontSize: "10px", color: "#666", textTransform: "uppercase", letterSpacing: "0.07em", marginBottom: "6px" },
     kvGrid:          { display: "grid", gridTemplateColumns: "max-content 1fr", gap: "3px 12px", alignItems: "start" },
-    kvKey:           { fontSize: "11px", color: "#666", whiteSpace: "nowrap" as const },
+    kvKey:           { fontSize: "11px", color: "#666", whiteSpace: "nowrap" },
     kvVal:           { fontSize: "11px", color: "#c0ccd8", fontFamily: "monospace" },
     monoTag:         { background: "#2a3040", border: "1px solid #3a4a60", borderRadius: "3px", padding: "0 5px", color: "#7a90b0" },
-    table:           { width: "100%", borderCollapse: "collapse" as const, fontSize: "11px" },
-    tdKey:           { color: "#666", padding: "2px 8px 2px 0", verticalAlign: "top" as const, whiteSpace: "nowrap" as const, width: "1px" },
+    table:           { width: "100%", borderCollapse: "collapse", fontSize: "11px" },
+    tdKey:           { color: "#666", padding: "2px 8px 2px 0", verticalAlign: "top", whiteSpace: "nowrap", width: "1px" },
     tdVal:           { color: "#c0ccd8", fontFamily: "monospace", padding: "2px 0" },
-    pillRow:         { display: "flex", flexWrap: "wrap" as const, gap: "3px" },
+    pillRow:         { display: "flex", flexWrap: "wrap", gap: "3px" },
     pill:            { padding: "1px 6px", borderRadius: "999px", fontSize: "10px", background: "#2c3040", color: "#7a90b0", border: "1px solid #3a4a60" },
     pillWarn:        { background: "#3a1800", color: "#f5a623", border: "1px solid #7a4000" },
-    metaRow:         { display: "flex", gap: "12px", flexWrap: "wrap" as const, alignItems: "center" },
-    metaCell:        { display: "flex", flexDirection: "column" as const, gap: "1px" },
-    metaLabel:       { fontSize: "10px", color: "#555", textTransform: "uppercase" as const, letterSpacing: "0.05em" },
+    metaRow:         { display: "flex", gap: "12px", flexWrap: "wrap", alignItems: "center" },
+    metaCell:        { display: "flex", flexDirection: "column", gap: "1px" },
+    metaLabel:       { fontSize: "10px", color: "#555", textTransform: "uppercase", letterSpacing: "0.05em" },
     metaValue:       { fontSize: "12px", color: "#c0ccd8", fontFamily: "monospace" },
-    fallbackBadge:   { padding: "2px 8px", borderRadius: "3px", fontSize: "11px", fontWeight: "bold" as const, background: "#4a1a1a", color: "#f88", border: "1px solid #822" },
+    fallbackBadge:   { padding: "2px 8px", borderRadius: "3px", fontSize: "11px", fontWeight: "bold", background: "#4a1a1a", color: "#f88", border: "1px solid #822" },
     transcriptBlock: { marginTop: "8px", borderTop: "1px solid #2a2a2a", paddingTop: "6px" },
-    transcriptLabel: { display: "block", fontSize: "10px", color: "#555", textTransform: "uppercase" as const, letterSpacing: "0.05em", marginBottom: "3px" },
-    transcriptText2: { fontSize: "11px", color: "#94a3b8", lineHeight: 1.5, whiteSpace: "pre-wrap" as const },
+    transcriptLabel: { display: "block", fontSize: "10px", color: "#555", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "3px" },
+    transcriptText2: { fontSize: "11px", color: "#94a3b8", lineHeight: 1.5, whiteSpace: "pre-wrap" },
     stageBlock:      { marginBottom: "8px" },
-    stageLabel:      { fontSize: "10px", color: "#8a7040", textTransform: "uppercase" as const, letterSpacing: "0.06em", marginBottom: "4px", fontWeight: "bold" as const },
-    rawJson:         { fontSize: "10px", color: "#8a9ab8", background: "#1a1a2a", border: "1px solid #2a2a3a", borderRadius: "3px", padding: "8px", overflow: "auto" as const, maxHeight: "300px", margin: 0 },
-} as const;
+    stageLabel:      { fontSize: "10px", color: "#8a7040", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: "4px", fontWeight: "bold" },
+    rawJson:         { fontSize: "10px", color: "#8a9ab8", background: "#1a1a2a", border: "1px solid #2a2a3a", borderRadius: "3px", padding: "8px", overflow: "auto", maxHeight: "300px", margin: 0 },
+};

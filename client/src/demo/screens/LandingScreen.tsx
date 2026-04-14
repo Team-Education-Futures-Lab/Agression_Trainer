@@ -28,7 +28,7 @@ export function LandingScreen({ ready, onConnect }: LandingScreenProps) {
     );
 }
 
-const s = {
+const s: Record<string, React.CSSProperties> = {
     root: {
         minHeight:      "100vh",
         display:        "flex",
@@ -48,7 +48,7 @@ const s = {
     title: {
         margin:     "0 0 16px",
         fontSize:   "24px",
-        fontWeight: "700" as const,
+        fontWeight: "700",
         color:      "#f1f5f9",
         lineHeight: 1.2,
     },
@@ -70,7 +70,7 @@ const s = {
         width:        "100%",
         padding:      "14px",
         fontSize:     "16px",
-        fontWeight:   "600" as const,
+        fontWeight:   "600",
         background:   "#6366f1",
         color:        "#fff",
         border:       "none",
@@ -82,4 +82,4 @@ const s = {
         color:      "#64748b",
         cursor:     "not-allowed",
     },
-} as const;
+};
