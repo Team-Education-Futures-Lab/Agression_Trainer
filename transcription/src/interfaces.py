@@ -33,17 +33,16 @@ class WordTiming:
     """
     A single recognised word with its start and end time.
 
-    In TranscriptSegment (internal), times are window-relative (seconds from
-    the start of the audio buffer being transcribed).
+    In TranscriptSegment (internal), times are relative to the start of the
+    audio buffer passed to transcribe() — which is overlap_pcm + new_pcm.
+    The TranscriptionService converts these to session-level times (seconds
+    from clip start) by adding overlap_session_start before emission.
 
     In TranscriptMessage (wire format), times are session-level (seconds from
-    the start of the clip, i.e. from the last reset). The TranscriptionService
-    converts from window-relative to session-level before emission by adding
-    the window's time offset.
-
-    These session-level times are forwarded by the App container in the
-    AnalysisWindow sent to the Evaluation container, where they are used to
-    compute silence_ratio and speech_pace accurately.
+    the start of the clip, i.e. from the last reset). These session-level
+    times are forwarded by the App container in the AnalysisWindow sent to
+    the Evaluation container, where they are used to compute silence_ratio
+    and speech_pace accurately.
     """
     word:  str
     start: float    # seconds (context-dependent — see docstring above)
@@ -55,18 +54,21 @@ class TranscriptSegment:
     """
     The result of transcribing a single window of audio.
     Produced by TranscriptionPoolInterface.transcribe() and consumed by
-    TranscriptionService for deduplication before emission.
+    TranscriptionService before emission.
 
-    `words` carries per-word timings in window-relative seconds. The service
-    layer converts them to session-level times before forwarding.
-    `text` is the pre-joined, pre-filtered string ready to emit.
+    `words` carries per-word timings relative to the start of the buffer
+    passed to transcribe() (which is overlap_pcm + new_pcm). The service
+    layer converts them to session-level times by adding overlap_session_start.
+
+    `text` is the space-joined string of all returned words, ready to be
+    filtered and emitted by the service layer.
+
+    The pool returns all words without any filtering — duplicate filtering
+    is the responsibility of the service layer using emitted_until.
     """
     text:       str
     confidence: float               # 0.0–1.0; stub always returns 1.0
     words:      list[WordTiming] = field(default_factory=list)
-    # The end time (relative to this window's audio) of the last accepted word.
-    # Returned to the service so it can advance the session-level cutoff.
-    last_word_end: float = 0.0
 
 
 @dataclass
@@ -111,9 +113,11 @@ class TranscriptionPoolInterface(ABC):
     Abstracts the Whisper worker pool.
 
     The pool has a single responsibility: given a contiguous buffer of raw
-    s16le PCM bytes and a cutoff time, transcribe the audio and return only
-    the words that start at or after the cutoff. All VAD accumulation, window
-    management, and cutoff tracking is handled by the service layer.
+    s16le PCM bytes, transcribe the audio and return all recognised words
+    with their timestamps. No filtering is performed by the pool — duplicate
+    filtering via the emitted_until cutoff is handled entirely by the service
+    layer. All VAD accumulation, window management, and overlap state are
+    managed by the service layer.
 
     Implementations:
       - StubTranscriptionPool  (stubs/stub_transcription_pool.py)
@@ -123,23 +127,25 @@ class TranscriptionPoolInterface(ABC):
     @abstractmethod
     async def transcribe(
         self,
-        pcm:            bytes,
-        sample_rate:    int,
-        session_id:     str,
-        initial_prompt: str   = "",
-        language:       str   = "",
-        cutoff_time:    float = 0.0,
+        pcm:         bytes,
+        sample_rate: int,
+        session_id:  str,
+        language:    str = "",
     ) -> TranscriptSegment:
         """
         Transcribe a contiguous buffer of s16le PCM audio.
 
-        Returns a TranscriptSegment with deduplicated text, word timings
-        (window-relative), and the end time of the last accepted word.
+        Returns a TranscriptSegment with text and word timings relative to
+        the start of the given PCM buffer (t=0). All words are returned
+        without any filtering.
 
-        Word timings in the returned segment are relative to this buffer's
-        t=0. The service layer adds the window's session-level time offset
-        to convert them to session-level (clip-relative) times before
-        forwarding to the App container.
+        The service layer:
+          1. Prepends overlap_pcm to the new audio before calling this method.
+          2. Converts the returned word timestamps to session-level times by
+             adding entry.overlap_session_start.
+          3. Skips words whose session-level end time <= entry.emitted_until
+             (they are in the overlap region, already sent).
+          4. Emits the remaining words and updates entry.emitted_until.
         """
         ...
 

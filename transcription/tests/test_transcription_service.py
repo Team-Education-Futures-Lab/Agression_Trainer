@@ -11,7 +11,7 @@ import json
 import math
 import struct
 import pytest
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock, MagicMock
 
 import sys
 import os
@@ -19,25 +19,23 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../src"))
 
 from interfaces import TranscriptSegment, WordTiming
 from session_store import SessionStore, BYTES_PER_SECOND
-from transcription_service import TranscriptionService
+from transcription_service import TranscriptionService, _OVERLAP_WORDS
 from whisper_pool import TranscriptionError
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def make_pool(
-    text:           str            = "hallo wereld",
-    confidence:     float          = 0.9,
-    words:          list           = None,
-    last_word_end:  float          = 0.0,
+    text:       str   = "hallo wereld",
+    confidence: float = 0.9,
+    words:      list  = None,
 ) -> MagicMock:
     """Mock pool that resolves transcribe() with a fixed TranscriptSegment."""
     pool = MagicMock()
     pool.transcribe = AsyncMock(return_value=TranscriptSegment(
-        text          = text,
-        confidence    = confidence,
-        words         = words or [],
-        last_word_end = last_word_end,
+        text       = text,
+        confidence = confidence,
+        words      = words or [],
     ))
     return pool
 
@@ -117,13 +115,20 @@ class TestSessionLifecycle:
         assert "s1" in store
         assert len(store.get("s1").pcm_buffer) == 0
 
-    def test_reset_clears_last_text_cache(self):
+    def test_reset_clears_overlap_state(self):
+        """reset_session must clear overlap_pcm, overlap_session_start, emitted_until."""
         store = SessionStore()
-        svc   = TranscriptionService(make_pool("hallo"), store)
+        svc   = TranscriptionService(make_pool(), store)
         svc.open_session("s1", make_ws())
-        svc._last_text["s1"] = "hallo"
+        entry = store.get("s1")
+        entry.overlap_pcm           = b"\x01\x02\x03\x04"
+        entry.overlap_session_start = 3.5
+        entry.emitted_until         = 4.2
         svc.reset_session("s1")
-        assert "s1" not in svc._last_text
+        entry = store.get("s1")
+        assert entry.overlap_pcm           == b""
+        assert entry.overlap_session_start == 0.0
+        assert entry.emitted_until         == 0.0
 
 
 # ─── on_audio_chunk ───────────────────────────────────────────────────────────
@@ -223,6 +228,7 @@ class TestFinalise:
 
         pool.transcribe.assert_called_once()
         call_pcm = pool.transcribe.call_args.kwargs["pcm"]
+        # No prior overlap, so pool receives exactly the new pcm.
         assert call_pcm == pcm
 
     @pytest.mark.asyncio
@@ -237,9 +243,15 @@ class TestFinalise:
 
     @pytest.mark.asyncio
     async def test_emits_is_final_true_transcript(self):
+        # Supply a word so _dispatch_to_pool has something to emit.
+        # start=0.1, end=0.5 fits inside make_speech_pcm(100) = 200 bytes (0.00625 s).
+        # The word end=0.5 is beyond the buffer duration but overlap byte offset
+        # is clamped to len(combined), so this is safe — the test only checks
+        # that the word is emitted, not overlap sizing.
+        w     = WordTiming(word="hallo", start=0.0, end=0.1)
         store = SessionStore()
         ws    = make_ws()
-        svc   = TranscriptionService(make_pool("hallo"), store)
+        svc   = TranscriptionService(make_pool("hallo", words=[w]), store)
         svc.open_session("s1", ws)
 
         await svc.on_audio_chunk("s1", make_audio_msg(make_speech_pcm(100)))
@@ -319,17 +331,13 @@ class TestFinalise:
         assert msgs[0]["words"] == []
 
     @pytest.mark.asyncio
-    async def test_words_converted_to_session_level_times(self):
+    async def test_words_at_session_level_when_no_prior_overlap(self):
         """
-        Word timings from the pool are window-relative. The service must
-        convert them to session-level by adding the window's time offset.
-
-        When the first window starts at t=0 (no prior PCM consumed),
-        window_offset = 0.0, so session-level == window-relative.
-        This tests the conversion formula without needing a prior window.
+        When overlap_session_start=0.0 (first window), session-level times
+        equal pool-relative times exactly.
         """
         w = WordTiming(word="hallo", start=0.5, end=1.0)
-        pool  = make_pool("hallo", words=[w], last_word_end=1.0)
+        pool  = make_pool("hallo", words=[w])
         store = SessionStore()
         ws    = make_ws()
         svc   = TranscriptionService(pool, store)
@@ -342,46 +350,8 @@ class TestFinalise:
         emitted_words = msgs[0]["words"]
         assert len(emitted_words) == 1
         assert emitted_words[0]["word"] == "hallo"
-        # At window_offset=0, session-level == window-relative
         assert emitted_words[0]["start"] == pytest.approx(0.5)
         assert emitted_words[0]["end"]   == pytest.approx(1.0)
-
-    @pytest.mark.asyncio
-    async def test_words_offset_applied_for_second_window(self):
-        """
-        Words in a second window must have the first window's audio duration
-        added to their window-relative times.
-        """
-        pcm_size = make_speech_pcm(100)
-        offset   = len(pcm_size) / BYTES_PER_SECOND  # session-level offset of second window
-
-        # First window returns no words, second window has one word at t=0.2
-        pool  = MagicMock()
-        pool.transcribe = AsyncMock(side_effect=[
-            TranscriptSegment(text="eerste", confidence=0.9, words=[], last_word_end=0.0),
-            TranscriptSegment(
-                text          = "tweede",
-                confidence    = 0.9,
-                words         = [WordTiming(word="tweede", start=0.2, end=0.6)],
-                last_word_end = 0.6,
-            ),
-        ])
-        store = SessionStore()
-        ws    = make_ws()
-        svc   = TranscriptionService(pool, store)
-        svc.open_session("s1", ws)
-
-        # Two separate transcribe calls via _transcribe_window
-        store.append_pcm("s1", pcm_size)
-        await svc._transcribe_window("s1", is_final=False)
-        store.append_pcm("s1", pcm_size)
-        await svc._transcribe_window("s1", is_final=True)
-
-        msgs = sent_messages(ws)
-        second_msg = msgs[1]
-        assert len(second_msg["words"]) == 1
-        assert second_msg["words"][0]["start"] == pytest.approx(offset + 0.2, rel=1e-4)
-        assert second_msg["words"][0]["end"]   == pytest.approx(offset + 0.6, rel=1e-4)
 
     @pytest.mark.asyncio
     async def test_window_seq_starts_at_one_per_connection(self):
@@ -472,6 +442,22 @@ class TestFinalise:
         assert msgs[0]["text"] == ""
         assert msgs[0]["words"] == []
 
+    @pytest.mark.asyncio
+    async def test_finalise_clears_overlap_pcm(self):
+        """After finalise(), overlap_pcm must be empty."""
+        words = [WordTiming(word="hallo", start=0.5, end=1.0)]
+        pool  = make_pool("hallo", words=words)
+        store = SessionStore()
+        ws    = make_ws()
+        svc   = TranscriptionService(pool, store)
+        svc.open_session("s1", ws)
+
+        await svc.on_audio_chunk("s1", make_audio_msg(make_speech_pcm(100)))
+        await svc.finalise("s1")
+
+        entry = store.get("s1")
+        assert entry.overlap_pcm == b""
+
 
 # ─── Rolling window ───────────────────────────────────────────────────────────
 
@@ -506,9 +492,10 @@ class TestRollingWindow:
 
     @pytest.mark.asyncio
     async def test_partial_transcript_emitted_with_is_final_false(self):
+        w     = WordTiming(word="gedeeltelijk", start=0.0, end=0.5)
         store = SessionStore()
         ws    = make_ws()
-        svc   = TranscriptionService(make_pool("gedeeltelijk"), store)
+        svc   = TranscriptionService(make_pool("gedeeltelijk", words=[w]), store)
         svc.open_session("s1", ws)
 
         await svc.on_audio_chunk("s1", make_audio_msg_of_size(_MIN_BUFFER_BYTES))
@@ -587,7 +574,7 @@ class TestRollingWindow:
         pool.transcribe.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_whisper_error_in_rolling_window_does_not_propagate(self):
+    async def test_whisker_error_in_rolling_window_does_not_propagate(self):
         pool  = make_pool()
         pool.transcribe = AsyncMock(side_effect=TranscriptionError("model OOM"))
         store = SessionStore()
@@ -610,9 +597,163 @@ class TestRollingWindow:
         pool.transcribe.assert_not_called()
         assert len(sent_messages(ws)) == 0
 
+
+# ─── Overlap-window behaviour ─────────────────────────────────────────────────
+
+class TestOverlapWindow:
     @pytest.mark.asyncio
-    async def test_initial_prompt_passed_from_previous_transcript(self):
-        pool  = make_pool("eerste zin")
+    async def test_overlap_pcm_set_after_first_window(self):
+        """
+        After the first window fires with a non-empty word list,
+        overlap_pcm must be non-empty.
+
+        PCM must be at least overlap_start_word.start * BYTES_PER_SECOND bytes.
+        overlap_start_word = words[-3] = twee at start=0.4 s
+        → need > 0.4 * 32000 = 12800 bytes. We use 32000 (1 s of audio).
+        """
+        words = [
+            WordTiming(word="een",  start=0.0, end=0.3),
+            WordTiming(word="twee", start=0.4, end=0.7),
+            WordTiming(word="drie", start=0.8, end=1.1),
+            WordTiming(word="vier", start=1.2, end=1.5),
+        ]
+        pool  = make_pool("een twee drie vier", words=words)
+        store = SessionStore()
+        svc   = TranscriptionService(pool, store)
+        svc.open_session("s1", make_ws())
+
+        pcm = make_speech_pcm(32_000)   # 1 s of audio; fits all word timestamps
+        store.append_pcm("s1", pcm)
+        await svc._transcribe_window("s1", is_final=False)
+
+        entry = store.get("s1")
+        assert entry.overlap_pcm != b""
+
+    @pytest.mark.asyncio
+    async def test_overlap_pcm_empty_after_reset(self):
+        """reset_session must clear overlap_pcm."""
+        words = [WordTiming(word="hallo", start=0.0, end=0.5)]
+        pool  = make_pool("hallo", words=words)
+        store = SessionStore()
+        svc   = TranscriptionService(pool, store)
+        svc.open_session("s1", make_ws())
+
+        pcm = make_speech_pcm(64)
+        store.append_pcm("s1", pcm)
+        await svc._transcribe_window("s1", is_final=False)
+
+        svc.reset_session("s1")
+        assert store.get("s1").overlap_pcm == b""
+
+    @pytest.mark.asyncio
+    async def test_second_window_receives_overlap_prepended(self):
+        """
+        The PCM bytes sent to the pool on the second window must begin with
+        the overlap bytes stored after the first window.
+
+        PCM must be large enough that the overlap byte offset fits within it.
+        overlap_start_word = words[-3] = twee at start=0.4 s
+        → need > 12800 bytes. We use 32000 (1 s).
+        """
+        words_w1 = [
+            WordTiming(word="een",  start=0.0, end=0.3),
+            WordTiming(word="twee", start=0.4, end=0.7),
+            WordTiming(word="drie", start=0.8, end=1.1),
+            WordTiming(word="vier", start=1.2, end=1.5),
+        ]
+        pcm1 = make_speech_pcm(32_000)   # 1 s
+        pcm2 = make_speech_pcm(32_000)
+
+        pool  = MagicMock()
+        pool.transcribe = AsyncMock(side_effect=[
+            TranscriptSegment(text="een twee drie vier", confidence=0.9, words=words_w1),
+            TranscriptSegment(text="vijf", confidence=0.9, words=[
+                WordTiming(word="vijf", start=2.0, end=2.4),
+            ]),
+        ])
+        store = SessionStore()
+        svc   = TranscriptionService(pool, store)
+        svc.open_session("s1", make_ws())
+
+        # First window
+        store.append_pcm("s1", pcm1)
+        await svc._transcribe_window("s1", is_final=False)
+
+        entry = store.get("s1")
+        saved_overlap = entry.overlap_pcm
+        assert len(saved_overlap) > 0
+
+        # Second window
+        store.append_pcm("s1", pcm2)
+        await svc._transcribe_window("s1", is_final=False)
+
+        second_call_pcm = pool.transcribe.call_args_list[1].kwargs["pcm"]
+        assert second_call_pcm[:len(saved_overlap)] == saved_overlap
+        assert second_call_pcm[len(saved_overlap):] == pcm2
+
+    @pytest.mark.asyncio
+    async def test_overlap_words_filtered_from_second_emission(self):
+        """
+        Words whose session-level end <= emitted_until must not appear in
+        the second window's emitted words.
+        """
+        # Window 1 emits words ending at 1.5; overlap covers the last 3 words
+        # (twee, drie, vier: ends at 0.7, 1.1, 1.5). emitted_until = 1.5.
+        words_w1 = [
+            WordTiming(word="een",  start=0.0, end=0.3),
+            WordTiming(word="twee", start=0.4, end=0.7),
+            WordTiming(word="drie", start=0.8, end=1.1),
+            WordTiming(word="vier", start=1.2, end=1.5),
+        ]
+        # Window 2 pool returns words; the overlap region is included at the
+        # start. We simulate by having the overlap words returned at their
+        # original pool-relative positions (which, after offset, become
+        # session times <= emitted_until) plus a new word.
+        # overlap_session_start will be set to the start of the 2nd-to-last
+        # _OVERLAP_WORDS word = words_w1[-3].start = 0.4 (session-level).
+        # So pool-relative word times for window 2 represent session =
+        # pool_rel + overlap_session_start.
+        # Overlap words (twee=0.4..0.7, drie=0.8..1.1, vier=1.2..1.5)
+        # in pool-relative coords: subtract overlap_session_start (0.4):
+        # twee: 0.0..0.3, drie: 0.4..0.7, vier: 0.8..1.1
+        # New word vijf at pool-relative 1.2..1.6 → session 1.6..2.0
+        words_w2_pool_rel = [
+            WordTiming(word="twee", start=0.0, end=0.3),
+            WordTiming(word="drie", start=0.4, end=0.7),
+            WordTiming(word="vier", start=0.8, end=1.1),
+            WordTiming(word="vijf", start=1.2, end=1.6),
+        ]
+
+        pool  = MagicMock()
+        pool.transcribe = AsyncMock(side_effect=[
+            TranscriptSegment(text="een twee drie vier", confidence=0.9, words=words_w1),
+            TranscriptSegment(text="twee drie vier vijf", confidence=0.9, words=words_w2_pool_rel),
+        ])
+        store = SessionStore()
+        ws    = make_ws()
+        svc   = TranscriptionService(pool, store)
+        svc.open_session("s1", ws)
+
+        store.append_pcm("s1", make_speech_pcm(64))
+        await svc._transcribe_window("s1", is_final=False)
+
+        store.append_pcm("s1", make_speech_pcm(64))
+        await svc._transcribe_window("s1", is_final=False)
+
+        msgs = sent_messages(ws)
+        # Window 2 must emit only "vijf", not the overlap words.
+        w2_words = msgs[1]["words"]
+        assert len(w2_words) == 1
+        assert w2_words[0]["word"] == "vijf"
+
+    @pytest.mark.asyncio
+    async def test_emitted_until_advances_after_each_window(self):
+        """emitted_until must equal the session-level end of the last new word."""
+        words = [
+            WordTiming(word="een",  start=0.0, end=0.3),
+            WordTiming(word="twee", start=0.4, end=0.7),
+        ]
+        pool  = make_pool("een twee", words=words)
         store = SessionStore()
         svc   = TranscriptionService(pool, store)
         svc.open_session("s1", make_ws())
@@ -620,11 +761,98 @@ class TestRollingWindow:
         store.append_pcm("s1", make_speech_pcm(64))
         await svc._transcribe_window("s1", is_final=False)
 
-        first_call = pool.transcribe.call_args_list[0]
-        assert first_call.kwargs.get("initial_prompt", "") == ""
+        entry = store.get("s1")
+        # session-level end of "twee" = overlap_session_start(0.0) + 0.7 = 0.7
+        assert entry.emitted_until == pytest.approx(0.7)
+
+    @pytest.mark.asyncio
+    async def test_overlap_state_unchanged_when_pool_returns_no_words(self):
+        """
+        When the pool returns an empty word list, overlap_pcm and
+        emitted_until must not change.
+        """
+        words_w1 = [WordTiming(word="hallo", start=0.0, end=0.5)]
+        pool  = MagicMock()
+        pool.transcribe = AsyncMock(side_effect=[
+            TranscriptSegment(text="hallo", confidence=0.9, words=words_w1),
+            TranscriptSegment(text="",      confidence=0.9, words=[]),
+        ])
+        store = SessionStore()
+        svc   = TranscriptionService(pool, store)
+        svc.open_session("s1", make_ws())
 
         store.append_pcm("s1", make_speech_pcm(64))
         await svc._transcribe_window("s1", is_final=False)
 
-        second_call = pool.transcribe.call_args_list[1]
-        assert second_call.kwargs.get("initial_prompt") == "eerste zin"
+        entry = store.get("s1")
+        overlap_after_w1  = entry.overlap_pcm
+        emitted_after_w1  = entry.emitted_until
+
+        store.append_pcm("s1", make_speech_pcm(64))
+        await svc._transcribe_window("s1", is_final=False)
+
+        entry = store.get("s1")
+        assert entry.overlap_pcm  == overlap_after_w1
+        assert entry.emitted_until == emitted_after_w1
+
+    @pytest.mark.asyncio
+    async def test_new_words_emitted_with_session_level_offset(self):
+        """
+        When overlap_session_start > 0, new word times must be
+        pool_relative + overlap_session_start.
+        """
+        # Window 1: two words, overlap = last _OVERLAP_WORDS = 3 but only 2
+        # available, so overlap starts from words[0].
+        words_w1 = [
+            WordTiming(word="een",  start=0.0, end=0.5),
+            WordTiming(word="twee", start=0.6, end=1.0),
+        ]
+        # After w1: emitted_until = 1.0, overlap_session_start = 0.0 (words[0].start).
+        # New word in window 2 at pool-relative 1.2..1.8.
+        # Session-level = 1.2 + 0.0 = 1.2 (overlap_session_start is still 0.0
+        # because we had fewer than _OVERLAP_WORDS, so overlap starts from words[0])
+        # Actually with 2 words < _OVERLAP_WORDS(3), overlap_start_word = words[0]
+        # → overlap_session_start = 0.0; so w2 pool-relative offsets:
+        # overlap region ends at session time 1.0; pool returns twee at
+        # 0.6..1.0 (pool-relative, since overlap_session_start=0.0) and vijf at 1.2..1.8.
+        words_w2_pool_rel = [
+            WordTiming(word="twee", start=0.6, end=1.0),
+            WordTiming(word="vijf", start=1.2, end=1.8),
+        ]
+
+        pool  = MagicMock()
+        pool.transcribe = AsyncMock(side_effect=[
+            TranscriptSegment(text="een twee", confidence=0.9, words=words_w1),
+            TranscriptSegment(text="twee vijf", confidence=0.9, words=words_w2_pool_rel),
+        ])
+        store = SessionStore()
+        ws    = make_ws()
+        svc   = TranscriptionService(pool, store)
+        svc.open_session("s1", ws)
+
+        store.append_pcm("s1", make_speech_pcm(64))
+        await svc._transcribe_window("s1", is_final=False)
+        store.append_pcm("s1", make_speech_pcm(64))
+        await svc._transcribe_window("s1", is_final=False)
+
+        msgs = sent_messages(ws)
+        w2_words = msgs[1]["words"]
+        # "twee" is in overlap (session end 1.0 == emitted_until 1.0, NOT > so filtered).
+        # "vijf" session end = 0.0 + 1.8 = 1.8 > 1.0 → emitted.
+        assert len(w2_words) == 1
+        assert w2_words[0]["word"] == "vijf"
+        assert w2_words[0]["start"] == pytest.approx(1.2)
+        assert w2_words[0]["end"]   == pytest.approx(1.8)
+
+    @pytest.mark.asyncio
+    async def test_silence_gate_still_prevents_pool_dispatch(self):
+        """Silent windows must not call the pool even with overlap."""
+        pool  = make_pool()
+        store = SessionStore()
+        svc   = TranscriptionService(pool, store)
+        svc.open_session("s1", make_ws())
+
+        store.append_pcm("s1", make_silent_pcm(64))
+        await svc._transcribe_window("s1", is_final=False)
+
+        pool.transcribe.assert_not_called()

@@ -76,33 +76,22 @@ class WhisperPool(TranscriptionPoolInterface):
 
     async def transcribe(
         self,
-        pcm:            bytes,
-        sample_rate:    int,
-        session_id:     str,
-        initial_prompt: str   = "",
-        language:       str   = "",
-        cutoff_time:    float = 0.0,
+        pcm:         bytes,
+        sample_rate: int,
+        session_id:  str,
+        language:    str = "",
     ) -> TranscriptSegment:
         """
         Transcribe a buffer of s16le PCM audio.
 
-        Converts PCM → float32 numpy array, acquires a free WhisperModel,
-        runs transcription in a thread executor, and returns the result.
-
-        Words whose window-relative start time is less than `cutoff_time` are
-        filtered out before text is assembled. This eliminates phrases that
-        Whisper has repeated from a previous window due to initial_prompt
-        looping, without requiring any string comparison or heuristics.
+        The buffer is expected to be overlap_pcm + new_pcm, already
+        concatenated by the service layer. All words are returned with
+        timestamps relative to the start of this buffer (t=0). No filtering
+        is applied — the service layer handles duplicate elimination via
+        emitted_until.
 
         On inference failure the model instance is discarded from the pool
         and TranscriptionError is raised.
-
-        Args:
-            cutoff_time: Window-relative seconds. Words starting before this
-                         time are dropped. The service layer computes this as
-                         (last_word_end − window_time_offset), which converts
-                         the session-level last_word_end into the coordinate
-                         space of this window's audio buffer.
         """
         audio              = _pcm_to_float32(pcm)
         effective_language = language or self._language
@@ -119,8 +108,6 @@ class WhisperPool(TranscriptionPoolInterface):
                     model,
                     audio,
                     effective_language,
-                    initial_prompt,
-                    cutoff_time,
                 )
             except Exception as exc:
                 discard = True
@@ -141,8 +128,8 @@ class WhisperPool(TranscriptionPoolInterface):
                 self._available += 1
 
         logger.debug(
-            "transcribed session=%s text=%r confidence=%.2f last_word_end=%.3f",
-            session_id, result.text, result.confidence, result.last_word_end,
+            "transcribed session=%s text=%r confidence=%.2f",
+            session_id, result.text, result.confidence,
         )
         return result
 
@@ -167,71 +154,56 @@ def _pcm_to_float32(pcm: bytes) -> np.ndarray:
 
 
 def _run_transcription(
-    model:          WhisperModel,
-    audio:          np.ndarray,
-    language:       str,
-    initial_prompt: str   = "",
-    cutoff_time:    float = 0.0,
+    model:    WhisperModel,
+    audio:    np.ndarray,
+    language: str,
 ) -> TranscriptSegment:
     """
     Synchronous transcription call — runs inside a thread executor.
 
-    Requests word-level timestamps from faster-whisper and filters out any
-    word whose start time (relative to this buffer's t=0) is less than
-    cutoff_time. This removes phrases that Whisper has replayed from the
-    initial_prompt context without requiring string matching.
+    Requests word-level timestamps from faster-whisper and returns all
+    recognised words without any filtering. The buffer passed in is
+    overlap_pcm + new_pcm; all word timestamps are relative to t=0 of
+    this combined buffer.
 
-    The returned TranscriptSegment carries:
-      - text: the deduplicated, space-joined transcript for this window
-      - words: the accepted WordTiming list (for diagnostics / future use)
-      - last_word_end: end time of the last accepted word, in window-relative
-        seconds. The service layer adds the window's session-level time offset
-        to convert this back to a session-level cutoff for the next window.
+    The service layer uses emitted_until to skip words that fall in the
+    overlap region (already emitted in a previous window).
 
     Any exception raised here propagates back to WhisperPool.transcribe(),
     which catches it, discards the model instance, and re-raises as
     TranscriptionError.
     """
-    kwargs: dict = dict(
-        language         = language,
-        vad_filter       = True,
-        beam_size        = 5,
-        word_timestamps  = True,
+    segments_gen, _info = model.transcribe(
+        audio,
+        language        = language,
+        vad_filter      = True,
+        beam_size       = 5,
+        word_timestamps = True,
     )
-    if initial_prompt:
-        kwargs["initial_prompt"] = initial_prompt
-
-    segments_gen, _info = model.transcribe(audio, **kwargs)
     segments = list(segments_gen)
 
     if not segments:
         return TranscriptSegment(text="", confidence=0.0)
 
-    # Collect all words across all segments, filtered by cutoff_time.
-    accepted: list[WordTiming] = []
+    words: list[WordTiming] = []
     for seg in segments:
         for w in (seg.words or []):
-            # w.start and w.end are relative to this buffer's beginning.
-            if w.start >= cutoff_time:
-                accepted.append(WordTiming(
-                    word  = w.word,
-                    start = w.start,
-                    end   = w.end,
-                ))
+            words.append(WordTiming(
+                word  = w.word,
+                start = w.start,
+                end   = w.end,
+            ))
 
-    if not accepted:
-        # All words were filtered (entire window is a repeat) — return empty.
+    if not words:
         return TranscriptSegment(text="", confidence=0.0)
 
-    text          = " ".join(w.word.strip() for w in accepted if w.word.strip())
-    last_word_end = accepted[-1].end
+    text = " ".join(w.word.strip() for w in words if w.word.strip())
 
     avg_logprob = sum(s.avg_logprob for s in segments) / len(segments)
     confidence  = float(min(1.0, max(0.0, 1.0 + avg_logprob)))
 
     return TranscriptSegment(
-        text          = text,
-        confidence    = confidence,
-        words         = accepted,
-        last_word_end = last_word_end,
+        text       = text,
+        confidence = confidence,
+        words      = words,
     )

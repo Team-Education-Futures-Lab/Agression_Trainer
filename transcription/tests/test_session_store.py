@@ -44,6 +44,21 @@ class TestOpen:
         entry = store.open("s1", make_ws())
         assert entry.window_seq == 0
 
+    def test_open_initialises_overlap_pcm_empty(self):
+        store = SessionStore()
+        entry = store.open("s1", make_ws())
+        assert entry.overlap_pcm == b""
+
+    def test_open_initialises_overlap_session_start_zero(self):
+        store = SessionStore()
+        entry = store.open("s1", make_ws())
+        assert entry.overlap_session_start == 0.0
+
+    def test_open_initialises_emitted_until_zero(self):
+        store = SessionStore()
+        entry = store.open("s1", make_ws())
+        assert entry.emitted_until == 0.0
+
     def test_open_replaces_stale_entry_for_same_session(self):
         store = SessionStore()
         ws1 = make_ws()
@@ -113,6 +128,30 @@ class TestReset:
         store.next_seq("s1")
         store.reset("s1")
         assert store.get("s1").window_seq == 0
+
+    def test_reset_clears_overlap_pcm(self):
+        store = SessionStore()
+        store.open("s1", make_ws())
+        entry = store.get("s1")
+        entry.overlap_pcm = b"\xAA\xBB"
+        store.reset("s1")
+        assert store.get("s1").overlap_pcm == b""
+
+    def test_reset_clears_overlap_session_start(self):
+        store = SessionStore()
+        store.open("s1", make_ws())
+        entry = store.get("s1")
+        entry.overlap_session_start = 5.0
+        store.reset("s1")
+        assert store.get("s1").overlap_session_start == 0.0
+
+    def test_reset_clears_emitted_until(self):
+        store = SessionStore()
+        store.open("s1", make_ws())
+        entry = store.get("s1")
+        entry.emitted_until = 3.7
+        store.reset("s1")
+        assert store.get("s1").emitted_until == 0.0
 
     def test_reset_does_not_remove_session(self):
         store = SessionStore()

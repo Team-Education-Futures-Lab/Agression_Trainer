@@ -5,47 +5,51 @@ Whisper dispatch, and Transcript emission for all active sessions.
 This is the service layer sitting between the WebSocket handlers and the
 TranscriptionPoolInterface. It owns:
   - Silence gating (skip the pool entirely for silent windows)
-  - Rolling window dispatch with initial_prompt and cutoff_time threading
-  - Cross-window deduplication via word timestamps
+  - Overlap-window dispatch (prepend tail audio from the previous window)
+  - Cross-window duplicate filtering via session-level word-end timestamps
   - Formatting and sending TranscriptMessage over the session WebSocket
 
-Word timing conversion
+Overlap-window strategy
+────────────────────────
+Instead of using text-based initial_prompt seeding (which causes Whisper to
+replay old words at the start of a new window) and a byte-count-derived
+cutoff to remove duplicates (which drifts over time), this service uses an
+audio-overlap approach:
+
+  1. After each window is transcribed, the audio corresponding to the last
+     _OVERLAP_WORDS words is stored as entry.overlap_pcm.
+
+  2. Before dispatching the next window to the pool, entry.overlap_pcm is
+     prepended to the new audio buffer. The pool receives and decodes the
+     combined buffer in one shot, producing a single coherent transcript.
+
+  3. After transcription, pool-returned word timestamps are offset by
+     entry.overlap_session_start (the session-level time at which overlap_pcm
+     begins) to convert them to session-level (clip-relative) times.
+
+  4. Words whose session-level end time is <= entry.emitted_until were already
+     sent to the App container in a previous window and are silently skipped.
+     Words past this boundary are new; they are emitted and emitted_until
+     is advanced to the session-level end of the last emitted word.
+
+This is more robust than byte-count-based offset computation because:
+  - overlap_session_start and emitted_until come from Whisper's own word
+    boundary timestamps, not from byte counts that drift with unaligned chunks.
+  - No text is injected into the decoder, eliminating prompt-looping entirely.
+  - Long words that straddle a boundary are decoded cleanly in context and
+    appear exactly once.
+
+Word timing semantics
 ──────────────────────
-The pool returns word timings in window-relative seconds (relative to the
-start of the PCM buffer it was given). Before emission, the service converts
-these to session-level (clip-relative) seconds by adding the window's time
-offset:
+The pool returns word timings relative to the start of the buffer it was
+given (overlap_pcm + new_pcm). Before emission, the service converts these
+to session-level (clip-relative) seconds by adding overlap_session_start:
 
-  session_level_time = window_offset + window_relative_time
-
-where window_offset = entry.pcm_bytes_consumed_before_this_window / BYTES_PER_SECOND
+  session_level_time = pool_relative_time + entry.overlap_session_start
 
 This produces clip-relative word timings that the App container can include
 in the AnalysisWindow dispatched to the Evaluation container, enabling
 accurate silence_ratio and speech_pace computation.
-
-Deduplication design
-────────────────────
-Whisper's initial_prompt seeding can cause "looping" — the decoder replays
-phrases from the prompt at the start of a new window. We eliminate this using
-faster-whisper's per-word timestamps:
-
-  1. Each window's PCM byte count is converted to a session-level time offset:
-       window_offset = entry.pcm_bytes_consumed / BYTES_PER_SECOND
-     (pcm_bytes_consumed is incremented before the pool call so finalise and
-     rolling windows share the same counter.)
-
-  2. The session-level last_word_end is converted back to a window-relative
-     cutoff before being passed to the pool:
-       cutoff_time = entry.last_word_end - window_offset
-     Words with window-relative start < cutoff_time are dropped by the pool.
-
-  3. The pool returns last_word_end in window-relative seconds. The service
-     converts it back to session-level and stores it on the entry:
-       entry.last_word_end = window_offset + segment.last_word_end
-
-  Both pcm_bytes_consumed and last_word_end are reset by reset_session()
-  between clips so each clip starts clean.
 """
 
 from __future__ import annotations
@@ -72,6 +76,13 @@ _MIN_BUFFER_BYTES = 192_000
 # RMS threshold below which a window is considered silent (~-44 dBFS).
 _SILENCE_RMS_THRESHOLD = 200
 
+# ── Overlap configuration ─────────────────────────────────────────────────────
+# Number of words from the tail of the accepted word list to keep as audio
+# overlap. The audio spanning these words is prepended to the next window's
+# buffer, giving Whisper acoustic context across window boundaries without
+# text-based prompt injection.
+_OVERLAP_WORDS = 3
+
 
 class TranscriptionService:
     """
@@ -82,26 +93,22 @@ class TranscriptionService:
     def __init__(self, pool: TranscriptionPoolInterface, store: SessionStore) -> None:
         self._pool  = pool
         self._store = store
-        self._last_text: dict[str, str] = {}
 
     # ── Session lifecycle ─────────────────────────────────────────────────────
 
     def open_session(self, session_id: str, websocket: WebSocket, language: str = "") -> None:
         """Register a new WebSocket connection for this session."""
         self._store.open(session_id, websocket, language)
-        self._last_text.pop(session_id, None)
         logger.info("session opened: %s (language=%s)", session_id, language)
 
     def close_session(self, session_id: str) -> None:
         """Remove session state on WebSocket disconnect."""
         self._store.close(session_id)
-        self._last_text.pop(session_id, None)
         logger.info("session closed: %s", session_id)
 
     def reset_session(self, session_id: str) -> None:
-        """Clear the VAD buffer, prompt cache, and deduplication state between clips."""
+        """Clear the VAD buffer and all overlap/deduplication state between clips."""
         self._store.reset(session_id)
-        self._last_text.pop(session_id, None)
         logger.debug("session reset: %s", session_id)
 
     # ── Audio ingestion ───────────────────────────────────────────────────────
@@ -128,8 +135,12 @@ class TranscriptionService:
 
     async def finalise(self, session_id: str) -> bool:
         """
-        Flush remaining audio, apply deduplication, and emit is_final=True.
+        Flush remaining audio and emit is_final=True.
         Returns True if the session was known, False otherwise.
+
+        Prepends overlap_pcm as usual. If the remaining buffer (excluding
+        overlap) is empty or silent, emits an empty final transcript without
+        calling the pool. After dispatch, overlap_pcm is cleared.
         """
         entry = self._store.get(session_id)
         if entry is None:
@@ -140,14 +151,24 @@ class TranscriptionService:
             pcm = bytes(entry.pcm_buffer)
             entry.pcm_buffer.clear()
 
-        if pcm and not _is_silent(pcm):
-            text, confidence, words = await self._dispatch_to_pool(session_id, pcm, entry)
+        combined = entry.overlap_pcm + pcm
+
+        if combined and not _is_silent(combined) and pcm:
+            text, confidence, words = await self._dispatch_to_pool(
+                session_id, pcm, entry
+            )
         else:
-            if pcm:
+            if pcm and _is_silent(pcm):
                 logger.debug("finalise: silent window for session %s — skipping pool", session_id)
             text       = ""
             confidence = 1.0
             words      = []
+
+        # Clear overlap after the final dispatch.
+        entry = self._store.get(session_id)
+        if entry is not None:
+            entry.overlap_pcm           = b""
+            entry.overlap_session_start = 0.0
 
         seq = self._store.next_seq(session_id)
         msg = TranscriptMessage(
@@ -166,15 +187,15 @@ class TranscriptionService:
             return False
 
         await self._send(entry.websocket, msg)
-        logger.debug("finalised session %s (seq=%d, len=%d bytes)", session_id, seq, len(pcm))
+        logger.debug("finalised session %s (seq=%d, new_bytes=%d)", session_id, seq, len(pcm))
         return True
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
     async def _transcribe_window(self, session_id: str, is_final: bool) -> None:
         """
-        Snapshot the buffer, gate on silence, dispatch to pool with deduplication,
-        and emit a Transcript message.
+        Snapshot the buffer, gate on silence, dispatch to pool with overlap,
+        filter duplicates, and emit a Transcript message.
         """
         entry = self._store.get(session_id)
         if entry is None:
@@ -208,69 +229,83 @@ class TranscriptionService:
     async def _dispatch_to_pool(
         self,
         session_id: str,
-        pcm:        bytes,
+        new_pcm:    bytes,
         entry:      object,  # SessionEntry — avoids circular import in type hint
     ) -> tuple[str, float, list[WordTiming]]:
         """
-        Compute the window time offset and cutoff, call the pool, update
-        deduplication state, and return (text, confidence, words).
+        Prepend overlap_pcm to new_pcm, call the pool, filter the overlap
+        region, update overlap state, and return (text, confidence, words).
 
-        Words are returned with session-level (clip-relative) times, converted
-        from the pool's window-relative times by adding window_offset.
+        Words are returned with session-level (clip-relative) times, computed
+        by adding entry.overlap_session_start to pool-relative timestamps.
+
+        If the pool returns no words, overlap state is left unchanged so the
+        existing overlap remains available as context for the next window.
         """
         from session_store import SessionEntry  # local to avoid top-level circular
         assert isinstance(entry, SessionEntry)
 
-        window_offset = entry.pcm_bytes_consumed / BYTES_PER_SECOND
-
-        # Advance the consumed counter before the pool call so a concurrent
-        # finalise() (if it somehow bypasses the lock) cannot reuse this range.
-        entry.pcm_bytes_consumed += len(pcm)
-
-        # Convert the session-level last_word_end into this window's coordinate
-        # space. If last_word_end <= window_offset all words in this window are
-        # fresh (cutoff_time ≤ 0), so pass 0.0 to avoid filtering anything.
-        cutoff_time = max(0.0, entry.last_word_end - window_offset)
+        combined = entry.overlap_pcm + new_pcm
 
         try:
             segment = await self._pool.transcribe(
-                pcm            = pcm,
-                sample_rate    = 16_000,
-                session_id     = session_id,
-                initial_prompt = self._last_text.get(session_id, ""),
-                language       = entry.language,
-                cutoff_time    = cutoff_time,
+                pcm        = combined,
+                sample_rate = 16_000,
+                session_id  = session_id,
+                language    = entry.language,
             )
-            text       = segment.text
+            raw_words  = segment.words
             confidence = segment.confidence
-
-            if text:
-                self._last_text[session_id] = text
-
-            # Convert window-relative last_word_end back to session-level.
-            if segment.last_word_end > 0.0:
-                entry.last_word_end = window_offset + segment.last_word_end
-
-            # Convert all word timings from window-relative to session-level.
-            words: list[WordTiming] = [
-                WordTiming(
-                    word  = w.word,
-                    start = window_offset + w.start,
-                    end   = window_offset + w.end,
-                )
-                for w in segment.words
-            ]
 
         except Exception as exc:
             logger.warning(
                 "Whisper error for session %s — emitting empty segment: %s",
                 session_id, exc,
             )
-            text       = ""
-            confidence = 0.0
-            words      = []
+            return "", 0.0, []
 
-        return text, confidence, words
+        if not raw_words:
+            # No words returned — keep existing overlap unchanged.
+            return "", confidence, []
+
+        # Convert pool-relative timestamps to session-level.
+        session_words: list[WordTiming] = [
+            WordTiming(
+                word  = w.word,
+                start = entry.overlap_session_start + w.start,
+                end   = entry.overlap_session_start + w.end,
+            )
+            for w in raw_words
+        ]
+
+        # Filter out words in the overlap region (already emitted).
+        new_words = [w for w in session_words if w.end > entry.emitted_until]
+
+        # Update emitted_until to the end of the last new word.
+        if new_words:
+            entry.emitted_until = new_words[-1].end
+
+        # Compute the new overlap: audio for the last _OVERLAP_WORDS accepted words.
+        # "Accepted" here means words from session_words (unfiltered), so Whisper
+        # always gets the last N words it decoded as context, regardless of which
+        # side of the boundary they fall on.
+        accepted_for_overlap = session_words
+        if len(accepted_for_overlap) >= _OVERLAP_WORDS:
+            overlap_start_word = accepted_for_overlap[-_OVERLAP_WORDS]
+        else:
+            overlap_start_word = accepted_for_overlap[0]
+
+        # overlap_start_word.start is session-level. Convert to pool-relative to
+        # compute the byte offset into `combined`.
+        pool_relative_overlap_start = overlap_start_word.start - entry.overlap_session_start
+        overlap_byte_offset = int(pool_relative_overlap_start * BYTES_PER_SECOND)
+        overlap_byte_offset = max(0, min(overlap_byte_offset, len(combined)))
+
+        entry.overlap_pcm           = combined[overlap_byte_offset:]
+        entry.overlap_session_start = overlap_start_word.start
+
+        text = " ".join(w.word.strip() for w in new_words if w.word.strip())
+        return text, confidence, new_words
 
     @staticmethod
     async def _send(websocket: WebSocket, msg: TranscriptMessage) -> None:
