@@ -193,13 +193,18 @@ app.get<{ Params: { scenario_id: string } }>("/scenarios/:scenario_id/clips", as
 // 256 KB gives ample headroom for both while blocking obviously oversized payloads.
 const MAX_WS_MESSAGE_BYTES = 256 * 1024;
 
-// Per-clip frame cap. At 30 fps a 60-second clip produces 1800 frames.
-// 3600 = 2× that, so legitimate sessions are never affected.
-const MAX_FRAMES_PER_CLIP = 3_600;
-
-// Per-clip audio chunk cap. At one 2-second chunk per 2 s, a 60-second clip
-// produces 30 chunks. 120 = 4× that.
-const MAX_AUDIO_CHUNKS_PER_CLIP = 120;
+// Rate limits for incoming WebSocket messages.
+// Applied as a fixed-window-per-second sliding rate limiter.
+// Messages above the limit are silently dropped — no error is sent to the client.
+//
+// Target rates: video_frame at 30 fps, audio_chunk at one per 2 s.
+// Limits are set at 2× the target to accommodate normal client-side jitter.
+// A well-behaved client operating at target rates will never hit these limits.
+//
+// The limits apply continuously for the lifetime of the WebSocket connection
+// and are not reset between clips. Clip length does not affect the limits.
+const MAX_FRAMES_PER_SECOND       = 60;
+const MAX_AUDIO_CHUNKS_PER_SECOND = 1;
 
 app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
     const { session_id } = req.params as { session_id: string };
@@ -217,11 +222,14 @@ app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
 
     const sendFn = (msg: object) => socket.send(JSON.stringify(msg));
 
-    // Per-connection counters reset when a new clip starts (coordinator.resetSession
-    // creates a new ClipSession). These are only used for rate-limiting; they do
-    // not need to be perfectly synchronised with clip transitions.
-    let frameCount = 0;
-    let audioCount = 0;
+    // Per-connection sliding window state for rate limiting.
+    // Two variables per message type: the timestamp of the current window's
+    // start and the number of messages received within that window.
+    // Windows reset automatically when a second has elapsed.
+    let frameWindowStart  = Date.now();
+    let frameWindowCount  = 0;
+    let audioWindowStart  = Date.now();
+    let audioWindowCount  = 0;
 
     // If the session is queued, the socket is open but we wait for a slot.
     // session_ready is sent when the session is promoted (see promoteNext in
@@ -266,31 +274,37 @@ app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
         if (msg.type === "video_frame") {
             // Use the authoritative session_id from the URL path, not from the
             // message body, to prevent session confusion attacks.
-            if (frameCount >= MAX_FRAMES_PER_CLIP) {
-                app.log.warn({ session_id }, "video_frame rate limit reached — dropping frame");
+            const now = Date.now();
+            if (now - frameWindowStart >= 1000) {
+                frameWindowStart = now;
+                frameWindowCount = 0;
+            }
+            frameWindowCount++;
+            if (frameWindowCount > MAX_FRAMES_PER_SECOND) {
+                app.log.warn({ session_id }, `video_frame rate limit exceeded (${frameWindowCount}/${MAX_FRAMES_PER_SECOND} fps) — dropping frame`);
                 return;
             }
-            frameCount++;
             coord.onFrame(session_id, msg);
             return;
         }
 
         if (msg.type === "audio_chunk") {
             // Same reasoning as video_frame above.
-            if (audioCount >= MAX_AUDIO_CHUNKS_PER_CLIP) {
-                app.log.warn({ session_id }, "audio_chunk rate limit reached — dropping chunk");
+            const now = Date.now();
+            if (now - audioWindowStart >= 1000) {
+                audioWindowStart = now;
+                audioWindowCount = 0;
+            }
+            audioWindowCount++;
+            if (audioWindowCount > MAX_AUDIO_CHUNKS_PER_SECOND) {
+                app.log.warn({ session_id }, `audio_chunk rate limit exceeded (${audioWindowCount}/${MAX_AUDIO_CHUNKS_PER_SECOND} cps) — dropping chunk`);
                 return;
             }
-            audioCount++;
             coord.onAudio(session_id, msg);
             return;
         }
 
         if (msg.type === "clip_ended") {
-            // Reset per-clip counters before handling the transition so the
-            // next clip starts with a clean slate.
-            frameCount = 0;
-            audioCount = 0;
             // Pass the authoritative session_id from the URL path — same
             // session confusion defence as video_frame and audio_chunk.
             controller.handleClipEnded(session_id, msg, sendFn).catch(err =>

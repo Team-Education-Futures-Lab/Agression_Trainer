@@ -279,7 +279,7 @@ export class FileScenarioLoader implements ScenarioLoader {
 
         // Reject scenario_id values that could escape the scenarios directory
         // when used to construct browser-relative video URLs.
-        if (/[/\\]|\.\./.test(raw.scenario_id)) {
+        if (/\\|(?:^|\/)\.\.(?:\/|$)/.test(raw.scenario_id)) {
             throw new Error(`${path}: scenario_id "${raw.scenario_id}" contains illegal path characters`);
         }
 
@@ -291,7 +291,7 @@ export class FileScenarioLoader implements ScenarioLoader {
             if (!clip.file) {
                 throw new Error(`${path}: clip "${clipId}" missing file`);
             }
-            if (/[/\\]|\.\./.test(clip.file)) {
+            if (/\\|(?:^|\/)\.\.(?:\/|$)/.test(clip.file)) {
                 throw new Error(`${path}: clip "${clipId}" file "${clip.file}" contains illegal path characters`);
             }
             if (clip.clip_duration_seconds == null || clip.clip_duration_seconds <= 0) {

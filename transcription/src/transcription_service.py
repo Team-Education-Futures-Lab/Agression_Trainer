@@ -300,6 +300,7 @@ class TranscriptionService:
         pool_relative_overlap_start = overlap_start_word.start - entry.overlap_session_start
         overlap_byte_offset = int(pool_relative_overlap_start * BYTES_PER_SECOND)
         overlap_byte_offset = max(0, min(overlap_byte_offset, len(combined)))
+        overlap_byte_offset &= ~1   # align to 2-byte s16le sample boundary
 
         entry.overlap_pcm           = combined[overlap_byte_offset:]
         entry.overlap_session_start = overlap_start_word.start

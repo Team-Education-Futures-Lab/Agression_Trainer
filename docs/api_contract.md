@@ -115,6 +115,31 @@ Connection must be established after a successful `/session/create` or
 clip negotiation, data streaming, evaluation results, feedback delivery, and
 (for admin sessions) evaluation debug data.
 
+### Rate limits
+
+The App container enforces per-second rate limits on incoming `video_frame` and
+`audio_chunk` messages. Messages that arrive above the limit are silently
+dropped — no error message is sent to the client.
+
+| Message type  | Limit                    | Expected rate         |
+|---------------|--------------------------|-----------------------|
+| `video_frame` | 60 frames per second     | 30 fps                |
+| `audio_chunk` | 1 chunk per second       | 1 per 2 s             |
+
+The limits are set at 2× the expected rate to accommodate normal client-side
+jitter. A well-behaved client operating at target rates will never hit these
+limits.
+
+The limits apply continuously for the lifetime of the WebSocket connection and
+are not reset between clips. Clip length does not affect the limits.
+
+**Clients must not rely on the server accepting every message.** Evaluation
+quality degrades if the rate limits are regularly exceeded, because frames and
+audio data forwarded to the Evaluation and Transcription containers will be
+incomplete.
+
+---
+
 ### Client → Server messages
 
 **GetScenarios** — request the list of available scenarios

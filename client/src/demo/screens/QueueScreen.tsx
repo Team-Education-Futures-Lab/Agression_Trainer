@@ -1,10 +1,18 @@
+// =============================================================================
+// QueueScreen
+//
+// Shown while state === "queued". Polls queue position and lets the student
+// leave the queue via the "Verlaat wachtrij" button.
+// =============================================================================
+
 import { useEffect, useState } from "react";
 
 interface QueueScreenProps {
-    queuePos: number | null;
+    queuePos:     number | null;
+    onDisconnect: () => void;
 }
 
-export function QueueScreen({ queuePos }: QueueScreenProps) {
+export function QueueScreen({ queuePos, onDisconnect }: QueueScreenProps) {
     const [dots, setDots] = useState(".");
     useEffect(() => {
         const id = setInterval(() => {
@@ -26,6 +34,10 @@ export function QueueScreen({ queuePos }: QueueScreenProps) {
                         : "Je positie wordt opgehaald…"}
                 </p>
                 <p style={s.hint}>Dit duurt meestal maar even. Sluit dit venster niet.</p>
+
+                <button style={s.leaveBtn} onClick={onDisconnect}>
+                    Verlaat wachtrij
+                </button>
             </div>
         </div>
     );
@@ -75,8 +87,19 @@ const s: Record<string, React.CSSProperties> = {
         color:    "#94a3b8",
     },
     hint: {
-        margin:   0,
-        fontSize: "12px",
-        color:    "#475569",
+        margin:       "0 0 24px",
+        fontSize:     "12px",
+        color:        "#475569",
+    },
+    leaveBtn: {
+        width:        "100%",
+        padding:      "10px",
+        fontSize:     "14px",
+        fontWeight:   "500",
+        background:   "transparent",
+        color:        "#64748b",
+        border:       "1px solid #334155",
+        borderRadius: "8px",
+        cursor:       "pointer",
     },
 };

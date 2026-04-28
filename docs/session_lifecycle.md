@@ -215,3 +215,5 @@ normally; the first branch condition covering score ≥ 0 is selected.
 | Flush on clip end                             | Immediately after `clip_candidates` is sent                     |
 | `clip_selected` sent                          | After evaluation completes; before buffer resets                |
 | ClipSession resolve timeout                   | 5s — if final transcript not received, clip proceeds without it |
+| `video_frame` rate limit                      | 60 frames per second — excess frames dropped silently           |
+| `audio_chunk` rate limit                      | 1 chunk per second — excess chunks dropped silently             |

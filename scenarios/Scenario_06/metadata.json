@@ -1,0 +1,780 @@
+{
+    "scenario_id": "scenario_06",
+    "title": "Agressieve man",
+    "description": "Een man wordt progressief agressiever en confronteert jou direct. Oefen met het kalmeren van iemand die door escalatiefasen gaat: van irritatie naar frustratie, boosheid en uiteindelijk agressie.",
+    "language": "nl",
+    "entry_clip": "clip_01_intro",
+
+    "coaching_context": "De student oefent met het de-escaleren van een agressieve man die hen direct confronteert. Het doel is om kalm en professioneel te blijven, geen verdere escalatie uit te lokken, en de situatie te de-escaleren door rustig gedrag, open houding en de-escalerende taal te gebruiken.",
+
+    "learning_objectives": [
+        "emotieregulatie onder directe agressie",
+        "non-verbale kalmte bewaren",
+        "grensstellend communiceren zonder escalatie",
+        "open houding handhaven bij provocatie",
+        "actief luisteren bij verhoogde spanning"
+    ],
+
+    "target_audience": "MBO niveau 3-4, zorg, welzijn, beveiliging of vergelijkbare beroepscontexten met publieksgericht werk",
+
+    "clips": {
+
+        "clip_01_intro": {
+            "file": "videos/intro.mp4",
+            "transcript": "Wat zit je nu naar me te kijken?",
+            "clip_duration_seconds": 8.0,
+            "notable_features": [
+                "direct_eye_contact",
+                "aggressive_posture",
+                "raised_voice"
+            ],
+            "scoring_mode": "rubric",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",       "weight": 1.0 },
+                { "signal": "open_posture",     "weight": 0.8 },
+                { "signal": "empathy_phrase",   "weight": 0.9 },
+                { "signal": "measured_pace",    "weight": 0.7 },
+                { "signal": "open_gesture",     "weight": 0.6 }
+            ],
+            "escalation_rubric": [
+                { "signal": "raised_voice",     "weight": 1.0 },
+                { "signal": "negative_tone",    "weight": 0.8 },
+                { "signal": "fast_speech",      "weight": 0.6 },
+                { "signal": "turning_away",     "weight": 0.5 }
+            ],
+            "critical_failures": ["raised_voice"],
+            "score_range": { "min": -1.0, "max": 1.0 },
+            "clip_learning_objectives": ["non-verbale kalmte bewaren", "emotieregulatie onder directe agressie"],
+            "ideal_response": "Blijf rustig en kijk de persoon kalm aan zonder te glimlachen of weg te kijken. Spreek rustig en vriendelijk: erken de situatie zonder toe te geven of te escaleren. Gebruik een open, niet-bedreigend gebaar.",
+            "response_warnings": [
+                "glimlach niet breed — dit kan als provocerend worden gezien",
+                "kijk niet weg of ga niet weg — dit kan als lafheid worden geïnterpreteerd",
+                "ga niet in de verdediging of stel geen tegenvraag",
+                "stem de toon niet mee omhoog"
+            ],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": -0.4, "next_clip": "clip_02_deescalatie" },
+                { "min_score": -0.4, "max_score":  0.0, "next_clip": "clip_02_bang" },
+                { "min_score":  0.0, "max_score":  0.5, "next_clip": "clip_02_blij" },
+                { "min_score":  0.5, "max_score":  1.01,"next_clip": "clip_02_boos" }
+            ]
+        },
+
+        "clip_02_blij": {
+            "file": "video/clip_02_blij.mp4",
+            "transcript": "Wat sta je nu stom te grijnzen.",
+            "clip_duration_seconds": 7.0,
+            "notable_features": [
+                "aggressive_posture",
+                "direct_eye_contact",
+                "raised_voice"
+            ],
+            "scoring_mode": "rubric",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",       "weight": 1.0 },
+                { "signal": "open_posture",     "weight": 0.9 },
+                { "signal": "empathy_phrase",   "weight": 1.0 },
+                { "signal": "measured_pace",    "weight": 0.7 },
+                { "signal": "open_gesture",     "weight": 0.7 }
+            ],
+            "escalation_rubric": [
+                { "signal": "raised_voice",     "weight": 1.0 },
+                { "signal": "negative_tone",    "weight": 0.8 },
+                { "signal": "fast_speech",      "weight": 0.6 }
+            ],
+            "critical_failures": ["raised_voice"],
+            "score_range": { "min": -0.9, "max": 1.0 },
+            "clip_learning_objectives": ["non-verbale kalmte bewaren", "open houding handhaven bij provocatie"],
+            "ideal_response": "Verwijder de glimlach, houd een neutrale maar niet vijandige uitdrukking. Spreek rustig en erken de situatie: 'Ik lach niet om jou, ik wil gewoon rustig met je praten.'",
+            "response_warnings": [
+                "houd geen glimlach — de actor ervaart dit als uitlokking",
+                "leg het niet defensief uit",
+                "vermijd een betuttelende toon"
+            ],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": -0.4, "next_clip": "clip_03_deescalatie" },
+                { "min_score": -0.4, "max_score":  0.0, "next_clip": "clip_03_bang" },
+                { "min_score":  0.0, "max_score":  0.5, "next_clip": "clip_03_blij" },
+                { "min_score":  0.5, "max_score":  1.01,"next_clip": "clip_03_boos" }
+            ]
+        },
+
+        "clip_02_boos": {
+            "file": "videos/clip_02_boos.mp4",
+            "transcript": "O stoer doen, kom dan hier.",
+            "clip_duration_seconds": 7.0,
+            "notable_features": [
+                "raised_voice",
+                "aggressive_posture",
+                "direct_eye_contact",
+                "pointing_gesture"
+            ],
+            "scoring_mode": "rubric",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",       "weight": 1.0 },
+                { "signal": "open_posture",     "weight": 0.9 },
+                { "signal": "open_gesture",     "weight": 0.8 },
+                { "signal": "empathy_phrase",   "weight": 0.9 },
+                { "signal": "measured_pace",    "weight": 0.7 }
+            ],
+            "escalation_rubric": [
+                { "signal": "raised_voice",     "weight": 1.0 },
+                { "signal": "negative_tone",    "weight": 0.9 },
+                { "signal": "fast_speech",      "weight": 0.7 },
+                { "signal": "closed_gesture",   "weight": 0.6 }
+            ],
+            "critical_failures": ["raised_voice"],
+            "score_range": { "min": -0.9, "max": 1.0 },
+            "clip_learning_objectives": ["grensstellend communiceren zonder escalatie", "non-verbale kalmte bewaren"],
+            "ideal_response": "Stel duidelijk een grens: 'Ik ga daar niet heen, maar ik wil wel met je praten.' Houd je stem laag en gelijkmatig. Blijf op afstand met open, zichtbare handen.",
+            "response_warnings": [
+                "loop absoluut niet naar de persoon toe — dit is een aanvaarding van de uitdaging",
+                "reageer niet op de provocatie om 'te komen'",
+                "gebruik geen gebiedende wijs of bevelen"
+            ],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": -0.4, "next_clip": "clip_03_deescalatie" },
+                { "min_score": -0.4, "max_score":  0.0, "next_clip": "clip_03_bang" },
+                { "min_score":  0.0, "max_score":  0.5, "next_clip": "clip_03_blij" },
+                { "min_score":  0.5, "max_score":  1.01,"next_clip": "clip_03_boos" }
+            ]
+        },
+
+        "clip_02_bang": {
+            "file": "videos/clip_02_bang.mp4",
+            "transcript": "Ben je nu bang voor me, mietje.",
+            "clip_duration_seconds": 7.0,
+            "notable_features": [
+                "aggressive_posture",
+                "direct_eye_contact",
+                "raised_voice"
+            ],
+            "scoring_mode": "rubric",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",       "weight": 1.0 },
+                { "signal": "open_posture",     "weight": 1.0 },
+                { "signal": "open_gesture",     "weight": 0.8 },
+                { "signal": "measured_pace",    "weight": 0.7 },
+                { "signal": "empathy_phrase",   "weight": 0.8 }
+            ],
+            "escalation_rubric": [
+                { "signal": "raised_voice",     "weight": 1.0 },
+                { "signal": "turning_away",     "weight": 0.9 },
+                { "signal": "negative_tone",    "weight": 0.7 },
+                { "signal": "long_silence",     "weight": 0.6 }
+            ],
+            "critical_failures": ["raised_voice"],
+            "score_range": { "min": -0.9, "max": 1.0 },
+            "clip_learning_objectives": ["non-verbale kalmte bewaren", "open houding handhaven bij provocatie"],
+            "ideal_response": "Houd een rechtopstaande, open houding — niet aanvallend maar ook niet ingestort. Reageer kalm: 'Nee, ik ben niet bang. Ik wil wel begrijpen waarom je zo boos bent.'",
+            "response_warnings": [
+                "kijk niet weg of zak niet in — dit bevestigt de dominantie van de actor",
+                "reageer niet defensief op de belediging",
+                "spreek niet te zacht of bevend"
+            ],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": -0.4, "next_clip": "clip_03_deescalatie" },
+                { "min_score": -0.4, "max_score":  0.0, "next_clip": "clip_03_bang" },
+                { "min_score":  0.0, "max_score":  0.5, "next_clip": "clip_03_blij" },
+                { "min_score":  0.5, "max_score":  1.01,"next_clip": "clip_03_boos" }
+            ]
+        },
+
+        "clip_02_beschamend": {
+            "file": "videos/clip_02_beschamend.mp4",
+            "transcript": "Ooo weet je het nu niet meer, watje.",
+            "clip_duration_seconds": 7.0,
+            "notable_features": [
+                "aggressive_posture",
+                "direct_eye_contact",
+                "raised_voice"
+            ],
+            "scoring_mode": "rubric",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",       "weight": 1.0 },
+                { "signal": "open_posture",     "weight": 1.0 },
+                { "signal": "open_gesture",     "weight": 0.8 },
+                { "signal": "empathy_phrase",   "weight": 0.8 },
+                { "signal": "measured_pace",    "weight": 0.6 }
+            ],
+            "escalation_rubric": [
+                { "signal": "raised_voice",     "weight": 1.0 },
+                { "signal": "negative_tone",    "weight": 0.8 },
+                { "signal": "turning_away",     "weight": 0.7 },
+                { "signal": "long_silence",     "weight": 0.7 }
+            ],
+            "critical_failures": ["raised_voice"],
+            "score_range": { "min": -0.9, "max": 1.0 },
+            "clip_learning_objectives": ["non-verbale kalmte bewaren", "emotieregulatie onder directe agressie"],
+            "ideal_response": "Reageer kalm en zonder verontschuldiging: 'Ik wil graag begrijpen wat er aan de hand is. Vertel me wat er is.' Houd je hoofd omhoog, open houding.",
+            "response_warnings": [
+                "verontschuldig je niet overdreven — dit bevestigt de beschaming",
+                "vul de stilte niet panisch op",
+                "blijf rechtop staan, zak niet in"
+            ],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": -0.4, "next_clip": "clip_03_deescalatie" },
+                { "min_score": -0.4, "max_score":  0.0, "next_clip": "clip_03_bang" },
+                { "min_score":  0.0, "max_score":  0.5, "next_clip": "clip_03_blij" },
+                { "min_score":  0.5, "max_score":  1.01,"next_clip": "clip_03_boos" }
+            ]
+        },
+
+        "clip_02_deescalatie": {
+            "file": "videos/clip_02_deescalatie.mp4",
+            "transcript": "O ik dacht echt dat je naar mij keek, maar dat is blijkbaar niet zo.",
+            "clip_duration_seconds": 7.0,
+            "notable_features": [
+                "calm_voice",
+                "open_posture"
+            ],
+            "scoring_mode": "rubric",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",       "weight": 0.9 },
+                { "signal": "active_listening", "weight": 1.0 },
+                { "signal": "open_posture",     "weight": 0.8 },
+                { "signal": "validation",       "weight": 0.8 },
+                { "signal": "positive_tone",    "weight": 0.7 }
+            ],
+            "escalation_rubric": [
+                { "signal": "negative_tone",    "weight": 0.8 },
+                { "signal": "fast_speech",      "weight": 0.5 }
+            ],
+            "critical_failures": [],
+            "score_range": { "min": -1.0, "max": 0.3 },
+            "clip_learning_objectives": ["actief luisteren bij verhoogde spanning"],
+            "ideal_response": "Bevestig de de-escalatie rustig en sluit de spanning af: 'Dat begrijp ik, het spijt me voor het misverstand.' Houd de rust vast met een open, vriendelijke houding.",
+            "response_warnings": [
+                "reageer niet triomfantelijk op de kalmering",
+                "houd de rust vast — de situatie kan nog omslaan"
+            ],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
+            ]
+        },
+
+        "clip_03_blij": {
+            "file": "videos/clip_03_blij.mp4",
+            "transcript": "Sukkel dat je bent, verrekte mafkees!",
+            "clip_duration_seconds": 8.0,
+            "notable_features": [
+                "raised_voice",
+                "aggressive_posture",
+                "direct_eye_contact"
+            ],
+            "scoring_mode": "rubric",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",       "weight": 1.0 },
+                { "signal": "open_posture",     "weight": 0.9 },
+                { "signal": "empathy_phrase",   "weight": 1.0 },
+                { "signal": "measured_pace",    "weight": 0.8 },
+                { "signal": "open_gesture",     "weight": 0.7 }
+            ],
+            "escalation_rubric": [
+                { "signal": "raised_voice",     "weight": 1.0 },
+                { "signal": "negative_tone",    "weight": 0.9 },
+                { "signal": "fast_speech",      "weight": 0.7 }
+            ],
+            "critical_failures": ["raised_voice"],
+            "score_range": { "min": -0.8, "max": 1.0 },
+            "clip_learning_objectives": ["emotieregulatie onder directe agressie", "open houding handhaven bij provocatie"],
+            "ideal_response": "Negeer de beledigingen inhoudelijk en blijf kalm. Spreek vriendelijk: 'Ik hoor dat je erg gefrustreerd bent. Ik wil je graag helpen als je dat wil.' Neutrale gezichtsuitdrukking.",
+            "response_warnings": [
+                "ga absoluut niet in op de beledigingen",
+                "laat de beledigingen niet zichtbaar landen — geen gekwetste reactie",
+                "glimlach niet — dit lokt verdere agressie uit"
+            ],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": -0.4, "next_clip": "clip_04_deescalatie" },
+                { "min_score": -0.4, "max_score":  0.0, "next_clip": "clip_04_bang" },
+                { "min_score":  0.0, "max_score":  0.5, "next_clip": "clip_04_blij" },
+                { "min_score":  0.5, "max_score":  1.01,"next_clip": "clip_04_boos" }
+            ]
+        },
+
+        "clip_03_boos": {
+            "file": "videos/clip_03_boos.mp4",
+            "transcript": "O blijf je zo door gaan, je denkt dat je heel wat bent. Ik zal eens laten zien wat ik met jou kan doen.",
+            "clip_duration_seconds": 10.0,
+            "notable_features": [
+                "raised_voice",
+                "aggressive_posture",
+                "pointing_gesture",
+                "direct_eye_contact"
+            ],
+            "scoring_mode": "rubric",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",           "weight": 1.0 },
+                { "signal": "open_posture",         "weight": 0.9 },
+                { "signal": "measured_pace",        "weight": 0.8 },
+                { "signal": "open_gesture",         "weight": 0.7 },
+                { "signal": "appropriate_silence",  "weight": 0.6 }
+            ],
+            "escalation_rubric": [
+                { "signal": "raised_voice",         "weight": 1.0 },
+                { "signal": "negative_tone",        "weight": 0.9 },
+                { "signal": "fast_speech",          "weight": 0.7 },
+                { "signal": "turning_away",         "weight": 0.6 }
+            ],
+            "critical_failures": ["raised_voice"],
+            "score_range": { "min": -0.8, "max": 1.0 },
+            "clip_learning_objectives": ["emotieregulatie onder directe agressie", "grensstellend communiceren zonder escalatie"],
+            "ideal_response": "Reageer niet op de dreiging. Stel een korte, rustige vraag om de aandacht te richten: 'Ik hoor dat je boos bent. Wat is er aan de hand?' Blijf staan, open houding, handen zichtbaar.",
+            "response_warnings": [
+                "ga niet in op de dreiging of de machtsuitdaging",
+                "verontschuldig je niet overdreven",
+                "houd de stem vlak, niet sussend of irriterend"
+            ],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": -0.4, "next_clip": "clip_04_deescalatie" },
+                { "min_score": -0.4, "max_score":  0.0, "next_clip": "clip_04_bang" },
+                { "min_score":  0.0, "max_score":  0.5, "next_clip": "clip_04_blij" },
+                { "min_score":  0.5, "max_score":  1.01,"next_clip": "clip_04_boos" }
+            ]
+        },
+
+        "clip_03_bang": {
+            "file": "videos/clip_03_bang.mp4",
+            "transcript": "Och och wat ben je toch zielig.",
+            "clip_duration_seconds": 7.0,
+            "notable_features": [
+                "aggressive_posture",
+                "direct_eye_contact",
+                "raised_voice"
+            ],
+            "scoring_mode": "rubric",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",       "weight": 1.0 },
+                { "signal": "open_posture",     "weight": 1.0 },
+                { "signal": "open_gesture",     "weight": 0.8 },
+                { "signal": "measured_pace",    "weight": 0.7 },
+                { "signal": "empathy_phrase",   "weight": 0.7 }
+            ],
+            "escalation_rubric": [
+                { "signal": "raised_voice",     "weight": 1.0 },
+                { "signal": "turning_away",     "weight": 0.9 },
+                { "signal": "long_silence",     "weight": 0.7 },
+                { "signal": "negative_tone",    "weight": 0.6 }
+            ],
+            "critical_failures": ["raised_voice"],
+            "score_range": { "min": -0.8, "max": 1.0 },
+            "clip_learning_objectives": ["non-verbale kalmte bewaren", "open houding handhaven bij provocatie"],
+            "ideal_response": "Houd een rechtopstaande, open houding. Reageer rustig en zonder zelfmedelijden: 'Ik wil graag begrijpen wat er speelt. Kun je me vertellen wat er is?'",
+            "response_warnings": [
+                "zak niet in of kijk niet weg — dit bevestigt het oordeel van de actor",
+                "reageer niet emotioneel op het medelijden",
+                "vul de stilte niet panisch op"
+            ],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": -0.4, "next_clip": "clip_04_deescalatie" },
+                { "min_score": -0.4, "max_score":  0.0, "next_clip": "clip_04_bang" },
+                { "min_score":  0.0, "max_score":  0.5, "next_clip": "clip_04_blij" },
+                { "min_score":  0.5, "max_score":  1.01,"next_clip": "clip_04_boos" }
+            ]
+        },
+
+        "clip_03_beschamend": {
+            "file": "videos/clip_03_beschamend.mp4",
+            "transcript": "Reageer nu eens, ik heb het tegen jou!",
+            "clip_duration_seconds": 7.0,
+            "notable_features": [
+                "raised_voice",
+                "aggressive_posture",
+                "pointing_gesture",
+                "direct_eye_contact"
+            ],
+            "scoring_mode": "rubric",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",       "weight": 1.0 },
+                { "signal": "open_posture",     "weight": 0.9 },
+                { "signal": "empathy_phrase",   "weight": 1.0 },
+                { "signal": "open_gesture",     "weight": 0.7 },
+                { "signal": "measured_pace",    "weight": 0.6 }
+            ],
+            "escalation_rubric": [
+                { "signal": "raised_voice",     "weight": 1.0 },
+                { "signal": "negative_tone",    "weight": 0.8 },
+                { "signal": "long_silence",     "weight": 0.9 },
+                { "signal": "turning_away",     "weight": 0.7 }
+            ],
+            "critical_failures": ["raised_voice", "long_silence"],
+            "score_range": { "min": -0.8, "max": 1.0 },
+            "clip_learning_objectives": ["actief luisteren bij verhoogde spanning", "grensstellend communiceren zonder escalatie"],
+            "ideal_response": "Reageer rustig maar duidelijk: 'Ja, ik luister naar je. Ik ben hier.' Houd oogcontact zonder te staren. Geen lange pauze — de actor verwacht reactie.",
+            "response_warnings": [
+                "reageer niet met stilte — de actor escaleert hierdoor verder",
+                "onderbreek de actor niet",
+                "houd de toon neutraal, niet defensief"
+            ],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": -0.4, "next_clip": "clip_04_deescalatie" },
+                { "min_score": -0.4, "max_score":  0.0, "next_clip": "clip_04_bang" },
+                { "min_score":  0.0, "max_score":  0.5, "next_clip": "clip_04_blij" },
+                { "min_score":  0.5, "max_score":  1.01,"next_clip": "clip_04_boos" }
+            ]
+        },
+
+        "clip_03_deescalatie": {
+            "file": "videos/clip_03_deescalatie.mp4",
+            "transcript": "Weet je wat, laat ook maar.",
+            "clip_duration_seconds": 5.0,
+            "notable_features": [
+                "calm_voice",
+                "open_posture",
+                "backing_away"
+            ],
+            "scoring_mode": "rubric",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",       "weight": 0.9 },
+                { "signal": "active_listening", "weight": 1.0 },
+                { "signal": "open_posture",     "weight": 0.8 },
+                { "signal": "validation",       "weight": 0.9 },
+                { "signal": "positive_tone",    "weight": 0.7 }
+            ],
+            "escalation_rubric": [
+                { "signal": "negative_tone",    "weight": 0.8 },
+                { "signal": "raised_voice",     "weight": 0.9 }
+            ],
+            "critical_failures": [],
+            "score_range": { "min": -1.0, "max": 0.3 },
+            "clip_learning_objectives": ["actief luisteren bij verhoogde spanning"],
+            "ideal_response": "Bevestig de aftocht vriendelijk en houd de deur open: 'Oké, ik begrijp het. Als je toch wil praten, ben ik er.' Maak geen haastige bewegingen.",
+            "response_warnings": [
+                "reageer niet triomfantelijk op de aftocht",
+                "loop niet meteen weg — dit kan afwijzend overkomen"
+            ],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
+            ]
+        },
+
+        "clip_04_blij": {
+            "file": "videos/clip_04_blij.mp4",
+            "transcript": "Ik zal die stomme grijns eens van je gezicht af slaan.",
+            "clip_duration_seconds": 8.0,
+            "notable_features": [
+                "raised_voice",
+                "aggressive_posture",
+                "direct_eye_contact",
+                "pointing_gesture"
+            ],
+            "scoring_mode": "threshold",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",       "weight": 1.0 },
+                { "signal": "open_posture",     "weight": 0.9 },
+                { "signal": "open_gesture",     "weight": 0.8 },
+                { "signal": "measured_pace",    "weight": 0.7 }
+            ],
+            "escalation_rubric": [
+                { "signal": "raised_voice",     "weight": 1.0 },
+                { "signal": "fast_speech",      "weight": 0.8 },
+                { "signal": "negative_tone",    "weight": 0.8 },
+                { "signal": "closed_gesture",   "weight": 0.6 }
+            ],
+            "critical_failures": ["raised_voice"],
+            "score_range": { "min": -0.5, "max": 1.0 },
+            "clip_learning_objectives": ["emotieregulatie onder directe agressie"],
+            "ideal_response": "Blijf volkomen kalm ondanks de geweldsdreiging. Houd handen zichtbaar en open. Spreek rustig en beslissend: 'Ik hoor dat je heel boos bent. Ik ga je geen reden geven om dat te doen.'",
+            "response_warnings": [
+                "raak in geen geval in paniek of vlucht impulsief",
+                "doe geen plotselinge bewegingen",
+                "reageer niet op de dreiging met een tegendreigement"
+            ],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": -0.3, "next_clip": "clip_05_deescalatie" },
+                { "min_score": -0.3, "max_score":  0.0, "next_clip": "clip_05_bang" },
+                { "min_score":  0.0, "max_score":  0.5, "next_clip": "clip_05_blij" },
+                { "min_score":  0.5, "max_score":  1.01,"next_clip": "clip_05_boos" }
+            ]
+        },
+
+        "clip_04_boos": {
+            "file": "videos/clip_04_boos.mp4",
+            "transcript": "Kom hier dan! Ik ben er godverdomme klaar voor.",
+            "clip_duration_seconds": 7.0,
+            "notable_features": [
+                "raised_voice",
+                "aggressive_posture",
+                "direct_eye_contact",
+                "pointing_gesture"
+            ],
+            "scoring_mode": "threshold",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",       "weight": 1.0 },
+                { "signal": "open_posture",     "weight": 0.9 },
+                { "signal": "open_gesture",     "weight": 0.8 },
+                { "signal": "measured_pace",    "weight": 0.7 }
+            ],
+            "escalation_rubric": [
+                { "signal": "raised_voice",     "weight": 1.0 },
+                { "signal": "fast_speech",      "weight": 0.8 },
+                { "signal": "negative_tone",    "weight": 0.8 },
+                { "signal": "closed_gesture",   "weight": 0.6 }
+            ],
+            "critical_failures": ["raised_voice"],
+            "score_range": { "min": -0.5, "max": 1.0 },
+            "clip_learning_objectives": ["emotieregulatie onder directe agressie", "grensstellend communiceren zonder escalatie"],
+            "ideal_response": "Blijf kalm en houd je positie. Spreek rustig en duidelijk: 'Ik ga nergens heen, maar ik ben hier om te luisteren.' Open houding, handen zichtbaar, geen plotselinge bewegingen.",
+            "response_warnings": [
+                "ga absoluut niet naar de persoon toe",
+                "wijk niet panisch achteruit",
+                "roep geen anderen erbij op luide toon"
+            ],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": -0.3, "next_clip": "clip_05_deescalatie" },
+                { "min_score": -0.3, "max_score":  0.0, "next_clip": "clip_05_bang" },
+                { "min_score":  0.0, "max_score":  0.5, "next_clip": "clip_05_blij" },
+                { "min_score":  0.5, "max_score":  1.01,"next_clip": "clip_05_boos" }
+            ]
+        },
+
+        "clip_04_bang": {
+            "file": "videos/clip_04_bang.mp4",
+            "transcript": "Wat ben je toch een zielig persoontje.",
+            "clip_duration_seconds": 7.0,
+            "notable_features": [
+                "aggressive_posture",
+                "direct_eye_contact",
+                "raised_voice"
+            ],
+            "scoring_mode": "threshold",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",       "weight": 1.0 },
+                { "signal": "open_posture",     "weight": 1.0 },
+                { "signal": "open_gesture",     "weight": 0.8 },
+                { "signal": "measured_pace",    "weight": 0.7 }
+            ],
+            "escalation_rubric": [
+                { "signal": "raised_voice",     "weight": 1.0 },
+                { "signal": "turning_away",     "weight": 0.9 },
+                { "signal": "long_silence",     "weight": 0.8 },
+                { "signal": "negative_tone",    "weight": 0.6 }
+            ],
+            "critical_failures": ["raised_voice"],
+            "score_range": { "min": -0.5, "max": 1.0 },
+            "clip_learning_objectives": ["non-verbale kalmte bewaren", "emotieregulatie onder directe agressie"],
+            "ideal_response": "Houd een rechtopstaande, zelfverzekerde maar niet dreigende houding. Spreek kalm: 'Ik ben hier en ik luister naar je. Vertel me wat er is.' Geen zichtbare emotionele reactie op het oordeel.",
+            "response_warnings": [
+                "zak niet in of kijk niet weg",
+                "reageer niet emotioneel op de belediging",
+                "vermijd een lange stilte"
+            ],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": -0.3, "next_clip": "clip_05_deescalatie" },
+                { "min_score": -0.3, "max_score":  0.0, "next_clip": "clip_05_bang" },
+                { "min_score":  0.0, "max_score":  0.5, "next_clip": "clip_05_blij" },
+                { "min_score":  0.5, "max_score":  1.01,"next_clip": "clip_05_boos" }
+            ]
+        },
+
+        "clip_04_beschamend": {
+            "file": "videos/clip_04_beschamend.mp4",
+            "transcript": "Ben je godverdomme doof! Of zal ik je eens laten luisteren.",
+            "clip_duration_seconds": 8.0,
+            "notable_features": [
+                "raised_voice",
+                "aggressive_posture",
+                "pointing_gesture",
+                "direct_eye_contact"
+            ],
+            "scoring_mode": "threshold",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",       "weight": 1.0 },
+                { "signal": "open_posture",     "weight": 0.9 },
+                { "signal": "empathy_phrase",   "weight": 1.0 },
+                { "signal": "open_gesture",     "weight": 0.7 }
+            ],
+            "escalation_rubric": [
+                { "signal": "raised_voice",     "weight": 1.0 },
+                { "signal": "negative_tone",    "weight": 0.9 },
+                { "signal": "long_silence",     "weight": 1.0 },
+                { "signal": "turning_away",     "weight": 0.7 }
+            ],
+            "critical_failures": ["raised_voice", "long_silence"],
+            "score_range": { "min": -0.5, "max": 1.0 },
+            "clip_learning_objectives": ["actief luisteren bij verhoogde spanning", "grensstellend communiceren zonder escalatie"],
+            "ideal_response": "Reageer direct en rustig: 'Ik hoor je. Je hoeft me niets te laten luisteren — ik ben al aan het luisteren.' Duidelijke stem, geen paniek, handen zichtbaar.",
+            "response_warnings": [
+                "reageer absoluut niet met stilte — dit lokt de dreiging uit",
+                "spreek niet te hard of te snel",
+                "ga niet in op de dreiging inhoudelijk"
+            ],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": -0.3, "next_clip": "clip_05_deescalatie" },
+                { "min_score": -0.3, "max_score":  0.0, "next_clip": "clip_05_bang" },
+                { "min_score":  0.0, "max_score":  0.5, "next_clip": "clip_05_blij" },
+                { "min_score":  0.5, "max_score":  1.01,"next_clip": "clip_05_boos" }
+            ]
+        },
+
+        "clip_04_deescalatie": {
+            "file": "videos/clip_04_deescalatie.mp4",
+            "transcript": "Ben er klaar mee, dit gaat nergens naar toe.",
+            "clip_duration_seconds": 6.0,
+            "notable_features": [
+                "calm_voice",
+                "open_posture",
+                "backing_away"
+            ],
+            "scoring_mode": "rubric",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",       "weight": 0.9 },
+                { "signal": "validation",       "weight": 1.0 },
+                { "signal": "open_question",    "weight": 0.8 },
+                { "signal": "active_listening", "weight": 0.7 },
+                { "signal": "positive_tone",    "weight": 0.7 }
+            ],
+            "escalation_rubric": [
+                { "signal": "negative_tone",    "weight": 0.8 },
+                { "signal": "fast_speech",      "weight": 0.5 }
+            ],
+            "critical_failures": [],
+            "score_range": { "min": -1.0, "max": 0.2 },
+            "clip_learning_objectives": ["actief luisteren bij verhoogde spanning"],
+            "ideal_response": "Erken de frustratie zonder oordeel: 'Ik hoor je. Het is oké om even stoom af te blazen.' Eventueel een open vraag: 'Wat zou jou helpen op dit moment?'",
+            "response_warnings": [
+                "ga niet in discussie over wie er gelijk heeft",
+                "minimaliseer de emotie niet"
+            ],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
+            ]
+        },
+
+        "clip_05_blij": {
+            "file": "videos/clip_05_blij.mp4",
+            "transcript": "Nu is het klaar verdomme, ik maak je af.",
+            "clip_duration_seconds": 7.0,
+            "notable_features": [
+                "raised_voice",
+                "aggressive_posture",
+                "direct_eye_contact",
+                "pointing_gesture"
+            ],
+            "scoring_mode": "threshold",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",       "weight": 1.0 },
+                { "signal": "open_posture",     "weight": 0.8 },
+                { "signal": "open_gesture",     "weight": 0.7 }
+            ],
+            "escalation_rubric": [
+                { "signal": "raised_voice",     "weight": 1.0 },
+                { "signal": "negative_tone",    "weight": 0.9 },
+                { "signal": "fast_speech",      "weight": 0.7 }
+            ],
+            "critical_failures": [],
+            "score_range": { "min": -0.3, "max": 1.0 },
+            "clip_learning_objectives": ["emotieregulatie onder directe agressie"],
+            "ideal_response": "Maximale de-escalatie of veiligheid zoeken. Rustig en beslissend: 'Ik ga nu een stap terug doen. We kunnen later verder praten.' Geen discussie, geen confrontatie.",
+            "response_warnings": [
+                "discussieer niet — de situatie is te hoog geëscaleerd",
+                "stel geen ultimatums",
+                "doe geen plotselinge bewegingen"
+            ],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
+            ]
+        },
+
+        "clip_05_boos": {
+            "file": "videos/clip_05_boos.mp4",
+            "transcript": "Nu is het te laat! Ik maak je helemaal kapot.",
+            "clip_duration_seconds": 7.0,
+            "notable_features": [
+                "raised_voice",
+                "aggressive_posture",
+                "direct_eye_contact",
+                "pointing_gesture"
+            ],
+            "scoring_mode": "threshold",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",       "weight": 1.0 },
+                { "signal": "open_posture",     "weight": 0.8 },
+                { "signal": "open_gesture",     "weight": 0.7 }
+            ],
+            "escalation_rubric": [
+                { "signal": "raised_voice",     "weight": 1.0 },
+                { "signal": "negative_tone",    "weight": 0.9 },
+                { "signal": "fast_speech",      "weight": 0.7 }
+            ],
+            "critical_failures": [],
+            "score_range": { "min": -0.3, "max": 1.0 },
+            "clip_learning_objectives": ["emotieregulatie onder directe agressie"],
+            "ideal_response": "Maximale de-escalatie of veiligheid zoeken. Rustig en beslissend: 'Ik ga nu een stap terug doen. We kunnen later verder praten.' Geen discussie, geen confrontatie.",
+            "response_warnings": [
+                "discussieer niet — de situatie is te hoog geëscaleerd",
+                "stel geen ultimatums",
+                "doe geen plotselinge bewegingen"
+            ],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
+            ]
+        },
+
+        "clip_05_bang": {
+            "file": "videos/clip_05_bang.mp4",
+            "transcript": "Wat ben je toch een zielig persoontje.",
+            "clip_duration_seconds": 7.0,
+            "notable_features": [
+                "aggressive_posture",
+                "direct_eye_contact",
+                "raised_voice"
+            ],
+            "scoring_mode": "threshold",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",       "weight": 1.0 },
+                { "signal": "open_posture",     "weight": 1.0 },
+                { "signal": "open_gesture",     "weight": 0.8 }
+            ],
+            "escalation_rubric": [
+                { "signal": "raised_voice",     "weight": 1.0 },
+                { "signal": "turning_away",     "weight": 0.9 },
+                { "signal": "long_silence",     "weight": 0.8 }
+            ],
+            "critical_failures": [],
+            "score_range": { "min": -0.3, "max": 1.0 },
+            "clip_learning_objectives": ["emotieregulatie onder directe agressie"],
+            "ideal_response": "Blijf rechtop en zelfverzekerd. Spreek kalm: 'Ik hoor je. Ik ben hier.' Geen zichtbare emotionele reactie. Houd oogcontact.",
+            "response_warnings": [
+                "zak niet in of kijk niet weg",
+                "vermijd een lange stilte"
+            ],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
+            ]
+        },
+
+        "clip_05_deescalatie": {
+            "file": "videos/clip_05_deescalatie.mp4",
+            "transcript": "Nu krabbel je terug, nu krijg je spijt!",
+            "clip_duration_seconds": 6.0,
+            "notable_features": [
+                "calm_voice",
+                "open_posture"
+            ],
+            "scoring_mode": "rubric",
+            "de_escalation_rubric": [
+                { "signal": "calm_voice",       "weight": 0.9 },
+                { "signal": "positive_tone",    "weight": 0.8 },
+                { "signal": "active_listening", "weight": 0.7 },
+                { "signal": "validation",       "weight": 0.8 }
+            ],
+            "escalation_rubric": [
+                { "signal": "negative_tone",    "weight": 0.8 },
+                { "signal": "raised_voice",     "weight": 1.0 }
+            ],
+            "critical_failures": [],
+            "score_range": { "min": -1.0, "max": 0.2 },
+            "clip_learning_objectives": ["actief luisteren bij verhoogde spanning"],
+            "ideal_response": "Sluit kalm en constructief af. Erken dat er spanning was zonder toe te geven aan verwijten: 'Ik hoor dat je je zo voelt. Ik hoop dat het wat rustiger wordt.' Bewaar de open houding tot het eind.",
+            "response_warnings": [
+                "ga niet in op de beschuldiging van 'spijt'",
+                "sluit het gesprek niet defensief of afwijzend af",
+                "behoud de eigen kalmte ook in de afsluiting"
+            ],
+            "branch_conditions": [
+                { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
+            ]
+        }
+    }
+}

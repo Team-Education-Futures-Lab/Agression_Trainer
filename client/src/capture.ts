@@ -5,7 +5,7 @@
 // HandLandmarker on every animation frame, and accumulates microphone audio
 // via an AudioWorklet. Exposes two async-iterable streams:
 //
-//   frames()  — one RawVideoFrame per animation frame
+//   frames()  — one RawVideoFrame per 30 fps tick
 //   audio()   — one RawAudioChunk per ~2-second audio buffer
 //
 // Lifecycle: call init() once at startup (loads MediaPipe models), then
@@ -28,6 +28,13 @@ import type { RawVideoFrame, RawAudioChunk } from "./types.ts";
 const TARGET_SAMPLE_RATE    = 16000;
 const MFCC_COEFFICIENTS     = 13;
 const MEYDA_BUFFER_SIZE     = 512;   // must be a power of 2
+
+// rAF fires at the display refresh rate (typically 60 Hz) regardless of the
+// getUserMedia frameRate constraint. This interval gate throttles MediaPipe
+// processing and VideoFrame emission to 30 fps — half the server's 60 fps
+// rate limit — so a well-behaved client never triggers the server-side drop.
+const TARGET_FPS             = 30;
+const FRAME_INTERVAL_MS      = 1000 / TARGET_FPS;  // 33.33 ms
 
 const MEDIAPIPE_WASM = "/mediapipe";
 const FACE_MODEL_URL =
@@ -90,9 +97,10 @@ export class CaptureSession {
     private meydaAnalyser: ReturnType<typeof Meyda.createMeydaAnalyzer> | null = null;
 
     // Counters — reset on each start()
-    private frameId   = 0;
-    private chunkId   = 0;
-    private startedAt = 0;
+    private frameId      = 0;
+    private chunkId      = 0;
+    private startedAt    = 0;
+    private lastFrameTime = 0;
 
     // Audio accumulation — samples at the native AudioContext rate
     private pcmBuffer:      Float32Array[] = [];
@@ -170,10 +178,11 @@ export class CaptureSession {
         videoEl.srcObject = this.stream;
         await videoEl.play();
 
-        this.frameId   = 0;
-        this.chunkId   = 0;
-        this.startedAt = performance.now();
-        this.running   = true;
+        this.frameId       = 0;
+        this.chunkId       = 0;
+        this.startedAt     = performance.now();
+        this.lastFrameTime = 0;
+        this.running       = true;
 
         await this._startAudio();
         this._videoLoop(videoEl);
@@ -221,35 +230,43 @@ export class CaptureSession {
     // ─── Video loop ───────────────────────────────────────────────────────────
 
     private _videoLoop(videoEl: HTMLVideoElement): void {
-        const tick = () => {
+        // rAF passes its own high-resolution timestamp — use it directly rather
+        // than calling performance.now() again to avoid a redundant syscall and
+        // a tiny timestamp skew between the gate check and detectForVideo.
+        const tick = (now: number) => {
             if (!this.running) return;
 
-            if (videoEl.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-                const now = performance.now();
-                const ts  = (now - this.startedAt) / 1000;
+            // Throttle to TARGET_FPS. On a 60 Hz display this skips every other
+            // tick; on a 120 Hz display it skips three out of four.
+            if (now - this.lastFrameTime >= FRAME_INTERVAL_MS) {
+                this.lastFrameTime = now;
 
-                try {
-                    const faceResult = this.faceLandmarker!.detectForVideo(videoEl, now);
-                    const handResult = this.handLandmarker!.detectForVideo(videoEl, now);
+                if (videoEl.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+                    const ts = (now - this.startedAt) / 1000;
 
-                    let leftHand:  ReturnType<typeof toAppLandmarks> = [];
-                    let rightHand: ReturnType<typeof toAppLandmarks> = [];
+                    try {
+                        const faceResult = this.faceLandmarker!.detectForVideo(videoEl, now);
+                        const handResult = this.handLandmarker!.detectForVideo(videoEl, now);
 
-                    handResult.handedness.forEach((h, i) => {
-                        const lm = toAppLandmarks(handResult.landmarks[i]);
-                        if (h[0]?.categoryName === "Left")  leftHand  = lm;
-                        else                                rightHand = lm;
-                    });
+                        let leftHand:  ReturnType<typeof toAppLandmarks> = [];
+                        let rightHand: ReturnType<typeof toAppLandmarks> = [];
 
-                    this.frameChannel.push({
-                        frame_id:       this.frameId++,
-                        timestamp:      ts,
-                        face_landmarks: toAppLandmarks(faceResult.faceLandmarks[0]),
-                        left_hand:      leftHand,
-                        right_hand:     rightHand,
-                    });
-                } catch (e) {
-                    console.error("[capture] frame error:", e);
+                        handResult.handedness.forEach((h, i) => {
+                            const lm = toAppLandmarks(handResult.landmarks[i]);
+                            if (h[0]?.categoryName === "Left")  leftHand  = lm;
+                            else                                rightHand = lm;
+                        });
+
+                        this.frameChannel.push({
+                            frame_id:       this.frameId++,
+                            timestamp:      ts,
+                            face_landmarks: toAppLandmarks(faceResult.faceLandmarks[0]),
+                            left_hand:      leftHand,
+                            right_hand:     rightHand,
+                        });
+                    } catch (e) {
+                        console.error("[capture] frame error:", e);
+                    }
                 }
             }
 

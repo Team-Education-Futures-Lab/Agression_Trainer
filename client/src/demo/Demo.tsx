@@ -4,20 +4,27 @@
 // Screen order:
 //   LandingScreen    — idle / error
 //   QueueScreen      — queued
-//   ScenarioScreen   — selecting (connected, scenarios loaded, awaiting choice)
-//   PlayerScreen     — active (clip loaded and playing)
-//   EvaluatingScreen — paused (clip ended, waiting for clip_selected)
+//   ScenarioScreen   — connecting / selecting
+//   PlayerScreen     — active
+//   EvaluatingScreen — paused
 //   DebriefScreen    — completed
 //
-// Every state that depends on a server response has a timeout. If the expected
-// message does not arrive within RESPONSE_TIMEOUT_MS, an inline error is shown
-// with a disconnect button so the user is never stuck indefinitely.
+// Timeouts:
+//   Only applied to pure network round-trips (scenarios list, clip data) where
+//   a 60-second silence genuinely means something is broken. NOT applied to AI
+//   processing operations (evaluation, feedback generation) which have variable
+//   latency and will complete when they complete.
 //
-// Architectural constraint: the single hidden <video ref={videoRef}> element
-// is rendered unconditionally for the full lifetime of this component tree so
-// that CaptureSession.start() never loses its bound element across screen
-// transitions. PlayerScreen receives this same videoRef to display the webcam
-// feed in its right column — it does not unmount or re-create the element.
+// Capture lifecycle:
+//   capture.start() is called when the student selects a scenario, not on
+//   connect. capture.stop() is called on idle and completed.
+//
+// Webcam stream binding:
+//   capture.start() binds the stream to the hidden video element. When
+//   PlayerScreen mounts it re-binds the stream to its own video element via
+//   the stream prop + useLayoutEffect inside PlayerScreen. This is necessary
+//   because the shared videoRef DOM element changes between the hidden element
+//   (all other screens) and the visible element inside PlayerScreen.
 // =============================================================================
 
 import { useEffect, useRef, useState } from "react";
@@ -39,14 +46,19 @@ styleEl.textContent = `
 `;
 document.head.appendChild(styleEl);
 
-/** After this many ms without the expected response, show the timeout screen. */
-const RESPONSE_TIMEOUT_MS = 15_000;
+/**
+ * Timeout for pure network round-trips only (scenarios list, clip data).
+ * Not applied to AI operations (evaluation, feedback) which have variable
+ * latency and will complete when they complete.
+ */
+const NETWORK_TIMEOUT_MS = 60_000;
+
+/** Duration of the student response window after the clip video ends. */
+const RESPONSE_DURATION_SECONDS = 30;
 
 // ─── useStuckTimeout ─────────────────────────────────────────────────────────
-// Returns true when the given condition has been true for longer than the
-// threshold without being cleared. `condition` going false resets the timer.
 
-function useStuckTimeout(condition: boolean, ms = RESPONSE_TIMEOUT_MS): boolean {
+function useStuckTimeout(condition: boolean, ms = NETWORK_TIMEOUT_MS): boolean {
     const [stuck, setStuck] = useState(false);
     useEffect(() => {
         if (!condition) { setStuck(false); return; }
@@ -87,7 +99,11 @@ export function Demo() {
 
     const [streamedAdvice, setStreamedAdvice] = useState("");
     const [finalMessage,   setFinalMessage]   = useState<SessionComplete | null>(null);
+    // The live MediaStream, captured after capture.start() so PlayerScreen can
+    // re-bind it to its own video element when it mounts.
+    const [liveStream, setLiveStream] = useState<MediaStream | null>(null);
 
+    const preloadEls   = useRef<HTMLVideoElement[]>([]);
     const demoStateRef = useRef({ finalMessage });
     demoStateRef.current = { finalMessage };
 
@@ -99,37 +115,46 @@ export function Demo() {
             setFinalMessage(msg);
         }
         if (msg.type === "clip_candidates") {
+            preloadEls.current = [];
             msg.candidates.forEach(c => {
-                const link = document.createElement("link");
-                link.rel = "preload"; link.as = "video"; link.href = c.video_url;
-                document.head.appendChild(link);
+                const el = document.createElement("video");
+                el.preload = "auto";
+                el.src = c.video_url;
+                preloadEls.current.push(el);
             });
         }
     };
 
     const {
         state, queuePos, scenarios, currentClipData, feedbackUnavailable,
+        transcript,
         connect, disconnect, selectScenario, sendClipEnded,
     } = useSession(capture, { onMessage: handleMessage });
 
-    // ── Timeout conditions ────────────────────────────────────────────────────
+    // ── Timeout conditions — network round-trips only ─────────────────────────
+    // Evaluation and feedback are AI operations with unbounded latency.
+    // They must never be timed out client-side — only the server knows when
+    // they are done. The server already has its own FEEDBACK_TIMEOUT_MS guard
+    // and will send error{code:"feedback_unavailable"} if Ollama times out.
     const waitingForScenarios = (state === "connecting" || state === "selecting") && scenarios.length === 0;
     const waitingForClipData  = state === "active" && currentClipData === null;
-    const waitingForEval      = state === "paused";
-    const waitingForFeedback  = state === "completed" && finalMessage === null && !feedbackUnavailable;
 
     const scenariosTimedOut = useStuckTimeout(waitingForScenarios);
     const clipDataTimedOut  = useStuckTimeout(waitingForClipData);
-    const evalTimedOut      = useStuckTimeout(waitingForEval);
-    const feedbackTimedOut  = useStuckTimeout(waitingForFeedback);
 
-    // ── Connect ───────────────────────────────────────────────────────────────
+    // ── Connect / select ──────────────────────────────────────────────────────
     const handleConnect = async () => {
-        if (videoRef.current) await capture.start(videoRef.current);
         await connect();
     };
 
-    const handleSelectScenario = (sc: ScenarioSummary) => {
+    const handleSelectScenario = async (sc: ScenarioSummary) => {
+        if (videoRef.current) {
+            await capture.start(videoRef.current);
+            // Snapshot the stream so PlayerScreen can re-bind it to its own
+            // video element when it mounts. Without this, the stream is bound
+            // to the hidden 1×1 element and the visible webcam shows nothing.
+            setLiveStream(capture.getStream());
+        }
         selectScenario(sc.scenario_id, sc.entry_clip_id);
     };
 
@@ -137,15 +162,20 @@ export function Demo() {
         disconnect();
         setStreamedAdvice("");
         setFinalMessage(null);
+        setLiveStream(null);
+        preloadEls.current = [];
     };
 
     useEffect(() => {
-        if (state === "idle") capture.stop();
+        if (state === "idle" || state === "completed") {
+            capture.stop();
+            setLiveStream(null);
+        }
     }, [state, capture]);
 
     // ─── Persistent hidden video element ──────────────────────────────────────
-    // Rendered unconditionally so CaptureSession.start() never loses its element.
-    // PlayerScreen receives this same videoRef to display the webcam feed.
+    // Rendered on every screen EXCEPT the active+clip-data branch where
+    // PlayerScreen renders its own visible <video ref={videoRef}>.
     const hiddenVideo = (
         <video ref={videoRef} muted playsInline
                style={{ position: "fixed", opacity: 0, pointerEvents: "none", width: 1, height: 1, top: 0, left: 0 }}
@@ -159,7 +189,7 @@ export function Demo() {
     }
 
     if (state === "queued") {
-        return <>{hiddenVideo}<QueueScreen queuePos={queuePos} /></>;
+        return <>{hiddenVideo}<QueueScreen queuePos={queuePos} onDisconnect={handleRestart} /></>;
     }
 
     if (state === "connecting" || state === "selecting") {
@@ -169,25 +199,24 @@ export function Demo() {
                 onDisconnect={handleRestart}
             /></>;
         }
-        return <>{hiddenVideo}<ScenarioScreen scenarios={scenarios} onSelect={handleSelectScenario} /></>;
+        return <>{hiddenVideo}<ScenarioScreen scenarios={scenarios} onSelect={sc => void handleSelectScenario(sc)} /></>;
     }
 
     if (state === "completed" || finalMessage !== null) {
+        // No client-side timeout for feedback. The server sends
+        // error{code:"feedback_unavailable"} if Ollama cannot respond in time —
+        // that is the correct and only signal to use.
         return <>{hiddenVideo}<DebriefScreen
             streamedAdvice={streamedAdvice}
             finalMessage={finalMessage}
-            feedbackUnavailable={feedbackUnavailable || feedbackTimedOut}
+            feedbackUnavailable={feedbackUnavailable}
             onRestart={handleRestart}
         /></>;
     }
 
     if (state === "paused") {
-        if (evalTimedOut) {
-            return <>{hiddenVideo}<TimeoutScreen
-                message="De analyse duurde te lang. Mogelijk is er een probleem met de evaluatieservice."
-                onDisconnect={handleRestart}
-            /></>;
-        }
+        // No client-side timeout for evaluation. The AI stack (Whisper + classifier)
+        // takes as long as it takes. EvaluatingScreen waits until clip_selected arrives.
         return <>{hiddenVideo}<EvaluatingScreen /></>;
     }
 
@@ -201,12 +230,14 @@ export function Demo() {
         if (currentClipData !== null) {
             return <PlayerScreen
                 videoRef={videoRef}
+                stream={liveStream}
                 currentClipId={currentClipData.clip_id}
                 clipMeta={currentClipData}
                 onClipEnded={sendClipEnded}
+                responseDurationSeconds={RESPONSE_DURATION_SECONDS}
+                liveTranscript={transcript}
             />;
         }
-        // clip_data not yet arrived — transitional, timeout guard above handles any hang
         return <>{hiddenVideo}
             <div style={loadingStyle}>
                 <p style={{ color: "#94a3b8", fontFamily: "sans-serif" }}>Clip laden…</p>
