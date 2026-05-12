@@ -71,6 +71,13 @@ export interface SessionHistoryEntry {
     /** Next clip_id, or null if terminal. */
     nextClipId:    string | null;
     /**
+     * Full ClipData snapshot taken at turn completion. Used by the clip preview
+     * panel to allow developers to rewatch any historical clip with its full
+     * metadata (video URL, actor transcript, notable_features, branch_conditions).
+     * Populated from currentClipDataRef.current at clip_selected time.
+     */
+    clipSnapshot:  ClipData | null;
+    /**
      * Evaluation debug payload for this turn. Populated when the session is
      * an admin session and the server sends a `debug_eval` message after
      * `clip_selected`. Absent for non-admin sessions.
@@ -93,6 +100,18 @@ export interface UseSessionResult {
     currentClipData:      ClipData | null;     // from most recent clip_data with activate=true
     feedbackUnavailable:  boolean;             // true if error{code:"feedback_unavailable"} received
     sessionHistory:       SessionHistoryEntry[]; // one entry per clip_selected, oldest first
+    /**
+     * Timestamp (Date.now()) of the most recently received transport-layer
+     * heartbeat from the server. Null until the first heartbeat arrives.
+     * Exposed for the debug harness to display connection liveness.
+     */
+    lastHeartbeat:        number | null;
+    /**
+     * The `status` field of the most recently received heartbeat message.
+     * `"feedback_generating"` while Ollama is producing output; `"ok"` for a
+     * general keepalive. Null until the first heartbeat arrives.
+     */
+    heartbeatStatus:      string | null;
     // Stable callbacks
     connect:              (userId?: string, language?: string, adminKey?: string) => Promise<void>;
     disconnect:           () => void;
@@ -121,6 +140,8 @@ export function useSession(capture: CaptureSession, options: UseSessionOptions =
     const [currentClipData,      setCurrentClipData]      = useState<ClipData | null>(null);
     const [feedbackUnavailable,  setFeedbackUnavailable]  = useState(false);
     const [sessionHistory,       setSessionHistory]       = useState<SessionHistoryEntry[]>([]);
+    const [lastHeartbeat,        setLastHeartbeat]        = useState<number | null>(null);
+    const [heartbeatStatus,      setHeartbeatStatus]      = useState<string | null>(null);
 
     // Refs that mirror mutable state values so callbacks can read the current
     // value synchronously without stale-closure issues.
@@ -156,11 +177,17 @@ export function useSession(capture: CaptureSession, options: UseSessionOptions =
                     updateCurrentClipData(null);
                     setFeedbackUnavailable(false);
                     setSessionHistory([]);
+                    setLastHeartbeat(null);
+                    setHeartbeatStatus(null);
                     turnCounterRef.current = 0;
                 }
             },
             onActivatingClipData: (msg) => {
                 updateCurrentClipData(msg);
+            },
+            onHeartbeat: (status) => {
+                setLastHeartbeat(Date.now());
+                setHeartbeatStatus(status);
             },
             onMessage: (msg) => {
                 setLastMessage(msg);
@@ -192,10 +219,13 @@ export function useSession(capture: CaptureSession, options: UseSessionOptions =
 
                         const entry: SessionHistoryEntry = {
                             turn,
-                            endedClipId: endedClip?.clip_id ?? "(unknown)",
-                            score:       msg.clip_score,
-                            transcript:  snapTx,
-                            nextClipId:  msg.clip_id,
+                            endedClipId:  endedClip?.clip_id ?? "(unknown)",
+                            score:        msg.clip_score,
+                            transcript:   snapTx,
+                            nextClipId:   msg.clip_id,
+                            // Snapshot the full ClipData so developers can rewatch
+                            // this clip's video from history without knowing the URL.
+                            clipSnapshot: endedClip ?? null,
                         };
 
                         setSessionHistory(prev => [...prev, entry]);
@@ -287,6 +317,8 @@ export function useSession(capture: CaptureSession, options: UseSessionOptions =
         currentClipData,
         feedbackUnavailable,
         sessionHistory,
+        lastHeartbeat,
+        heartbeatStatus,
         connect,
         disconnect,
         selectScenario,

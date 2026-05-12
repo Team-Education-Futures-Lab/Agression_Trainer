@@ -1,7 +1,21 @@
 import type { BranchCondition, ClipMetadata, RubricEntry, ScoreRange } from "@ar-training/shared";
 import type { ScenarioSummary } from "@ar-training/shared";
 import { readdirSync, readFileSync } from "node:fs";
+import { mkdir, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
+
+// ─── Errors ───────────────────────────────────────────────────────────────────
+
+/**
+ * Thrown by registerScenario when the given scenario_id is already loaded.
+ * The route handler maps this to a 409 response.
+ */
+export class ScenarioExistsError extends Error {
+    constructor(scenarioId: string) {
+        super(`Scenario "${scenarioId}" already exists. Delete it before uploading a new version.`);
+        this.name = "ScenarioExistsError";
+    }
+}
 
 // ─── Interface ────────────────────────────────────────────────────────────────
 
@@ -57,6 +71,23 @@ export interface ScenarioLoader {
      * debugging and tooling — use getClip() when you already know the clip ID.
      */
     listClips(scenarioId: string): ClipMetadata[];
+
+    /**
+     * Registers a new scenario from a parsed metadata object and a map of
+     * video file contents (filename → Buffer). Writes files to disk and updates
+     * the in-memory index — in-memory state is only updated after all disk
+     * writes succeed.
+     *
+     * Rejects if the scenario_id already exists (overwrite is not permitted
+     * while sessions may be active on the existing scenario).
+     *
+     * Throws ScenarioExistsError if the scenario_id is already loaded.
+     * Throws Error (with a descriptive message) if:
+     * - The metadata fails validation.
+     * - A declared video filename is missing from `videoFiles`.
+     * - The disk write fails (full disk, read-only mount, etc.).
+     */
+    registerScenario(raw: RawScenario, videoFiles: Map<string, Buffer>): Promise<void>;
 }
 
 // ─── Schema ───────────────────────────────────────────────────────────────────
@@ -91,7 +122,8 @@ interface RawClip {
     branch_conditions:          BranchCondition[];
 }
 
-interface RawScenario {
+// Exported so main.ts can type the parsed metadata body from the upload route.
+export interface RawScenario {
     scenario_id:          string;
     title:                string;
     description:          string;
@@ -112,26 +144,33 @@ interface RawScenario {
  *
  * Throws at construction time if any metadata.json is missing required fields,
  * so misconfigured scenarios are caught before any session is served.
+ *
+ * Supports live registration of new scenarios via registerScenario() without
+ * restarting the container.
  */
 export class FileScenarioLoader implements ScenarioLoader {
+    // Stored so registerScenario can write new scenario directories.
+    private readonly scenariosDir: string;
+
     // Keyed by "scenario_id:clip_id"
-    private readonly clips:             Map<string, ClipMetadata>   = new Map();
+    private readonly clips:              Map<string, ClipMetadata>   = new Map();
     // Keyed by scenario_id → ordered list of ClipMetadata (insertion order = metadata.json order)
-    private readonly clipsByScenario:   Map<string, ClipMetadata[]> = new Map();
+    private readonly clipsByScenario:    Map<string, ClipMetadata[]> = new Map();
     // Keyed by scenario_id
-    private readonly entryClips:        Map<string, string>         = new Map();
+    private readonly entryClips:         Map<string, string>         = new Map();
     // Keyed by scenario_id → coaching_context
-    private readonly coachingContexts:  Map<string, string>         = new Map();
+    private readonly coachingContexts:   Map<string, string>         = new Map();
     // Keyed by scenario_id → learning_objectives
-    private readonly learningObjectives: Map<string, string[]>      = new Map();
+    private readonly learningObjectives: Map<string, string[]>       = new Map();
     // Keyed by scenario_id → target_audience
-    private readonly targetAudiences:   Map<string, string>         = new Map();
+    private readonly targetAudiences:    Map<string, string>         = new Map();
     // Ordered list of summaries for scenarios_list responses
-    private readonly summaries:         ScenarioSummary[]           = [];
+    private readonly summaries:          ScenarioSummary[]           = [];
     // Keyed by "scenario_id:clip_id" → browser-relative URL
-    private readonly videoUrls:         Map<string, string>         = new Map();
+    private readonly videoUrls:          Map<string, string>         = new Map();
 
     constructor(scenariosDir: string) {
+        this.scenariosDir = scenariosDir;
         this.load(scenariosDir);
     }
 
@@ -165,6 +204,70 @@ export class FileScenarioLoader implements ScenarioLoader {
 
     listClips(scenarioId: string): ClipMetadata[] {
         return this.clipsByScenario.get(scenarioId) ?? [];
+    }
+
+    async registerScenario(raw: RawScenario, videoFiles: Map<string, Buffer>): Promise<void> {
+        // 1. Validate metadata structure (reuses existing logic).
+        this.validate(raw, "(upload)");
+
+        // 2. Reject if the scenario already exists.
+        if (this.entryClips.has(raw.scenario_id)) {
+            throw new ScenarioExistsError(raw.scenario_id);
+        }
+
+        // 3. Verify that every clip's declared file has a corresponding buffer.
+        //    Also check for duplicate file values — two clips with the same
+        //    filename would cause a silent overwrite during disk writes.
+        const declaredFiles = new Set<string>();
+        for (const [clipId, clip] of Object.entries(raw.clips)) {
+            if (declaredFiles.has(clip.file)) {
+                throw new Error(
+                    `(upload): clip "${clipId}" declares file "${clip.file}" which is already declared by another clip. Each clip must have a unique filename.`
+                );
+            }
+            declaredFiles.add(clip.file);
+
+            if (!videoFiles.has(clip.file)) {
+                throw new Error(
+                    `(upload): clip "${clipId}" declares file "${clip.file}" but no file part with that name was received.`
+                );
+            }
+        }
+
+        // 4. Write all files to disk. In-memory maps are NOT updated until
+        //    all writes succeed. If any write fails, attempt cleanup and rethrow.
+        const scenarioDir = join(this.scenariosDir, raw.scenario_id);
+
+        try {
+            await mkdir(scenarioDir, { recursive: true });
+            await writeFile(
+                join(scenarioDir, "metadata.json"),
+                JSON.stringify(raw, null, 4),
+                "utf-8",
+            );
+            for (const [filename, buffer] of videoFiles) {
+                // Only write files that are actually declared by a clip.
+                if (declaredFiles.has(filename)) {
+                    await writeFile(join(scenarioDir, filename), buffer);
+                }
+            }
+        } catch (err) {
+            // Attempt to clean up any partially-written directory.
+            try {
+                await rm(scenarioDir, { recursive: true, force: true });
+            } catch (cleanupErr) {
+                // Log cleanup failure but rethrow the original error.
+                process.stderr.write(
+                    `[WARN] registerScenario: cleanup of partial write at "${scenarioDir}" failed: ${String(cleanupErr)}\n`
+                );
+            }
+            throw err;
+        }
+
+        // 5. All disk writes succeeded. Update in-memory maps by re-reading the
+        //    metadata.json we just wrote — this reuses all the existing parsing
+        //    and normalisation logic in loadScenario().
+        this.loadScenario(join(scenarioDir, "metadata.json"));
     }
 
     // ── Internal ──────────────────────────────────────────────────────────────

@@ -23,6 +23,9 @@ interface DataColumnProps {
     sessionState:       import("@ar-training/shared").SessionState;
     onSelectScenario:   (scenarioId: string, entryClipId: string) => void;
     onPreloadClip:      (scenarioId: string, clipId: string) => void;
+    /** Called when a history entry's Watch button is clicked. Null = return to live. */
+    onWatchTurn:        (turn: number | null) => void;
+    watchingTurn:       number | null;
 }
 
 export function DataColumn({
@@ -39,6 +42,8 @@ export function DataColumn({
                                sessionState,
                                onSelectScenario,
                                onPreloadClip,
+                               onWatchTurn,
+                               watchingTurn,
                            }: DataColumnProps) {
     const [openPanels, setOpenPanels] = useState<Record<string, boolean>>({
         transcript:    true,
@@ -156,7 +161,14 @@ export function DataColumn({
 
             <CollapsiblePanel label={`Session history (${sessionHistory.length})`} panelKey="history" open={openPanels["history"] ?? true} onToggle={toggle}>
                 {sessionHistory.length > 0
-                    ? sessionHistory.map(e => <HistoryEntryView key={e.turn} entry={e} />)
+                    ? sessionHistory.map(e => (
+                        <HistoryEntryView
+                            key={e.turn}
+                            entry={e}
+                            isWatching={watchingTurn === e.turn}
+                            onWatch={onWatchTurn}
+                        />
+                    ))
                     : <em style={st.empty}>no turns yet</em>}
             </CollapsiblePanel>
 
@@ -391,19 +403,17 @@ function StageIntermediates({ analyser_id, stages }: { analyser_id: string; stag
 
 // ─── Message views ────────────────────────────────────────────────────────────
 
+/**
+ * Compact clip data display — video and actor transcript are intentionally
+ * omitted here; they live in ClipPreviewPanel in the left column.
+ */
 function ClipDataView({ clip }: { clip: ClipData }) {
     return (
         <div style={cv.root}>
             <div style={cv.idRow}>
                 <span style={cv.clipId}>{clip.clip_id}</span>
                 <span style={cv.scenarioId}>{clip.scenario_id}</span>
-                {clip.video_url && (
-                    <a href={clip.video_url} target="_blank" rel="noreferrer" style={cv.videoLink}>
-                        {clip.video_url}
-                    </a>
-                )}
             </div>
-            {clip.transcript && <p style={cv.transcript}>"{clip.transcript}"</p>}
             {clip.notable_features.length > 0 && (
                 <div style={cv.tagRow}>
                     {clip.notable_features.map(f => <span key={f} style={cv.tag}>{f}</span>)}
@@ -485,7 +495,15 @@ function SessionCompleteView({ msg }: { msg: Extract<ServerMessage, { type: "ses
     );
 }
 
-function HistoryEntryView({ entry }: { entry: SessionHistoryEntry }) {
+function HistoryEntryView({
+                              entry,
+                              isWatching,
+                              onWatch,
+                          }: {
+    entry:      SessionHistoryEntry;
+    isWatching: boolean;
+    onWatch:    (turn: number | null) => void;
+}) {
     const score = entry.score;
     const pct   = ((score + 1) / 2) * 100;
     const color = score < -0.2 ? "#27ae60" : score > 0.2 ? "#e74c3c" : "#e6a817";
@@ -506,6 +524,15 @@ function HistoryEntryView({ entry }: { entry: SessionHistoryEntry }) {
                 {entry.nextClipId
                     ? <span style={he.nextClip}>{entry.nextClipId}</span>
                     : <span style={he.terminal}>— terminal —</span>}
+                {entry.clipSnapshot !== null && (
+                    <button
+                        style={{ ...he.watchBtn, ...(isWatching ? he.watchBtnActive : {}) }}
+                        onClick={() => onWatch(isWatching ? null : entry.turn)}
+                        title={isWatching ? "Stop watching this clip" : `Watch ${entry.endedClipId}`}
+                    >
+                        ▶
+                    </button>
+                )}
                 {entry.debugEval !== undefined && (
                     <span style={he.debugTag}>debug</span>
                 )}
@@ -565,8 +592,6 @@ const cv: Record<string, React.CSSProperties> = {
     idRow:      { display: "flex", alignItems: "baseline", gap: "10px", marginBottom: "6px", flexWrap: "wrap" },
     clipId:     { fontSize: "13px", fontWeight: "bold", color: "#e0e0e0" },
     scenarioId: { fontSize: "11px", color: "#666" },
-    videoLink:  { fontSize: "11px", color: "#5b8dee", textDecoration: "none", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "260px" },
-    transcript: { margin: "0 0 6px", fontSize: "12px", color: "#94a3b8", lineHeight: 1.5, fontStyle: "italic" },
     tagRow:     { display: "flex", flexWrap: "wrap", gap: "4px", marginBottom: "8px" },
     tag:        { padding: "1px 7px", borderRadius: "999px", fontSize: "11px", background: "#2c3040", color: "#7a90b0", border: "1px solid #3a4a60" },
     table:      { width: "100%", borderCollapse: "collapse", fontSize: "11px" },
@@ -611,6 +636,8 @@ const he: Record<string, React.CSSProperties> = {
     arrow:        { fontSize: "11px", color: "#555", flexShrink: 0 },
     nextClip:     { fontSize: "11px", color: "#7ab0f0", fontFamily: "monospace" },
     terminal:     { fontSize: "11px", color: "#8e44ad", fontStyle: "italic" },
+    watchBtn:     { padding: "1px 6px", fontSize: "11px", cursor: "pointer", background: "#1a2030", color: "#7ab0f0", border: "1px solid #2a4a8a", borderRadius: "3px", flexShrink: 0 },
+    watchBtnActive: { background: "#1e2a1e", color: "#7ab87a", border: "1px solid #3a6a3a" },
     debugTag:     { fontSize: "10px", color: "#f5a623", border: "1px solid #7a5400", borderRadius: "3px", padding: "0 4px", background: "#2a1a00" },
     txRow:        { paddingLeft: "32px", marginTop: "2px" },
     txText:       { fontSize: "11px", color: "#666", lineHeight: 1.4 },

@@ -49,6 +49,12 @@ export interface SessionHandlerCallbacks {
     onError:              (err: Error)          => void;
     /** Called only when clip_data arrives for an activating request_clip. */
     onActivatingClipData: (msg: ClipData)       => void;
+    /**
+     * Called when a transport-layer heartbeat arrives from the server.
+     * `status` is `"feedback_generating"` while Ollama is producing output,
+     * or `"ok"` for a general keepalive. Absent for non-heartbeat messages.
+     */
+    onHeartbeat?:         (status: string) => void;
 }
 
 // ─── SessionHandler ───────────────────────────────────────────────────────────
@@ -249,9 +255,10 @@ export class SessionHandler {
             return;
         }
 
-        transport.onMessage = (msg) => { this._handleServerMessage(msg); };
-        transport.onClose   = (clean) => { this._handleClose(clean); };
-        transport.onError   = (err)   => { this.callbacks.onError(err); };
+        transport.onMessage   = (msg) => { this._handleServerMessage(msg); };
+        transport.onClose     = (clean) => { this._handleClose(clean); };
+        transport.onError     = (err)   => { this.callbacks.onError(err); };
+        transport.onHeartbeat = (status) => { this.callbacks.onHeartbeat?.(status); };
 
         this.transport = transport;
 

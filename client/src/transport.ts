@@ -28,14 +28,29 @@ export interface TransportInterface {
 
     /** Called when a message cannot be parsed or a send fails. */
     onError: ((err: Error) => void) | null;
+
+    /**
+     * Called when a `heartbeat` message is received from the server.
+     * Heartbeat messages are filtered out of `onMessage` — they are a
+     * transport-layer concern and must not reach the application layer.
+     *
+     * `status` is the `status` field of the heartbeat:
+     *   - `"feedback_generating"` — the server is streaming feedback from Ollama
+     *   - `"ok"`                  — general keepalive (reserved for future use)
+     *
+     * The browser responds to server-side WebSocket protocol pings automatically
+     * with pong frames — no code is needed here for that path.
+     */
+    onHeartbeat: ((status: string) => void) | null;
 }
 
 // ─── WebSocketTransport ───────────────────────────────────────────────────────
 
 export class WebSocketTransport implements TransportInterface {
-    onMessage: ((msg: ServerMessage) => void) | null = null;
-    onClose:   ((clean: boolean) => void) | null     = null;
-    onError:   ((err: Error) => void) | null         = null;
+    onMessage:   ((msg: ServerMessage) => void) | null = null;
+    onClose:     ((clean: boolean) => void) | null     = null;
+    onError:     ((err: Error) => void) | null         = null;
+    onHeartbeat: ((status: string) => void) | null     = null;
 
     private ws: WebSocket;
     private _clean = false;
@@ -51,6 +66,18 @@ export class WebSocketTransport implements TransportInterface {
                 this.onError?.(new Error(`Failed to parse server message: ${String(e)}`));
                 return;
             }
+
+            // HeartbeatMessage is in the ServerMessage union so that server-side
+            // code can pass it to SendFn in a type-safe way. On the client it is
+            // a transport-layer signal: filter it here before the application layer
+            // sees it, and route it exclusively to onHeartbeat. Application code
+            // that processes ServerMessage values via onMessage will never receive
+            // a heartbeat message.
+            if (parsed.type === "heartbeat") {
+                this.onHeartbeat?.(parsed.status);
+                return;
+            }
+
             this.onMessage?.(parsed);
         };
 

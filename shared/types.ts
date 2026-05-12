@@ -301,6 +301,37 @@ export interface FeedbackToken {
 }
 
 /**
+ * Transport-layer keepalive sent by the App container.
+ *
+ * Sent on two occasions:
+ *   1. During feedback generation: every `HEARTBEAT_INTERVAL_MS` if no
+ *      `feedback_token` has been forwarded in the current window. Confirms
+ *      the LLM is still active so the client can display a progress indicator
+ *      rather than a frozen spinner.
+ *   2. Reserved for future general keepalive use (`status: "ok"`).
+ *
+ * On the **client side** this message is intercepted by `WebSocketTransport`
+ * before it reaches `SessionHandler` or any application callback — it is
+ * routed exclusively to `TransportInterface.onHeartbeat`. It therefore does
+ * not appear in the application's message stream and callers of `onMessage`
+ * will never receive it. It is included in `ServerMessage` solely so that
+ * server-side code (App container) can type-safely pass it to `SendFn`.
+ *
+ * The server-side WebSocket ping/pong mechanism (protocol-level, not JSON)
+ * runs alongside this and is handled automatically by the browser — no
+ * application code is involved on either side for ping/pong.
+ */
+export interface HeartbeatMessage {
+    type:       "heartbeat";
+    session_id: string;
+    /**
+     * `"feedback_generating"` — Ollama is still producing output.
+     * `"ok"`                  — General keepalive (reserved).
+     */
+    status: "feedback_generating" | "ok";
+}
+
+/**
  * Sent immediately after `clip_selected` for **admin sessions only**.
  * Never sent to non-admin sessions.
  *
@@ -384,6 +415,7 @@ export type ServerMessage =
     | ClipSelected
     | SessionComplete
     | FeedbackToken
+    | HeartbeatMessage
     | DebugEval
     | ServerError;
 

@@ -13,15 +13,16 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ServerMessage } from "@ar-training/shared";
-import { useCapture }    from "./hooks/useCapture.ts";
-import { useSession }    from "./hooks/useSession.ts";
-import { CapturePanel }  from "./components/CapturePanel.tsx";
-import { SessionPanel }  from "./components/SessionPanel.tsx";
-import { DataColumn }    from "./components/DataColumn.tsx";
-import type { CapturePanelHandles } from "./components/CapturePanel.tsx";
-import type { LandmarkOverlayHandle } from "./components/LandmarkOverlay.tsx";
-import type { MfccSpectrogramHandle } from "./components/MfccSpectrogram.tsx";
-import type { CaptureStatsHandle }    from "./components/CaptureStats.tsx";
+import { useCapture }        from "./hooks/useCapture.ts";
+import { useSession }        from "./hooks/useSession.ts";
+import { CapturePanel }      from "./components/CapturePanel.tsx";
+import { SessionPanel }      from "./components/SessionPanel.tsx";
+import { DataColumn }        from "./components/DataColumn.tsx";
+import { ClipPreviewPanel }  from "./components/ClipPreviewPanel.tsx";
+import type { CapturePanelHandles }    from "./components/CapturePanel.tsx";
+import type { LandmarkOverlayHandle }  from "./components/LandmarkOverlay.tsx";
+import type { MfccSpectrogramHandle }  from "./components/MfccSpectrogram.tsx";
+import type { CaptureStatsHandle }     from "./components/CaptureStats.tsx";
 
 export function App() {
     const { capture, ready, videoRef } = useCapture();
@@ -80,15 +81,10 @@ export function App() {
                 if (cancelled) break;
                 chunkCountRef.current++;
                 spectrogramRef.current?.push(c.mfccs);
-                // Chunk count is picked up by the frame loop on the next tick
-                // (via chunkCountRef.current) so no separate stats.update() call
-                // is needed here. The frame loop runs at ~30 fps, far faster than
-                // the ~0.5 fps audio chunk rate, so the displayed count stays current.
             }
         })();
 
         return () => { cancelled = true; };
-        // showOverlay intentionally excluded — handled via showOverlayRef mirror.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [capturing, capture]);
 
@@ -121,7 +117,6 @@ export function App() {
     }, [videoRef]);
 
     // ── Session ───────────────────────────────────────────────────────────────
-    // Collect the per-type message snapshots that DataColumn needs.
     type ClipSelectedMsg    = Extract<ServerMessage, { type: "clip_selected" }>;
     type ScenariosListMsg   = Extract<ServerMessage, { type: "scenarios_list" }>;
     type SessionCompleteMsg = Extract<ServerMessage, { type: "session_complete" }>;
@@ -139,7 +134,7 @@ export function App() {
             case "clip_selected":    setLastClipSelected(msg);    break;
             case "session_complete":
                 setLastSessionComplete(msg);
-                setFeedbackTokens(""); // clear streaming buffer on complete
+                setFeedbackTokens("");
                 break;
             case "feedback_token":
                 setFeedbackTokens(prev => prev + msg.token);
@@ -159,6 +154,15 @@ export function App() {
         feedbackUnavailable, sessionHistory, isAdmin,
         connect, disconnect, selectScenario, preloadClip, sendClipEnded,
     } = useSession(capture, { onMessage });
+
+    // ── Clip preview — historical turn selection ──────────────────────────────
+    // Null = show the currently active clip. A turn number = show that turn's
+    // clip snapshot. Reset to null whenever a new session starts.
+    const [watchingTurn, setWatchingTurn] = useState<number | null>(null);
+
+    useEffect(() => {
+        if (state === "idle") setWatchingTurn(null);
+    }, [state]);
 
     // Clear per-session message snapshots on disconnect
     useEffect(() => {
@@ -181,8 +185,7 @@ export function App() {
 
     return (
         <div style={st.root}>
-            {/* Hidden capture video — persists for the lifetime of the page.
-                Passed to capture.start() via videoRef. MediaPipe runs on this. */}
+            {/* Hidden capture video */}
             <video
                 ref={videoRef}
                 muted
@@ -232,6 +235,12 @@ export function App() {
                         preloadClip={preloadClip}
                         sendClipEnded={sendClipEnded}
                     />
+                    <ClipPreviewPanel
+                        currentClipData={currentClipData}
+                        sessionHistory={sessionHistory}
+                        watchingTurn={watchingTurn}
+                        onWatchTurn={setWatchingTurn}
+                    />
                 </div>
 
                 {/* Right column */}
@@ -249,6 +258,8 @@ export function App() {
                     sessionState={state}
                     onSelectScenario={selectScenario}
                     onPreloadClip={preloadClip}
+                    onWatchTurn={setWatchingTurn}
+                    watchingTurn={watchingTurn}
                 />
             </div>
         </div>

@@ -1,8 +1,11 @@
 // =============================================================================
 // ScenarioBuilder — Admin-only scenario authoring tool
 //
-// Generates a downloadable zip containing metadata.json and video files.
-// No backend involvement — everything happens in the browser.
+// Supports two output modes:
+//   1. Upload to server — POST /scenarios with multipart/form-data.
+//      Activated when a server URL is provided in the header bar.
+//   2. Generate & download zip — original behaviour, no server required.
+//      Active when no server URL is configured.
 // =============================================================================
 
 import { useCallback, useRef, useState } from "react";
@@ -190,16 +193,21 @@ export function ScenarioBuilder() {
         );
     }
 
-    return <BuilderForm onClearKey={handleClearKey} />;
+    return <BuilderForm onClearKey={handleClearKey} storedKey={storedKey} />;
 }
 
 // ─── BuilderForm ──────────────────────────────────────────────────────────────
 
 export interface BuilderFormProps {
     onClearKey: () => void;
+    storedKey:  string;
 }
 
-export function BuilderForm({ onClearKey }: BuilderFormProps) {
+// Banner variant for success/error feedback after an upload attempt.
+type BannerKind = "success" | "error";
+interface Banner { kind: BannerKind; message: string }
+
+export function BuilderForm({ onClearKey, storedKey }: BuilderFormProps) {
     const [scenarioId,         setScenarioId]         = useState("");
     const [title,              setTitle]              = useState("");
     const [description,        setDescription]        = useState("");
@@ -211,6 +219,8 @@ export function BuilderForm({ onClearKey }: BuilderFormProps) {
     const [clips,              setClips]              = useState<ClipForm[]>([makeEmptyClip()]);
     const [errors,             setErrors]             = useState<string[]>([]);
     const [generating,         setGenerating]         = useState(false);
+    const [serverUrl,          setServerUrl]          = useState("");
+    const [banner,             setBanner]             = useState<Banner | null>(null);
     const errorBoxRef = useRef<HTMLDivElement | null>(null);
 
     const updateClip = useCallback((id: string, patch: Partial<ClipForm>) => {
@@ -231,7 +241,70 @@ export function BuilderForm({ onClearKey }: BuilderFormProps) {
         });
     };
 
-    const handleSubmit = async () => {
+    // ── Upload to server ──────────────────────────────────────────────────────
+
+    const handleUpload = async () => {
+        setBanner(null);
+        const errs = validateForm(scenarioId, entryClip, clips);
+        if (errs.length > 0) {
+            setErrors(errs);
+            setTimeout(() => errorBoxRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
+            return;
+        }
+        setErrors([]);
+        setGenerating(true);
+        try {
+            const metadata = serialise(
+                scenarioId, title, description, language, entryClip,
+                coachingContext, learningObjectives, targetAudience, clips,
+            );
+
+            const form = new FormData();
+            form.append("metadata", JSON.stringify(metadata));
+            for (const clip of clips) {
+                if (clip.file) {
+                    // Part name must match the clip's declared file field exactly
+                    // so the server can match parts to declared filenames.
+                    form.append(clip.file.name, clip.file, clip.file.name);
+                }
+            }
+
+            const url = serverUrl.replace(/\/$/, "");
+            const res = await fetch(`${url}/scenarios`, {
+                method:  "POST",
+                headers: { "Authorization": `Bearer ${storedKey}` },
+                body:    form,
+            });
+
+            if (res.ok) {
+                const body = await res.json() as { scenario_id: string };
+                setBanner({ kind: "success", message: `Scenario '${body.scenario_id}' successfully uploaded to server.` });
+            } else {
+                let message = `Server returned ${res.status}.`;
+                try {
+                    const body = await res.json() as { message?: string };
+                    if (body.message) message = body.message;
+                } catch { /* use status message */ }
+
+                if (res.status === 409) {
+                    setBanner({ kind: "error", message: "A scenario with this ID already exists on the server." });
+                } else if (res.status === 401) {
+                    setBanner({ kind: "error", message: "Admin key rejected by server." });
+                } else {
+                    setBanner({ kind: "error", message });
+                }
+            }
+        } catch (err) {
+            setBanner({ kind: "error", message: `Upload failed: ${String(err instanceof Error ? err.message : err)}` });
+        } finally {
+            setGenerating(false);
+        }
+    };
+
+    // ── Zip download (original behaviour) ────────────────────────────────────
+
+    const handleZip = async () => {
+        setBanner(null);
         const errs = validateForm(scenarioId, entryClip, clips);
         if (errs.length > 0) {
             setErrors(errs);
@@ -263,18 +336,47 @@ export function BuilderForm({ onClearKey }: BuilderFormProps) {
         }
     };
 
+    const hasServerUrl  = serverUrl.trim().length > 0;
+    const submitLabel   = generating
+        ? (hasServerUrl ? "Uploading…" : "Generating zip…")
+        : (hasServerUrl ? "Upload to server" : "Generate & download zip");
+
     const clipIds = clips.map(c => c.clip_id.trim()).filter(Boolean);
 
     return (
         <div style={st.root}>
             <div style={st.statusBar}>
                 <span style={st.appTitle}>AR Training — Scenario Builder</span>
-                <button style={{ ...st.btn, ...st.btnDanger, fontSize: "11px" }} onClick={onClearKey}>
-                    Clear key / lock
-                </button>
+                <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                    <input
+                        type="text"
+                        style={{ ...st.input, width: "260px", fontSize: "11px" }}
+                        value={serverUrl}
+                        onChange={e => setServerUrl(e.target.value)}
+                        placeholder="Server URL (optional, e.g. http://localhost:3000)"
+                        title="When set, the primary submit button uploads directly to the server instead of downloading a zip."
+                    />
+                    <button style={{ ...st.btn, ...st.btnDanger, fontSize: "11px" }} onClick={onClearKey}>
+                        Clear key / lock
+                    </button>
+                </div>
             </div>
 
             <div style={st.body}>
+                {banner && (
+                    <div style={{
+                        padding:      "10px 14px",
+                        marginBottom: "12px",
+                        borderRadius: "4px",
+                        fontSize:     "13px",
+                        background:   banner.kind === "success" ? "#1a3a1a" : "#3a1a1a",
+                        color:        banner.kind === "success" ? "#6fcf6f" : "#cf6f6f",
+                        border:       `1px solid ${banner.kind === "success" ? "#2e5c2e" : "#5c2e2e"}`,
+                    }}>
+                        {banner.message}
+                    </div>
+                )}
+
                 {errors.length > 0 && (
                     <div ref={errorBoxRef} style={st.errorBox}>
                         <div style={{ fontWeight: "bold", marginBottom: "6px" }}>Please fix the following errors:</div>
@@ -330,14 +432,31 @@ export function BuilderForm({ onClearKey }: BuilderFormProps) {
                 </Section>
 
                 <div style={{ display: "flex", gap: "12px", alignItems: "center", marginTop: "8px" }}>
+                    {/* Primary action — changes based on whether a server URL is configured */}
                     <button
                         style={{ ...st.btn, ...st.btnPrimary, fontSize: "13px", padding: "8px 20px" }}
-                        onClick={() => void handleSubmit()}
+                        onClick={() => void (hasServerUrl ? handleUpload() : handleZip())}
                         disabled={generating}
                     >
-                        {generating ? "Generating zip…" : "Generate & download zip"}
+                        {submitLabel}
                     </button>
-                    {generating && <span style={{ color: "#888", fontSize: "12px" }}>Reading video files…</span>}
+
+                    {/* Secondary action — always available as a fallback */}
+                    {hasServerUrl && (
+                        <button
+                            style={{ ...st.btn, fontSize: "12px", padding: "6px 14px" }}
+                            onClick={() => void handleZip()}
+                            disabled={generating}
+                        >
+                            Generate & download zip
+                        </button>
+                    )}
+
+                    {generating && (
+                        <span style={{ color: "#888", fontSize: "12px" }}>
+                            {hasServerUrl ? "Uploading to server…" : "Reading video files…"}
+                        </span>
+                    )}
                 </div>
             </div>
         </div>

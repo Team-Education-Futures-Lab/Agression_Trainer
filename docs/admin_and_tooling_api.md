@@ -145,13 +145,102 @@ No authentication required.
 
 ---
 
+### `POST /scenarios`
+
+Registers a new scenario by uploading its metadata and video files directly to
+the server. The scenario becomes immediately available for sessions without
+restarting the App container.
+
+**Authentication:** `Authorization: Bearer <ADMIN_API_KEY>`. The header is
+validated before any request body is read. Returns `401` if the key is absent
+or does not match. Returns `501` if `ADMIN_API_KEY` is unset in the server
+environment — the endpoint is permanently unavailable without an admin key
+configured.
+
+**Overwrite is not supported.** If a scenario with the same `scenario_id` already
+exists, the upload is rejected with `409`. Delete the existing scenario directory
+from `SCENARIOS_DIR` on the host and restart the App container before uploading
+a replacement.
+
+**Request** — `multipart/form-data`
+
+| Part name        | Type       | Description                                                                                                                                   |
+|------------------|------------|-----------------------------------------------------------------------------------------------------------------------------------------------|
+| `metadata`       | text field | The full scenario metadata as a JSON string, matching the schema in `scenario_schema.md`. Must be present; order among parts does not matter. |
+| `<filename>.mp4` | file part  | One binary file part per clip. Each part's **field name** must exactly match the `file` value declared for that clip in the metadata.         |
+
+All declared clip files must be present as parts. Extra file parts (not declared
+in the metadata) are ignored. The metadata `scenario_id` and all clip `file`
+values are validated for path traversal characters before any file is written.
+
+**Response 201 — scenario registered**
+```json
+{
+    "scenario_id": "string",
+    "clips_registered": "integer",
+    "message": "string"
+}
+```
+
+**Response 400 — validation failure**
+```json
+{
+    "error": "validation_error",
+    "message": "string  // human-readable description of what failed"
+}
+```
+
+Common causes: missing required metadata fields, `entry_clip` not found in
+`clips`, `branch_conditions` referencing an unknown clip, a declared clip `file`
+with no corresponding upload part, or a disk write failure (read-only mount,
+full disk).
+
+**Response 409 — scenario already exists**
+```json
+{
+    "error": "scenario_exists",
+    "message": "string  // 'Scenario \"{id}\" already exists. Delete it before uploading a new version.'"
+}
+```
+
+**Response 401 — missing or invalid admin key**
+```json
+{
+    "error": "unauthorized",
+    "message": "string"
+}
+```
+
+**Response 501 — admin key not configured**
+```json
+{
+    "error": "admin_unavailable",
+    "message": "string"
+}
+```
+
+**Example — curl**
+```bash
+curl -X POST http://localhost:3000/scenarios \
+  -H "Authorization: Bearer <ADMIN_API_KEY>" \
+  -F "metadata=<scenario_03/metadata.json;type=application/json" \
+  -F "clip_01_intro.mp4=@scenario_03/clip_01_intro.mp4" \
+  -F "clip_02_calm.mp4=@scenario_03/clip_02_calm.mp4"
+```
+
+**Durability:** metadata and video files are written to `SCENARIOS_DIR` on the
+host bind mount before the in-memory index is updated. A successful `201`
+response guarantees the files are on disk and will survive a container restart.
+If the disk write fails partway through, any partially-written directory is
+cleaned up and the in-memory index is left unchanged.
+
+---
+
 ## Admin Sessions
 
 Admin sessions bypass the entry-clip restriction — any clip in a scenario can
 be activated, not just the entry clip. This is the mechanism for a future
 teacher dashboard to start a session at an arbitrary point in the scenario graph.
-Admin sessions also receive `debug_eval` WebSocket messages after each clip
-(see [Debug messages (admin sessions only)](api_contract.md#debug-messages-admin-sessions-only) in `api_contract.md`).
 
 ### Creating an admin session
 
@@ -178,7 +267,7 @@ stored internally on the `SessionContext` and is not exposed in any response.
 When a teacher dashboard is added, replace the single `ADMIN_API_KEY` env var
 check at session creation with a per-token lookup against a teacher credential
 store. Nothing downstream changes — the `is_admin` flag on the session context
-is already threaded through to clip activation validation and debug data requests.
+is already threaded through to clip activation validation.
 
 ---
 
@@ -320,14 +409,6 @@ Same shared secret scheme as Transcription — all requests carry
 ### `POST /evaluate/analyse`
 
 **Request** — AnalysisWindow
-
-The App container adds the header `X-Debug: true` to this request when and only
-when the session is an admin session (`is_admin === true`). When this header is
-present the Evaluation container includes a `debug` field in its response (see
-below). The header is never sent for non-admin sessions — the Evaluation
-container bears no overhead of assembling debug output for sessions that will not
-use it.
-
 ```json
 {
     "window_id": "string  // '{session_id}:{clip_sequence}'",
@@ -385,41 +466,28 @@ both signals fall back to clip-duration-based approximations.
 Fields `clip_learning_objectives`, `ideal_response`, and `response_warnings` are
 not forwarded to the Evaluation container — they are Feedback-only.
 
-**Response 200** — BehaviourResult (with optional debug field)
-
-When the request did not include `X-Debug: true`:
+**Response 200** — BehaviourResult
 ```json
 {
     "window_id": "string",
     "session_id": "string",
-    "escalation_score": "float",
-    "dominant_emotion": "string",
-    "confidence": "float",
-    "signal_summary": { "...see BehaviourResult schema in api_contract.md..." }
-}
-```
-
-When the request included `X-Debug: true`, an additional top-level `debug` field
-is present:
-```json
-{
-    "window_id": "string",
-    "session_id": "string",
-    "escalation_score": "float",
-    "dominant_emotion": "string",
-    "confidence": "float",
-    "signal_summary": { "...same as above..." },
-    "debug": {
-        "analyser_id": "string  // e.g. 'stub' or 'production'",
-        "stages": "object | null  // implementation-specific intermediate data; shape determined by analyser_id"
+    "escalation_score": "float  // -1.0 (strongly de-escalating) to 1.0 (strongly escalating), clamped to score_range",
+    "dominant_emotion": "string  // e.g. 'calm', 'anxious', 'frustrated', 'neutral', 'distressed'",
+    "confidence": "float  // 0.0 to 1.0; reflects proportion of rubric signals with reliable measurements",
+    "signal_summary": {
+        "vocal_tension": "float  // 0.0 (relaxed) to 1.0 (tense); from MFCC energy variance and audio emotion arousal",
+        "speech_pace": "float  // syllables per second of actual speech; computed from word timings when available",
+        "gesture_activity": "float  // variance of wrist and fingertip landmark displacement across the clip",
+        "open_gesture_ratio": "float | null  // fraction of hand-detected frames with open-hand configuration; null if hands detected in fewer than 50% of frames",
+        "head_nod_frequency": "float  // frequency of vertical head oscillation in Hz, from face landmark Y-coordinates",
+        "facing_ratio": "float  // fraction of frames where the student is estimated to be facing the camera, based on left/right face mesh symmetry",
+        "silence_ratio": "float  // fraction of clip_duration_seconds where no student speech was detected; computed from word timings when available",
+        "lexical_markers": ["string  // matched Dutch empathy/validation/open-question phrases from the transcript"],
+        "response_tone": "string  // 'positive', 'neutral', or 'negative'",
+        "notable_signals": ["string  // e.g. 'stub_mode', 'no_hands_detected', 'critical_failure:raised_voice'"]
     }
 }
 ```
-
-The App container reads `debug` from the response and includes it verbatim in
-the `debug_eval` WebSocket message sent to the admin client. The `analyser_id`
-and `stages` schemas are documented in `api_contract.md` under
-[Debug messages (admin sessions only)](api_contract.md#debug-messages-admin-sessions-only).
 
 **Signal and response notes:**
 
@@ -428,7 +496,7 @@ and `stages` schemas are documented in `api_contract.md` under
 - `lexical_markers` is an empty array when no Dutch de-escalation phrases were detected.
 - `facing_ratio` is derived from the horizontal symmetry of left/right face mesh landmarks, not from body pose or shoulder detection. The client capture pipeline uses MediaPipe face mesh (478 face-only landmarks) and does not include body pose landmarks.
 - `speech_pace` and `silence_ratio` are computed from word-level timings when `words` is non-empty. When `words` is empty (stub pool or no speech), `speech_pace` falls back to syllable count divided by `clip_duration_seconds`, and `silence_ratio` falls back to `0.0` if the transcript is non-empty or `1.0` if empty.
-- `escalation_score` is the result after `score_range` clamping. The pre-clamp raw score is not returned in the normal response; it is available in `debug.stages.scorer.raw_score_pre_clamp` when debug output is requested.
+- `escalation_score` is the result after `score_range` clamping. The pre-clamp raw score is not returned.
 - When a `critical_failure` signal is detected, the triggering signal name is appended to `notable_signals` in the form `"critical_failure:<signal_name>"` for traceability.
 - `confidence` is reduced when rubric signals could not be measured (e.g. hands off-camera, empty transcript).
 
@@ -436,9 +504,6 @@ A non-2xx response is treated as a failed evaluation. The App falls back to a
 neutral `BehaviourResult` (score 0, emotion "neutral", confidence 0, all
 `signal_summary` floats at 0, `open_gesture_ratio` null, empty arrays) and the
 session continues normally — the first branch condition at score ≥ 0 is selected.
-When an eval fallback occurs for an admin session, the `debug_eval` message is
-still sent with `capture.eval_fallback: true` and `result` set to the neutral
-fallback values; `stages` is `null`.
 
 ---
 
@@ -466,93 +531,6 @@ No authentication required.
     "device": "cpu | cuda"
 }
 ```
-
----
-
-## Evaluation Container — Debug Output
-
-Debug output from the Evaluation container is an optional enrichment of the
-normal `POST /evaluate/analyse` response. It is not a separate endpoint — the
-App container requests it by including `X-Debug: true` in the request header,
-and the Evaluation container includes a `debug` field in the response body when
-that header is present.
-
-### Requesting debug output
-
-The App container adds `X-Debug: true` to `POST /evaluate/analyse` when and
-only when `session.is_admin === true`. For all other sessions the header is
-absent and the Evaluation container returns the standard `BehaviourResult` with
-no `debug` field.
-
-This design keeps the evaluation response format stable for normal sessions and
-imposes no overhead (no intermediate data assembly, no extra serialisation) on
-the common path.
-
-### Debug response field
-
-When `X-Debug: true` is present, the response includes:
-
-```json
-{
-    "debug": {
-        "analyser_id": "string",
-        "stages": "object | null"
-    }
-}
-```
-
-`analyser_id` identifies which `BehaviourAnalyserInterface` implementation
-produced the response. The App container forwards this value verbatim to the
-admin client in the `debug_eval` WebSocket message. The known values and their
-corresponding `stages` schemas are documented in `api_contract.md`.
-
-The `stages` field may be large — the production analyser can include scored
-signal sets, per-word timing arrays, and multi-stage floating-point outputs.
-The Evaluation container does not truncate or compress `stages`; clients are
-responsible for handling potentially large payloads.
-
-### `GET /evaluate/debug/config`
-
-Returns the active threshold configuration and lexical phrase lists used by the
-Evaluation container. Protected by `INTERNAL_API_KEY`. Intended for operators
-to verify that a deployed container is running with the expected configuration
-without reading the filesystem.
-
-```
-Authorization: Bearer <INTERNAL_API_KEY>
-```
-
-**Response 200**
-```json
-{
-    "analyser_id": "string  // e.g. 'production' or 'stub'",
-    "device": "cpu | cuda",
-    "signal_thresholds": {
-        "vocal_tension_high": "float  // vocal_tension value above which 'raised_voice' is detected",
-        "vocal_tension_low": "float  // vocal_tension value below which 'calm_voice' is detected",
-        "speech_pace_high": "float  // syllables/sec above which 'fast_speech' is detected",
-        "speech_pace_low": "float  // syllables/sec below which 'measured_pace' is detected",
-        "silence_ratio_high": "float  // silence_ratio above which 'long_silence' is detected",
-        "silence_ratio_mid_min": "float  // silence_ratio lower bound for 'appropriate_silence'",
-        "silence_ratio_mid_max": "float  // silence_ratio upper bound for 'appropriate_silence'",
-        "head_nod_frequency_min": "float  // Hz above which 'active_listening' is detected",
-        "facing_ratio_low": "float  // facing_ratio below which 'turning_away' is detected",
-        "facing_ratio_high": "float  // facing_ratio above which 'open_posture' is detected",
-        "open_gesture_ratio_low": "float  // open_gesture_ratio below which 'closed_gesture' is detected",
-        "open_gesture_ratio_high": "float  // open_gesture_ratio above which 'open_gesture' is detected",
-        "hands_detected_min_ratio": "float  // minimum fraction of frames with hands detected for open_gesture_ratio to be computed (not null)"
-    },
-    "lexical_marker_phrases": {
-        "empathy_acknowledgements": ["string  // Dutch phrases matched for 'empathy_phrase' signal"],
-        "validation_phrases": ["string  // Dutch phrases matched for 'validation' signal"],
-        "open_question_patterns": ["string  // Dutch patterns matched for 'open_question' signal"]
-    }
-}
-```
-
-**Response 401** — missing or invalid `INTERNAL_API_KEY`.
-
-> **Note:** This endpoint reflects the configuration of the single container instance that handles the request. In a multi-instance deployment (`--scale evaluation=N`), query each instance separately if you need to confirm all instances are running identical configuration.
 
 ---
 

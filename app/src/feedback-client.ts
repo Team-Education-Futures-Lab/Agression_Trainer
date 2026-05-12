@@ -1,4 +1,4 @@
-import type { FeedbackRequest, FeedbackToken, ServerError, SessionComplete } from "@ar-training/shared";
+import type { FeedbackRequest, FeedbackToken, HeartbeatMessage, ServerError, SessionComplete } from "@ar-training/shared";
 import type { SendFn } from "./coordinator.js";
 import { TextDecoder } from "node:util";
 import { createParser, type EventSourceMessage } from "eventsource-parser";
@@ -14,14 +14,21 @@ import { createParser, type EventSourceMessage } from "eventsource-parser";
 // ─────────────────────────────────────────────────────────────────────────────
 
 export class FeedbackClient {
-    private readonly feedbackUrl:     string;
-    private readonly authHeader:      string;
-    private readonly timeoutMs:       number;
+    private readonly feedbackUrl:         string;
+    private readonly authHeader:          string;
+    private readonly timeoutMs:           number;
+    private readonly heartbeatIntervalMs: number;
 
-    constructor(feedbackUrl: string, internalApiKey: string, timeoutMs: number) {
-        this.feedbackUrl = feedbackUrl;
-        this.authHeader  = `Bearer ${internalApiKey}`;
-        this.timeoutMs   = timeoutMs;
+    constructor(
+        feedbackUrl:         string,
+        internalApiKey:      string,
+        timeoutMs:           number,
+        heartbeatIntervalMs: number,
+    ) {
+        this.feedbackUrl         = feedbackUrl;
+        this.authHeader          = `Bearer ${internalApiKey}`;
+        this.timeoutMs           = timeoutMs;
+        this.heartbeatIntervalMs = heartbeatIntervalMs;
     }
 
     /**
@@ -38,6 +45,13 @@ export class FeedbackClient {
      * slightly above the Feedback container's OLLAMA_TIMEOUT_MS so that Ollama
      * always times out first on the generation side, leaving time for the
      * Feedback container to write the error SSE event before this side aborts.
+     *
+     * During the SSE stream a keepalive timer fires every heartbeatIntervalMs.
+     * If no token has been forwarded to the client in the last interval, a
+     * `HeartbeatMessage` with `status: "feedback_generating"` is sent so the
+     * client knows the LLM is still working and does not display a frozen
+     * spinner. The timer is cleared when the stream ends regardless of how it
+     * ended.
      */
     async stream(
         sessionId: string,
@@ -68,6 +82,33 @@ export class FeedbackClient {
         }
 
         const decoder = new TextDecoder();
+
+        // ── Keepalive timer ───────────────────────────────────────────────────
+        //
+        // Tracks whether a token has been forwarded to the client in the current
+        // heartbeat window. Reset to false when a token is sent; checked on each
+        // timer tick.
+        //
+        // This gives the client a periodic signal that Ollama is still generating,
+        // even during long inter-token pauses (context reloads, long sequences).
+        // Without it, the client shows a frozen spinner for up to OLLAMA_TIMEOUT_MS.
+        let tokenSentInWindow = false;
+        const keepaliveTimer = setInterval(() => {
+            if (!tokenSentInWindow) {
+                const heartbeat: HeartbeatMessage = {
+                    type:       "heartbeat",
+                    session_id: sessionId,
+                    status:     "feedback_generating",
+                };
+                sendFn(heartbeat);
+            }
+            tokenSentInWindow = false;
+        }, this.heartbeatIntervalMs);
+
+        const stopKeepalive = () => {
+            clearInterval(keepaliveTimer);
+        };
+
         const parser = createParser({
             onEvent: (event: EventSourceMessage) => {
                 try {
@@ -84,6 +125,7 @@ export class FeedbackClient {
                             token:      data.token ?? "",
                         };
                         sendFn(msg);
+                        tokenSentInWindow = true;
 
                     } else if (data.type === "complete" && data.feedback) {
                         const msg: SessionComplete = {
@@ -114,6 +156,9 @@ export class FeedbackClient {
             // The client may already have received some tokens; send the error
             // to signal that the session_complete will not arrive.
             sendFn(this.unavailableError(sessionId));
+        } finally {
+            // Always clear the keepalive timer regardless of how the stream ended.
+            stopKeepalive();
         }
     }
 

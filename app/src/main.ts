@@ -3,10 +3,13 @@ import Fastify from "fastify";
 import websocketPlugin from "@fastify/websocket";
 // noinspection TypeScriptCheckImport
 import cors from "@fastify/cors";
+// noinspection TypeScriptCheckImport
+import multipart from "@fastify/multipart";
 import { loadConfig } from "./config.js";
 import { SessionManager } from "./session-manager.js";
 import { Coordinator } from "./coordinator.js";
-import { FileScenarioLoader } from "./scenario-loader.js";
+import { FileScenarioLoader, ScenarioExistsError } from "./scenario-loader.js";
+import type { RawScenario } from "./scenario-loader.js";
 import { FeedbackClient } from "./feedback-client.js";
 import { ClipController } from "./clip-controller.js";
 import type { CreateSessionRequest, ClientMessage } from "@ar-training/shared";
@@ -24,11 +27,20 @@ const app           = Fastify({
 const sessions      = new SessionManager(config.sessionManager);
 const coord         = new Coordinator(config.coordinator);
 const scenarios     = new FileScenarioLoader(config.scenariosDir);
-const feedback      = new FeedbackClient(config.feedbackUrl, config.internalApiKey, config.feedbackTimeoutMs);
+const feedback      = new FeedbackClient(
+    config.feedbackUrl,
+    config.internalApiKey,
+    config.feedbackTimeoutMs,
+    config.heartbeatIntervalMs,
+);
 const controller    = new ClipController(sessions, coord, scenarios, feedback);
 
 await app.register(websocketPlugin);
 await app.register(cors, { origin: config.corsOrigin });
+await app.register(multipart, {
+    // Maximum size per individual file part (500 MB).
+    limits: { fileSize: 500 * 1024 * 1024 },
+});
 
 // ─── Health ───────────────────────────────────────────────────────────────────
 
@@ -185,6 +197,113 @@ app.get<{ Params: { scenario_id: string } }>("/scenarios/:scenario_id/clips", as
     });
 });
 
+/**
+ * POST /scenarios
+ *
+ * Accepts a multipart/form-data upload containing:
+ *   - A part named "metadata" with the scenario's JSON metadata as a string.
+ *   - One binary file part per clip, named exactly as declared in the clip's
+ *     "file" field in the metadata.
+ *
+ * Protected by ADMIN_API_KEY. Returns 501 if ADMIN_API_KEY is not configured.
+ * The Authorization header is checked BEFORE consuming any multipart body to
+ * prevent unauthenticated requests from streaming large payloads.
+ *
+ * Processing strategy: all parts are buffered (metadata as string, files as
+ * Buffer), then metadata is parsed and validated, then registerScenario() is
+ * called to write files and update the in-memory index atomically.
+ */
+app.post("/scenarios", async (req, reply) => {
+    const adminKey = config.sessionManager.adminApiKey;
+
+    // Check admin key availability before touching the request body.
+    if (!adminKey) {
+        return reply.code(501).send({
+            error:   "admin_unavailable",
+            message: "Admin key is not configured on this server. Set ADMIN_API_KEY to enable scenario upload.",
+        });
+    }
+
+    // Authenticate before consuming any multipart body.
+    const authHeader = req.headers["authorization"] ?? "";
+    const token      = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+    if (token !== adminKey) {
+        return reply.code(401).send({
+            error:   "unauthorized",
+            message: "Missing or invalid admin key.",
+        });
+    }
+
+    // Collect all multipart parts.
+    // - "metadata" → JSON string
+    // - everything else → treated as a video file Buffer, keyed by fieldname
+    let metadataJson: string | null = null;
+    const videoFiles = new Map<string, Buffer>();
+
+    try {
+        const parts = req.parts();
+        for await (const part of parts) {
+            if (part.type === "field" && part.fieldname === "metadata") {
+                metadataJson = part.value as string;
+            } else if (part.type === "file") {
+                // part.fieldname is the declared filename (e.g. "clip_01_intro.mp4")
+                const buf = await part.toBuffer();
+                videoFiles.set(part.fieldname, buf);
+            }
+        }
+    } catch (err) {
+        app.log.warn({ err }, "POST /scenarios: error reading multipart body");
+        return reply.code(400).send({
+            error:   "validation_error",
+            message: `Failed to read multipart body: ${String(err instanceof Error ? err.message : err)}`,
+        });
+    }
+
+    // Parse metadata JSON.
+    if (metadataJson === null) {
+        return reply.code(400).send({
+            error:   "validation_error",
+            message: "Missing required multipart field: metadata",
+        });
+    }
+
+    let raw: RawScenario;
+    try {
+        raw = JSON.parse(metadataJson) as RawScenario;
+    } catch {
+        return reply.code(400).send({
+            error:   "validation_error",
+            message: "The metadata field is not valid JSON.",
+        });
+    }
+
+    // Register — validate, write disk, update maps.
+    try {
+        await scenarios.registerScenario(raw, videoFiles);
+    } catch (err) {
+        if (err instanceof ScenarioExistsError) {
+            return reply.code(409).send({
+                error:   "scenario_exists",
+                message: err.message,
+            });
+        }
+        app.log.warn({ err }, "POST /scenarios: registerScenario failed");
+        return reply.code(400).send({
+            error:   "validation_error",
+            message: String(err instanceof Error ? err.message : err),
+        });
+    }
+
+    const clipCount = Object.keys(raw.clips).length;
+    app.log.info({ scenario_id: raw.scenario_id, clips: clipCount }, "scenario registered via upload");
+
+    return reply.code(201).send({
+        scenario_id:      raw.scenario_id,
+        clips_registered: clipCount,
+        message:          `Scenario "${raw.scenario_id}" registered with ${clipCount} clip(s).`,
+    });
+});
+
 // ─── WebSocket handler ────────────────────────────────────────────────────────
 
 // Maximum raw WebSocket message size accepted from the client (bytes).
@@ -205,6 +324,24 @@ const MAX_WS_MESSAGE_BYTES = 256 * 1024;
 // and are not reset between clips. Clip length does not affect the limits.
 const MAX_FRAMES_PER_SECOND       = 60;
 const MAX_AUDIO_CHUNKS_PER_SECOND = 1;
+
+// ─── Heartbeat constants ──────────────────────────────────────────────────────
+//
+// The server sends a WebSocket protocol-level ping to each client every
+// HEARTBEAT_INTERVAL_MS. Browsers respond automatically with a pong frame —
+// no application code is needed on the client side.
+//
+// If no pong is received within HEARTBEAT_TIMEOUT_MS (default ≈ 2.3 intervals),
+// the connection is treated as dead: the socket is terminated and the session
+// is marked dropped. The client may resume via POST /session/{id}/resume within
+// the recovery window.
+//
+// These values are read from config (populated from HEARTBEAT_INTERVAL_MS and
+// HEARTBEAT_TIMEOUT_MS environment variables) so operators can tune them without
+// rebuilding the image. The module-level constants below are resolved once at
+// startup from the loaded config.
+const HEARTBEAT_INTERVAL_MS = config.heartbeatIntervalMs;
+const HEARTBEAT_TIMEOUT_MS  = config.heartbeatTimeoutMs;
 
 app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
     const { session_id } = req.params as { session_id: string };
@@ -230,6 +367,38 @@ app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
     let frameWindowCount  = 0;
     let audioWindowStart  = Date.now();
     let audioWindowCount  = 0;
+
+    // ── Heartbeat ─────────────────────────────────────────────────────────────
+    //
+    // lastPong tracks the most recent pong from the client.
+    // On each interval tick we either detect a dead connection (no pong in
+    // HEARTBEAT_TIMEOUT_MS) or send another ping to keep the connection alive.
+    //
+    // The interval is stored so it can be cleared on every close path —
+    // both clean and unexpected. A leaked setInterval after socket close
+    // would fire against a dead socket and hold the session in memory.
+    let lastPong: number = Date.now();
+    let heartbeatInterval: NodeJS.Timeout | null = null;
+
+    heartbeatInterval = setInterval(() => {
+        if (Date.now() - lastPong > HEARTBEAT_TIMEOUT_MS) {
+            // No pong received within the timeout window — treat as a dead
+            // connection. Clean up and mark the session as dropped so the
+            // recovery timer starts and the slot is released if not resumed.
+            app.log.warn({ session_id }, "WebSocket heartbeat timeout — marking session dropped");
+            clearInterval(heartbeatInterval!);
+            heartbeatInterval = null;
+            socket.terminate();
+            coord.deregisterSession(session_id);
+            sessions.markDropped(session_id);
+        } else {
+            socket.ping();
+        }
+    }, HEARTBEAT_INTERVAL_MS);
+
+    socket.on("pong", () => {
+        lastPong = Date.now();
+    });
 
     // If the session is queued, the socket is open but we wait for a slot.
     // session_ready is sent when the session is promoted (see promoteNext in
@@ -317,6 +486,14 @@ app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
     });
 
     socket.on("close", () => {
+        // Always clear the heartbeat interval on close — regardless of whether
+        // the close was clean or unexpected — to prevent a leaked setInterval
+        // from firing against a dead socket.
+        if (heartbeatInterval !== null) {
+            clearInterval(heartbeatInterval);
+            heartbeatInterval = null;
+        }
+
         const current = sessions.getSession(session_id);
         if (current && (current.state === "ACTIVE" || current.state === "PAUSED")) {
             coord.deregisterSession(session_id);

@@ -69,6 +69,24 @@ export interface AppConfig {
      * Default: 150 000 ms (150 s).
      */
     feedbackTimeoutMs:  number;
+    /**
+     * How often the server sends a WebSocket protocol-level ping to each
+     * connected client (ms). Also used as the interval for application-level
+     * heartbeat messages during feedback generation.
+     * Default: 30 000 ms (30 s).
+     */
+    heartbeatIntervalMs: number;
+    /**
+     * How long after the last received pong the server will wait before
+     * treating the connection as dead, terminating the socket, and marking
+     * the session as dropped (ms).
+     * Should be slightly more than 2× heartbeatIntervalMs so that two
+     * consecutive missed pongs (e.g. during a brief network blip) do not
+     * immediately kill the session, but a fully silent connection is detected
+     * within a reasonable window.
+     * Default: 70 000 ms (70 s ≈ 2.3 × 30 s).
+     */
+    heartbeatTimeoutMs:  number;
     coordinator:        CoordinatorConfig;
     sessionManager:     SessionManagerConfig;
 }
@@ -84,14 +102,16 @@ export function loadConfig(): AppConfig {
     const corsOrigin: string | true = corsOriginEnv ? corsOriginEnv : true;
 
     return {
-        port:              intEnv("PORT", 3000),
+        port:                intEnv("PORT", 3000),
         evaluationUrls,
         transcriptionUrls,
-        feedbackUrl:       requireEnv("FEEDBACK_URL"),
-        scenariosDir:      requireEnv("SCENARIOS_DIR"),
+        feedbackUrl:         requireEnv("FEEDBACK_URL"),
+        scenariosDir:        requireEnv("SCENARIOS_DIR"),
         internalApiKey,
         corsOrigin,
-        feedbackTimeoutMs: intEnv("FEEDBACK_TIMEOUT_MS", 150_000),
+        feedbackTimeoutMs:   intEnv("FEEDBACK_TIMEOUT_MS",    150_000),
+        heartbeatIntervalMs: intEnv("HEARTBEAT_INTERVAL_MS",   30_000),
+        heartbeatTimeoutMs:  intEnv("HEARTBEAT_TIMEOUT_MS",    70_000),
         coordinator: {
             evaluationUrls,
             transcriptionUrls,

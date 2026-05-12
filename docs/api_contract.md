@@ -50,7 +50,7 @@ bound later via `request_clip` with `activate: true` over the WebSocket.
 }
 ```
 
-> **Admin mode:** pass `Authorization: Bearer <ADMIN_API_KEY>` to create an admin session. Admin sessions bypass clip activation restrictions — any clip can be activated, not just the scenario's entry clip. Admin sessions also receive `debug_eval` messages after each clip (see [Debug messages](#debug-messages-admin-sessions-only)). See `admin_and_tooling_api.md` for details.
+> **Admin mode:** pass `Authorization: Bearer <ADMIN_API_KEY>` to create an admin session. Admin sessions bypass clip activation restrictions — any clip can be activated, not just the scenario's entry clip. See `admin_and_tooling_api.md` for details.
 
 ---
 
@@ -112,33 +112,7 @@ Poll for queue position updates while waiting for a session slot.
 
 Connection must be established after a successful `/session/create` or
 `/session/resume`. The WebSocket is the sole channel for scenario discovery,
-clip negotiation, data streaming, evaluation results, feedback delivery, and
-(for admin sessions) evaluation debug data.
-
-### Rate limits
-
-The App container enforces per-second rate limits on incoming `video_frame` and
-`audio_chunk` messages. Messages that arrive above the limit are silently
-dropped — no error message is sent to the client.
-
-| Message type  | Limit                    | Expected rate         |
-|---------------|--------------------------|-----------------------|
-| `video_frame` | 60 frames per second     | 30 fps                |
-| `audio_chunk` | 1 chunk per second       | 1 per 2 s             |
-
-The limits are set at 2× the expected rate to accommodate normal client-side
-jitter. A well-behaved client operating at target rates will never hit these
-limits.
-
-The limits apply continuously for the lifetime of the WebSocket connection and
-are not reset between clips. Clip length does not affect the limits.
-
-**Clients must not rely on the server accepting every message.** Evaluation
-quality degrades if the rate limits are regularly exceeded, because frames and
-audio data forwarded to the Evaluation and Transcription containers will be
-incomplete.
-
----
+clip negotiation, data streaming, evaluation results, and feedback delivery.
 
 ### Client → Server messages
 
@@ -218,8 +192,7 @@ at any point during the session, including while a clip is playing.
 
 The client must stop sending `VideoFrame` and `AudioChunk` messages after
 sending this. The App responds immediately with `clip_candidates`, then with
-`clip_selected` once evaluation completes. For admin sessions, `debug_eval`
-follows `clip_selected`.
+`clip_selected` once evaluation completes.
 
 ---
 
@@ -334,8 +307,6 @@ conditions have `next_clip: null` (terminal clip).
 When `clip_id` is null the scenario is complete — the client should wait for
 `FeedbackToken` and `SessionComplete` messages.
 
-For admin sessions, `debug_eval` is sent immediately after `clip_selected`.
-
 **FeedbackToken** — streamed during debrief generation
 ```json
 {
@@ -382,127 +353,62 @@ Error codes:
 
 ---
 
-## Debug messages (admin sessions only)
+### Heartbeat
 
-> **Visibility:** `debug_eval` is **never sent to non-admin sessions.** The App container does not request debug data from the Evaluation container for non-admin sessions, and non-admin clients will never receive this message type regardless of any client-side request or configuration. There is no opt-in mechanism for non-admin sessions.
+The App container maintains connection liveness using the WebSocket protocol's
+built-in ping/pong mechanism and an application-level keepalive message during
+feedback generation.
 
-**DebugEval** — sent immediately after `clip_selected`, for admin sessions only
+#### Protocol-level ping/pong
 
-Carries the full evaluation result for the completed clip, together with
-implementation-specific intermediate data from the Evaluation container's
-analysis pipeline and App-level capture statistics.
+The server sends a WebSocket protocol-level ping frame to each connected client
+every `HEARTBEAT_INTERVAL_MS` (default 30 s, configurable via the environment
+variable of the same name). All major browsers respond to server pings
+automatically with a pong frame — **clients must not implement their own
+client-to-server heartbeat**. Adding an application-level ping from the client
+would consume rate-limit budget unnecessarily and is not required for liveness
+detection.
+
+If no pong is received within `HEARTBEAT_TIMEOUT_MS` (default 70 s —
+approximately two missed pongs, configurable via the environment variable of the
+same name), the server treats the connection as dead: the socket is terminated
+and the session is marked as dropped. The client may attempt to resume via
+`POST /session/{id}/resume` within the recovery window.
+
+The 70 s default is deliberately longer than the worst-case evaluation window
+(`clip_ended` → `clip_selected`) so that a brief PAUSED state does not trigger
+a false timeout. If you lower `HEARTBEAT_INTERVAL_MS` significantly, also lower
+`HEARTBEAT_TIMEOUT_MS` proportionally (keep the ratio at approximately 2.3×).
+
+#### Application-level heartbeat during feedback generation
+
+While the App container is streaming feedback from Ollama, it sends an
+application-level `heartbeat` message between `feedback_token` messages to
+confirm the LLM is still active. This message is sent only if no token has been
+forwarded in the last `HEARTBEAT_INTERVAL_MS`.
 
 ```json
 {
-    "type": "debug_eval",
+    "type": "heartbeat",
     "session_id": "string",
-    "window_id": "string  // '{session_id}:{clip_sequence}'",
-
-    "capture": {
-        "frame_count": "integer  // VideoFrame messages received for this clip",
-        "audio_chunk_count": "integer  // AudioChunk messages received for this clip",
-        "word_timing_count": "integer  // word timing entries forwarded to Evaluation",
-        "eval_fallback": "boolean  // true if the neutral fallback score was used (Evaluation returned non-2xx or was unreachable)",
-        "eval_latency_ms": "integer  // round-trip time for the POST /evaluate/analyse call, in milliseconds"
-    },
-
-    "transcript": {
-        "final_text": "string  // complete accumulated transcript for the clip",
-        "words": [
-            {
-                "word": "string",
-                "start": "float  // seconds from clip start",
-                "end": "float  // seconds from clip start"
-            }
-        ]
-    },
-
-    "result": {
-        "window_id": "string",
-        "session_id": "string",
-        "escalation_score": "float",
-        "dominant_emotion": "string",
-        "confidence": "float",
-        "signal_summary": {
-            "vocal_tension": "float",
-            "speech_pace": "float",
-            "gesture_activity": "float",
-            "open_gesture_ratio": "float | null",
-            "head_nod_frequency": "float",
-            "facing_ratio": "float",
-            "silence_ratio": "float",
-            "lexical_markers": ["string"],
-            "response_tone": "string",
-            "notable_signals": ["string"]
-        }
-    },
-
-    "analyser_id": "string  // e.g. 'stub' or 'production'; identifies the BehaviourAnalyser implementation",
-    "stages": "object | null  // implementation-specific intermediate data; shape is determined by analyser_id"
+    "status": "string  // 'feedback_generating' | 'ok'"
 }
 ```
 
-### `stages` field
+| `status`                | Meaning                                                      |
+|-------------------------|--------------------------------------------------------------|
+| `"feedback_generating"` | Ollama is still producing output; the stream has not stalled |
+| `"ok"`                  | General keepalive (reserved for future use in other states)  |
 
-`stages` contains intermediate data from the Evaluation container's analysis
-pipeline. Its shape varies by `analyser_id`. Clients must use `analyser_id` to
-determine how to interpret `stages`. If a client encounters an `analyser_id` it
-does not recognise, it must treat `stages` as an opaque object — it may log or
-display it raw but must not attempt to parse or render it against a known schema.
-New implementation IDs may be introduced in future without a protocol version bump.
+The `heartbeat` message is a **transport-layer signal** and is filtered out of
+the application message stream in `WebSocketTransport` before reaching
+`SessionHandler` or any application callback. Client code that processes
+`ServerMessage` values will never see a `heartbeat` message — only the dedicated
+`onHeartbeat` callback on `TransportInterface` receives it. This means the
+`heartbeat` message does not appear in `shared/types.ts`'s `ServerMessage` union.
 
-The `stages` field may be large. When the production analyser is active it can
-include per-word timing arrays, scored signal sets, and multi-stage floating-point
-outputs. Clients should not assume the field is small or that it can be rendered
-inline without truncation.
-
-#### `stages` for `analyser_id: "stub"`
-
-The stub analyser has no meaningful intermediate stages. It returns a minimal
-object confirming that the debug path itself is functioning.
-
-```json
-{
-    "note": "string  // always 'stub analyser — no intermediate stage data available'"
-}
-```
-
-#### `stages` for `analyser_id: "production"`
-
-Reflects the four-stage pipeline described in `architecture.md`. All four stage
-keys are always present; individual fields within a stage may be absent if that
-stage could not run (e.g. empty MFCC input, no speech detected).
-
-```json
-{
-    "stage_a_audio_emotion": {
-        "audio_emotion_label": "string  // raw label from the audio emotion classifier",
-        "arousal": "float  // 0.0 (low) to 1.0 (high)",
-        "valence": "float  // -1.0 (negative) to 1.0 (positive)",
-        "energy_var_norm": "float  // normalised MFCC energy variance across the clip; input to vocal_tension alongside arousal"
-    },
-    "stage_b_landmark_features": {
-        "hands_detected_ratio": "float  // fraction of frames where at least one hand landmark array was non-empty",
-        "gesture_activity": "float  // variance of wrist and fingertip displacement vectors",
-        "facing_frame_count": "integer  // number of frames where the face was estimated to be forward-facing",
-        "total_frame_count": "integer  // total frames processed in Stage B",
-        "nod_fft_peak_hz": "float  // frequency of the dominant peak in the head Y-coordinate oscillation spectrum"
-    },
-    "stage_c_transcript_features": {
-        "speech_duration_s": "float  // cumulative speech duration derived from word timing boundaries",
-        "silence_duration_s": "float  // clip_duration_seconds minus speech_duration_s",
-        "word_count": "integer",
-        "syllable_count": "integer  // estimated syllable count used for speech_pace",
-        "sentiment_raw_label": "string  // raw label from the sentiment classifier, e.g. 'POSITIVE', 'NEGATIVE', 'NEUTRAL'",
-        "sentiment_raw_score": "float  // classifier confidence for sentiment_raw_label"
-    },
-    "scorer": {
-        "detected_signals": ["string  // signal names from the rubric vocabulary that were detected as active for this clip"],
-        "de_score": "float  // weighted sum of detected de-escalation signals before normalisation",
-        "esc_score": "float  // weighted sum of detected escalation signals before normalisation",
-        "de_weight_total": "float  // sum of all de_escalation_rubric weights for this clip",
-        "esc_weight_total": "float  // sum of all escalation_rubric weights for this clip",
-        "raw_score_pre_clamp": "float  // normalised escalation_score before score_range clamping is applied"
-    }
-}
-```
+The client can use `heartbeat` events to:
+- Display a "Generating feedback…" progress indicator that confirms the server
+  is still working, rather than showing a frozen spinner.
+- Track the timestamp of the last received heartbeat to detect stale connections
+  in the UI (exposed as `lastHeartbeat` and `heartbeatStatus` in `useSession`).
