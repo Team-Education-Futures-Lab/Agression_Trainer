@@ -4,12 +4,11 @@
 scenarios/**/*.mp4   filter=lfs diff=lfs merge=lfs -text
 scenarios/**/*.mov   filter=lfs diff=lfs merge=lfs -text
 scenarios/**/*.webm  filter=lfs diff=lfs merge=lfs -text
-
 # ── Line endings ───────────────────────────────────────────────────────────
 # Normalise line endings to LF on commit across all platforms.
 * text=auto eol=lf
-
 # Binary files — never diff or merge these.
 *.pkl    binary
 *.pt     binary
 *.onnx   binary
+*.mp4 filter=lfs diff=lfs merge=lfs -text
