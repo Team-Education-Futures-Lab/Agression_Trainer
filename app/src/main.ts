@@ -17,6 +17,7 @@ import { ClipController } from "./clip-controller.js";
 import { UserStore } from "./auth/user-store.js";
 import { AuthService } from "./auth/auth-service.js";
 import { authRoutes } from "./auth/auth-routes.js";
+import { devRoutes } from "./auth/dev-routes.js";
 import argon2 from "argon2";
 import type { CreateSessionRequest, ClientMessage } from "@ar-training/shared";
 
@@ -100,6 +101,18 @@ await app.register(multipart, {
 await app.register(authRoutes, {
     authService,
     allowRegistration: config.allowRegistration,
+});
+
+// ── Dev-tools routes ──────────────────────────────────────────────────────────
+//
+// All /auth/dev/* endpoints return 403 unless devToolsEnabled is true.
+// These endpoints are always registered (so the server returns a clear 403
+// rather than 404 if DEV_TOOLS_ENABLED is accidentally left unset), but they
+// perform no database operations unless explicitly enabled.
+
+await app.register(devRoutes, {
+    userStore,
+    devToolsEnabled: config.devToolsEnabled,
 });
 
 // ─── Health ───────────────────────────────────────────────────────────────────

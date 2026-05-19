@@ -1,3 +1,9 @@
+# ─── Developer tools ──────────────────────────────────────────────────────────
+# To enable unauthenticated database management endpoints for development, run:
+#   docker compose --profile devtools up
+# WARNING: Never use the devtools profile in a production or shared deployment.
+# ──────────────────────────────────────────────────────────────────────────────
+
 services:
 
   # ── Client ──────────────────────────────────────────────────────────────────
@@ -46,6 +52,22 @@ services:
       # rather than failing the session. The App must start even if feedback
       # is down.
     restart: unless-stopped
+
+  # ── App (dev tools override) ─────────────────────────────────────────────────
+  # Only active when started with: docker compose --profile devtools up
+  # Extends the base app service and adds DEV_TOOLS_ENABLED=true.
+  # WARNING: Never use this profile in a production or shared deployment.
+  app-devtools:
+    extends:
+      service: app
+    environment:
+      EVALUATION_URL:    http://evaluation:8001
+      FEEDBACK_URL:      http://feedback:8002
+      TRANSCRIPTION_URL: http://transcription:8003
+      DATA_DIR:          /app/data
+      DEV_TOOLS_ENABLED: "true"
+    profiles:
+      - devtools
 
   # ── Transcription ────────────────────────────────────────────────────────────
   transcription:

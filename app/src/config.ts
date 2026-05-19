@@ -104,6 +104,16 @@ export interface AppConfig {
      */
     bootstrapAdminPassword:     string | undefined;
 
+    /**
+     * When true, the /auth/dev/* endpoints are active.
+     * These endpoints perform unauthenticated database operations and MUST
+     * NOT be enabled in production deployments.
+     *
+     * Set via DEV_TOOLS_ENABLED=true in the App container's .env.
+     * Default: false.
+     */
+    devToolsEnabled: boolean;
+
     coordinator:        CoordinatorConfig;
     sessionManager:     SessionManagerConfig;
 }
@@ -126,6 +136,14 @@ export function loadConfig(): AppConfig {
     const bootstrapUsername = process.env["BOOTSTRAP_ADMIN_USERNAME"] || undefined;
     const bootstrapPassword = process.env["BOOTSTRAP_ADMIN_PASSWORD"] || undefined;
 
+    const devToolsEnabled = boolEnv("DEV_TOOLS_ENABLED", false);
+    if (devToolsEnabled) {
+        process.stderr.write(
+            "[WARN] DEV_TOOLS_ENABLED=true — unauthenticated database endpoints are active (/auth/dev/*).\n" +
+            "       This setting must NEVER be used in production deployments.\n"
+        );
+    }
+
     return {
         port:                intEnv("PORT", 3000),
         evaluationUrls,
@@ -144,6 +162,8 @@ export function loadConfig(): AppConfig {
         allowRegistration:          boolEnv("ALLOW_REGISTRATION", false),
         bootstrapAdminUsername:     bootstrapUsername,
         bootstrapAdminPassword:     bootstrapPassword,
+
+        devToolsEnabled,
 
         coordinator: {
             evaluationUrls,

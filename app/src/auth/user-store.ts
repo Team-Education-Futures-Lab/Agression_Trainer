@@ -23,6 +23,15 @@ export interface User {
     created_at:    string;
 }
 
+/**
+ * A non-expired token blocklist entry.
+ * Returned by listBlocklistEntries() for dev tooling only.
+ */
+export interface BlocklistEntry {
+    jti:        string;
+    expires_at: string;
+}
+
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
 export class UserExistsError extends Error {
@@ -50,16 +59,16 @@ export class UserStore {
     private _runMigrations(): void {
         this.db.exec(`
             CREATE TABLE IF NOT EXISTS users (
-                user_id       TEXT PRIMARY KEY,
-                username      TEXT UNIQUE NOT NULL,
-                password_hash TEXT NOT NULL,
-                role          TEXT NOT NULL CHECK(role IN ('student', 'admin')),
+                                                 user_id       TEXT PRIMARY KEY,
+                                                 username      TEXT UNIQUE NOT NULL,
+                                                 password_hash TEXT NOT NULL,
+                                                 role          TEXT NOT NULL CHECK(role IN ('student', 'admin')),
                 created_at    TEXT NOT NULL DEFAULT (datetime('now'))
-            );
+                );
 
             CREATE TABLE IF NOT EXISTS token_blocklist (
-                jti        TEXT PRIMARY KEY,
-                expires_at TEXT NOT NULL
+                                                           jti        TEXT PRIMARY KEY,
+                                                           expires_at TEXT NOT NULL
             );
         `);
     }
@@ -177,5 +186,49 @@ export class UserStore {
             DELETE FROM token_blocklist WHERE expires_at < datetime('now')
         `);
         stmt.run();
+    }
+
+    // ── Dev-tools-only methods ────────────────────────────────────────────────
+    //
+    // These methods perform destructive bulk operations on the database and
+    // MUST ONLY be called from dev-routes.ts. They must never be called from
+    // any production code path.
+
+    /**
+     * Deletes all rows from the users table.
+     * Returns the number of rows deleted.
+     *
+     * @devOnly — MUST ONLY be called from dev-routes.ts.
+     */
+    deleteAllUsers(): number {
+        const result = this.db.prepare(`DELETE FROM users`).run();
+        return result.changes;
+    }
+
+    /**
+     * Deletes all rows from the token_blocklist table.
+     * Returns the number of rows deleted.
+     *
+     * @devOnly — MUST ONLY be called from dev-routes.ts.
+     */
+    deleteAllTokens(): number {
+        const result = this.db.prepare(`DELETE FROM token_blocklist`).run();
+        return result.changes;
+    }
+
+    /**
+     * Returns all non-expired token blocklist entries, ordered by expiry time.
+     * Used by GET /auth/dev/tokens for development inspection only.
+     *
+     * @devOnly — MUST ONLY be called from dev-routes.ts.
+     */
+    listBlocklistEntries(): BlocklistEntry[] {
+        const stmt = this.db.prepare<[], BlocklistEntry>(`
+            SELECT jti, expires_at
+            FROM token_blocklist
+            WHERE expires_at > datetime('now')
+            ORDER BY expires_at ASC
+        `);
+        return stmt.all();
     }
 }
