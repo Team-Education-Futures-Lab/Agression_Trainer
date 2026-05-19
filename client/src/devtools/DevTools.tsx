@@ -734,7 +734,7 @@ function DangerPanel({ serverUrl, onRefresh }: { serverUrl: string; onRefresh: (
 
 export function DevTools() {
     const [serverUrl, setServerUrl] = useState<string>(
-        () => sessionStorage.getItem("ar_devtools_server_url") ?? ""
+        () => sessionStorage.getItem("ar_devtools_server_url") ?? "http://localhost:3001"
     );
     const [refreshKey, setRefreshKey] = useState(0);
 
@@ -782,15 +782,10 @@ export function DevTools() {
 
             {/* ── Panels ── */}
             <div style={st.body}>
-                {!serverUrl.trim() && (
-                    <div style={{ ...st.hint, padding: "12px 0" }}>
-                        Enter the App container URL above to begin (e.g. <code>http://localhost:3001</code>).
-                    </div>
-                )}
 
-                <UsersPanel key={`users-${refreshKey}`} serverUrl={serverUrl} onRefresh={refresh} />
-                <TokensPanel key={`tokens-${refreshKey}`} serverUrl={serverUrl} />
-                <DangerPanel key={`danger-${refreshKey}`} serverUrl={serverUrl} onRefresh={refresh} />
+                <UsersPanel key={`users-${refreshKey}-${serverUrl}`} serverUrl={serverUrl} onRefresh={refresh} />
+                <TokensPanel key={`tokens-${refreshKey}-${serverUrl}`} serverUrl={serverUrl} />
+                <DangerPanel key={`danger-${refreshKey}-${serverUrl}`} serverUrl={serverUrl} onRefresh={refresh} />
             </div>
         </div>
     );
