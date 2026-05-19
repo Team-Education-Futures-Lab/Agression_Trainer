@@ -62,7 +62,7 @@ export class AuthService {
 
         this.verifier = createVerifier({
             key:       jwtSecret,
-            algorithm: ["HS256"],
+            algorithms: ["HS256"],
         }) as (token: string) => TokenPayload;
     }
 

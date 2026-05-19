@@ -29,7 +29,7 @@ export const devRoutes: FastifyPluginAsync<{
 
     // ── GET /auth/dev/users ───────────────────────────────────────────────────
 
-    fastify.get("/auth/dev/users", async (req, reply) => {
+    fastify.get("/auth/dev/users", async (_req, reply) => {
         if (!devToolsEnabled) {
             return reply.code(403).send({
                 error:   "dev_tools_disabled",
@@ -128,7 +128,7 @@ export const devRoutes: FastifyPluginAsync<{
     // The App container must be restarted (or bootstrap credentials set) to
     // re-create the first admin account after a reset.
 
-    fastify.post("/auth/dev/reset", async (req, reply) => {
+    fastify.post("/auth/dev/reset", async (_req, reply) => {
         if (!devToolsEnabled) {
             return reply.code(403).send({
                 error:   "dev_tools_disabled",
@@ -156,7 +156,7 @@ export const devRoutes: FastifyPluginAsync<{
     // Lists non-expired token blocklist entries. Useful for verifying that
     // logout correctly populates the blocklist.
 
-    fastify.get("/auth/dev/tokens", async (req, reply) => {
+    fastify.get("/auth/dev/tokens", async (_req, reply) => {
         if (!devToolsEnabled) {
             return reply.code(403).send({
                 error:   "dev_tools_disabled",

@@ -13,7 +13,10 @@ RUN test -f /app/shared/types.ts && test -f /app/shared/package.json || \
 
 RUN npm ci
 
-RUN npm run build
+# VITE_DEV_TOOLS is a build-time arg. When true, the devtools page is compiled
+# into the output. Must never be set to true in production builds.
+ARG VITE_DEV_TOOLS=false
+RUN VITE_DEV_TOOLS=${VITE_DEV_TOOLS} npm run build
 
 # ── Stage 2: Serve ────────────────────────────────────────────────────────────
 FROM nginx:alpine AS runtime

@@ -7,17 +7,35 @@
 services:
 
   # ── Client ──────────────────────────────────────────────────────────────────
+  # Active on: docker compose up  (default profile)
+  # Not active on: docker compose --profile devtools up
   client:
     build:
       context: .
       dockerfile: client/Dockerfile
     volumes:
-      # Mount the scenarios directory so Nginx can serve video files at
-      # /scenarios/{scenario_id}/{file}. Read-only — the client never writes.
       - ./scenarios:/usr/share/nginx/html/scenarios:ro
     ports:
       - "3000:80"
+    profiles:
+      - default
     restart: unless-stopped
+
+  # ── Client (dev tools) ───────────────────────────────────────────────────────
+  # Active on: docker compose --profile devtools up
+  # Not active on: docker compose up
+  # Extends client — only overrides build.args and profiles.
+  # The VITE_DEV_TOOLS build arg causes the devtools page to be compiled in.
+  # WARNING: Never use this profile in a production or shared deployment.
+  client-devtools:
+    extends:
+      service: client
+    build:
+      args:
+        VITE_DEV_TOOLS: "true"
+    profiles:
+      - devtools
+
 
   # ── App ─────────────────────────────────────────────────────────────────────
   app:
@@ -52,6 +70,8 @@ services:
       # rather than failing the session. The App must start even if feedback
       # is down.
     restart: unless-stopped
+    profiles:
+      - default
 
   # ── App (dev tools override) ─────────────────────────────────────────────────
   # Only active when started with: docker compose --profile devtools up
