@@ -179,6 +179,24 @@ The client should display an appropriate message and allow the user to retry.
 
 ---
 
+## Admin Sessions and Clip Activation
+
+In normal mode, `request_clip { activate: true }` is only accepted when the
+`clip_id` matches the scenario's entry clip. This prevents a student from
+skipping to an arbitrary point in a scenario.
+
+**Admin sessions** bypass this restriction — any clip in the scenario can be
+activated. An admin session is created by passing `Authorization: Bearer <jwt>`
+on `POST /session/create`, where the JWT belongs to an account with `role: "admin"`.
+See `auth.md` for how to obtain an admin JWT, and `admin_and_tooling_api.md` for
+the full admin session mechanics.
+
+On a resumed session, any clip within the already-bound scenario is valid
+regardless of admin status — the scenario is already locked in, so there is no
+entry-clip restriction to enforce.
+
+---
+
 ## Clip Score Calculation
 
 The `escalation_score` used for branching at the end of each clip is the

@@ -22,7 +22,8 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true,
     "verbatimModuleSyntax": true,
-    "moduleDetection": "force"
+    "moduleDetection": "force",
+      "allowSyntheticDefaultImports": true
   },
   "include": ["src"]
 }

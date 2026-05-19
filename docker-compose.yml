@@ -23,8 +23,16 @@ services:
       EVALUATION_URL:    http://evaluation:8001
       FEEDBACK_URL:      http://feedback:8002
       TRANSCRIPTION_URL: http://transcription:8003
+      # DATA_DIR is set here as a compose-level default. It can be overridden
+      # in app/.env if you want the database in a different location inside the
+      # container. Must match the target of the data bind mount below.
+      DATA_DIR:          /app/data
     volumes:
       - ./scenarios:/app/scenarios:ro
+      # Persist the auth database (auth.db) across container recreations.
+      # The ./data directory is created automatically by Docker Compose if absent.
+      # Do NOT mount this read-only — the App container writes to auth.db.
+      - ./data:/app/data
     ports:
       - "3001:3000"
     depends_on:
@@ -63,9 +71,6 @@ services:
     env_file: evaluation/.env
     volumes:
       # Persist the HuggingFace model cache across container recreations.
-      # On first start the sentiment model is downloaded during warm_up().
-      # Subsequent starts load from disk in a few seconds.
-      # Remove this volume mount if you prefer a clean download on every start.
       - ./models/hf_cache:/root/.cache/huggingface
     expose:
       - "8001"
@@ -74,10 +79,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
-      # The healthcheck passes immediately after uvicorn starts because
-      # warm_up() runs in the background. start_period only needs to cover
-      # the time for uvicorn itself to bind — a few seconds at most.
-      # The generous window here is a safety margin for slow hosts.
       start_period: 30s
     restart: unless-stopped
 
@@ -94,10 +95,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
-      # Ollama model loading can take up to 60 s on first start.
-      # In stub mode this is irrelevant, but the same compose file is used
-      # for production so a generous start_period avoids false-negative
-      # healthcheck failures during model warm-up.
       start_period: 60s
     restart: unless-stopped
 
@@ -105,10 +102,6 @@ services:
   ollama:
     image: ollama/ollama
     volumes:
-      # Bind-mount the repo's models/ directory to Ollama's default storage
-      # path so pulled models are visible on the host and survive container
-      # recreation without needing a separate Docker volume.
-      # Pull models with: docker compose exec ollama ollama pull llama3.2
       - ./models:/root/.ollama
     expose:
       - "11434"

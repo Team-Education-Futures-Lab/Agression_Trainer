@@ -57,6 +57,10 @@ export interface SessionHandlerCallbacks {
     onHeartbeat?:         (status: string) => void;
 }
 
+// Export the HTTP base so other modules (e.g. SessionPanel) can call auth
+// endpoints against the same server without duplicating the env-var logic.
+export { HTTP_BASE };
+
 // ─── SessionHandler ───────────────────────────────────────────────────────────
 
 export class SessionHandler {
@@ -68,7 +72,7 @@ export class SessionHandler {
     private sessionId: string | null = null;
     private transport: TransportInterface | null = null;
 
-    // Whether the session was created with an admin API key.
+    // Whether the session was created with an admin JWT.
     private _isAdmin = false;
 
     // Set to true by disconnect() so subsequent WebSocket close events are ignored.
@@ -98,13 +102,17 @@ export class SessionHandler {
      * the handler enters the queued state and waits for session_ready over the
      * WebSocket rather than polling.
      *
-     * When `adminKey` is provided it is sent as `Authorization: Bearer <key>`
-     * on the POST /session/create request. The resulting session is an admin
-     * session: any clip can be activated, and the server sends `debug_eval`
-     * messages after each `clip_selected`. When empty/undefined the request
-     * is unauthenticated and a normal session is created.
+     * When `authToken` is provided it is sent as `Authorization: Bearer <token>`
+     * on the POST /session/create request. If the token belongs to an admin
+     * account, the resulting session is an admin session: any clip can be
+     * activated, and the server sends `debug_eval` messages after each
+     * `clip_selected`. When empty/undefined the request is unauthenticated
+     * and a normal student session is created.
+     *
+     * Obtain a token by calling POST /auth/login with admin credentials before
+     * calling connect().
      */
-    async connect(userId = "dev-user", language = "nl", adminKey?: string): Promise<void> {
+    async connect(userId = "dev-user", language = "nl", authToken?: string): Promise<void> {
         if (this._state !== "idle") return;
 
         this._clean   = false;
@@ -118,7 +126,7 @@ export class SessionHandler {
 
         try {
             const headers: Record<string, string> = { "Content-Type": "application/json" };
-            if (adminKey) headers["Authorization"] = `Bearer ${adminKey}`;
+            if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
 
             const res = await fetch(`${HTTP_BASE}/session/create`, {
                 method:  "POST",
@@ -148,8 +156,12 @@ export class SessionHandler {
             wsPath        = body.ws_path;
             queuePosition = body.queue_position;
 
-            // Record admin mode if a key was provided and the session was accepted.
-            if (adminKey) this._isAdmin = true;
+            // Record admin mode if a token was provided and the session was accepted.
+            // The server is the authoritative source — if the token's role is not
+            // admin the session will simply be a non-admin session, which is fine.
+            // The _isAdmin flag is also set reactively when the first debug_eval
+            // message arrives (belt-and-suspenders in useSession).
+            if (authToken) this._isAdmin = true;
         } catch (e) {
             this._setState("error");
             this.callbacks.onError(new Error(`Session create error: ${String(e)}`));

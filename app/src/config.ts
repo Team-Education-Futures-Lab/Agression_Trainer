@@ -1,4 +1,5 @@
 import type { SessionManagerConfig, CoordinatorConfig } from "./types.js";
+import { join } from "node:path";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -25,13 +26,17 @@ function enumEnv<T extends string>(key: string, allowed: T[], fallback: T): T {
     return val as T;
 }
 
+function boolEnv(key: string, fallback: boolean): boolean {
+    const val = process.env[key];
+    if (!val) return fallback;
+    if (val === "true" || val === "1")  return true;
+    if (val === "false" || val === "0") return false;
+    throw new Error(`Environment variable ${key} must be true/false/1/0, got: "${val}"`);
+}
+
 function secretEnv(key: string, knownBadValue: string = "CHANGE_ME"): string {
     const value = requireEnv(key);
     if (value === knownBadValue) {
-        // Use the structured logger-compatible approach: log after Fastify
-        // bootstraps. For config-time warnings (before Fastify starts) we
-        // have no choice but to write to stderr directly. The key itself is
-        // never included in the message.
         process.stderr.write(
             `[WARN] ${key} is set to the default placeholder value. ` +
             "Generate a secure key with: openssl rand -hex 32\n"
@@ -59,34 +64,46 @@ export interface AppConfig {
      * Allowed CORS origin for HTTP endpoints.
      * `true`   — reflect any origin (default; correct for single-server classroom use).
      * `string` — restrict to this exact origin (e.g. "http://localhost:3000").
-     * Set via CORS_ORIGIN environment variable.
      */
     corsOrigin:         string | true;
-    /**
-     * Timeout in ms for the full feedback SSE stream from the Feedback container.
-     * Should be set slightly above the Feedback container's OLLAMA_TIMEOUT_MS
-     * to allow Ollama to finish and the container to write the final SSE event.
-     * Default: 150 000 ms (150 s).
-     */
     feedbackTimeoutMs:  number;
-    /**
-     * How often the server sends a WebSocket protocol-level ping to each
-     * connected client (ms). Also used as the interval for application-level
-     * heartbeat messages during feedback generation.
-     * Default: 30 000 ms (30 s).
-     */
     heartbeatIntervalMs: number;
-    /**
-     * How long after the last received pong the server will wait before
-     * treating the connection as dead, terminating the socket, and marking
-     * the session as dropped (ms).
-     * Should be slightly more than 2× heartbeatIntervalMs so that two
-     * consecutive missed pongs (e.g. during a brief network blip) do not
-     * immediately kill the session, but a fully silent connection is detected
-     * within a reasonable window.
-     * Default: 70 000 ms (70 s ≈ 2.3 × 30 s).
-     */
     heartbeatTimeoutMs:  number;
+
+    // ── Authentication ────────────────────────────────────────────────────────
+
+    /**
+     * Secret used to sign and verify JWTs. Required. Generate with:
+     *   openssl rand -hex 32
+     */
+    jwtSecret:                  string;
+    /**
+     * JWT expiry duration in shorthand notation, e.g. "8h", "30m", "1d".
+     * Default: "8h" (a school day).
+     */
+    jwtExpiry:                  string;
+    /**
+     * Path to the SQLite database file for user accounts and token blocklist.
+     * Constructed as `join(DATA_DIR, "auth.db")`. DATA_DIR must be a
+     * bind-mounted directory that persists across container recreations.
+     */
+    dbPath:                     string;
+    /**
+     * When true, POST /auth/register is open. Default false.
+     * Set to true only in development — in production, admins create accounts.
+     */
+    allowRegistration:          boolean;
+    /**
+     * Bootstrap admin username. Used only when the users table is empty and
+     * both bootstrap vars are set. Ignored once any user exists.
+     */
+    bootstrapAdminUsername:     string | undefined;
+    /**
+     * Bootstrap admin password. Must be at least 8 characters.
+     * Ignored once any user exists in the database.
+     */
+    bootstrapAdminPassword:     string | undefined;
+
     coordinator:        CoordinatorConfig;
     sessionManager:     SessionManagerConfig;
 }
@@ -96,10 +113,18 @@ export function loadConfig(): AppConfig {
     const evaluationUrls    = parseStringList("EVALUATION_URL");
     const transcriptionUrls = parseStringList("TRANSCRIPTION_URL");
 
-    // CORS_ORIGIN: if unset, default to true (allow any origin).
-    // If set, use the provided string as the exact allowed origin.
     const corsOriginEnv = process.env["CORS_ORIGIN"];
     const corsOrigin: string | true = corsOriginEnv ? corsOriginEnv : true;
+
+    // DATA_DIR is required; dbPath is derived from it.
+    const dataDir = requireEnv("DATA_DIR");
+    const dbPath  = join(dataDir, "auth.db");
+
+    // JWT_SECRET is required; warn if it's the placeholder.
+    const jwtSecret = secretEnv("JWT_SECRET", "CHANGE_ME");
+
+    const bootstrapUsername = process.env["BOOTSTRAP_ADMIN_USERNAME"] || undefined;
+    const bootstrapPassword = process.env["BOOTSTRAP_ADMIN_PASSWORD"] || undefined;
 
     return {
         port:                intEnv("PORT", 3000),
@@ -112,6 +137,14 @@ export function loadConfig(): AppConfig {
         feedbackTimeoutMs:   intEnv("FEEDBACK_TIMEOUT_MS",    150_000),
         heartbeatIntervalMs: intEnv("HEARTBEAT_INTERVAL_MS",   30_000),
         heartbeatTimeoutMs:  intEnv("HEARTBEAT_TIMEOUT_MS",    70_000),
+
+        jwtSecret,
+        jwtExpiry:                  process.env["JWT_EXPIRY"] || "8h",
+        dbPath,
+        allowRegistration:          boolEnv("ALLOW_REGISTRATION", false),
+        bootstrapAdminUsername:     bootstrapUsername,
+        bootstrapAdminPassword:     bootstrapPassword,
+
         coordinator: {
             evaluationUrls,
             transcriptionUrls,
@@ -123,7 +156,8 @@ export function loadConfig(): AppConfig {
             capacityPolicy:   enumEnv("CAPACITY_POLICY",  ["QUEUE", "REJECT"], "QUEUE"),
             sessionTimeoutMs: intEnv("SESSION_TIMEOUT_MS", 30_000),
             recoveryWindowMs: intEnv("RECOVERY_WINDOW_MS", 30_000),
-            // Optional — if unset, admin mode is permanently unavailable.
+            // ADMIN_API_KEY is retained as a backwards-compatible fallback for
+            // POST /scenarios tooling. Optional — if unset, only JWT auth is available.
             adminApiKey:      process.env["ADMIN_API_KEY"] || undefined,
         },
     };

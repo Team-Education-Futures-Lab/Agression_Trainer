@@ -5,6 +5,8 @@ import websocketPlugin from "@fastify/websocket";
 import cors from "@fastify/cors";
 // noinspection TypeScriptCheckImport
 import multipart from "@fastify/multipart";
+// noinspection TypeScriptCheckImport
+import fastifyJwt from "@fastify/jwt";
 import { loadConfig } from "./config.js";
 import { SessionManager } from "./session-manager.js";
 import { Coordinator } from "./coordinator.js";
@@ -12,6 +14,10 @@ import { FileScenarioLoader, ScenarioExistsError } from "./scenario-loader.js";
 import type { RawScenario } from "./scenario-loader.js";
 import { FeedbackClient } from "./feedback-client.js";
 import { ClipController } from "./clip-controller.js";
+import { UserStore } from "./auth/user-store.js";
+import { AuthService } from "./auth/auth-service.js";
+import { authRoutes } from "./auth/auth-routes.js";
+import argon2 from "argon2";
 import type { CreateSessionRequest, ClientMessage } from "@ar-training/shared";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
@@ -20,10 +26,56 @@ const config        = loadConfig();
 const app           = Fastify({
     logger: {
         // Redact the Authorization header from all request/response logs so
-        // INTERNAL_API_KEY and ADMIN_API_KEY never appear in log output.
+        // INTERNAL_API_KEY, ADMIN_API_KEY, and user JWTs never appear in logs.
         redact: ["req.headers.authorization"],
     },
 });
+
+// ── Auth setup ────────────────────────────────────────────────────────────────
+
+const userStore    = new UserStore(config.dbPath);
+const authService  = new AuthService(userStore, config.jwtSecret, config.jwtExpiry);
+
+// Register @fastify/jwt on the instance for route-level use if needed in future.
+// The AuthService uses fast-jwt directly for standalone token operations so that
+// tokens can be issued and verified outside a request context.
+await app.register(fastifyJwt, { secret: config.jwtSecret });
+
+// ── Token blocklist maintenance ───────────────────────────────────────────────
+
+// Prune expired tokens on startup, then every 24 hours. Runs synchronously via
+// better-sqlite3's synchronous API — fast for small tables, does not block the
+// event loop in any meaningful way.
+userStore.pruneExpiredTokens();
+setInterval(() => userStore.pruneExpiredTokens(), 24 * 60 * 60 * 1000);
+
+// ── Bootstrap admin account ───────────────────────────────────────────────────
+
+if (config.bootstrapAdminUsername && config.bootstrapAdminPassword) {
+    const password = config.bootstrapAdminPassword;
+    if (password.length < 8) {
+        process.stderr.write(
+            "[WARN] BOOTSTRAP_ADMIN_PASSWORD is too short (minimum 8 characters). Bootstrap skipped.\n"
+        );
+    } else {
+        const passwordHash = await argon2.hash(password);
+        userStore.bootstrapAdminIfEmpty(config.bootstrapAdminUsername, passwordHash);
+
+        // If bootstrap ran (users table was empty), warn about changing the credentials.
+        // We detect this by checking if the bootstrap user now exists.
+        const bootstrappedUser = userStore.findByUsername(config.bootstrapAdminUsername);
+        if (bootstrappedUser) {
+            process.stderr.write(
+                `[WARN] Bootstrap admin account "${config.bootstrapAdminUsername}" created. ` +
+                "Change this password and unset BOOTSTRAP_ADMIN_USERNAME / BOOTSTRAP_ADMIN_PASSWORD " +
+                "from your .env file after logging in for the first time.\n"
+            );
+        }
+    }
+}
+
+// ── Core services ─────────────────────────────────────────────────────────────
+
 const sessions      = new SessionManager(config.sessionManager);
 const coord         = new Coordinator(config.coordinator);
 const scenarios     = new FileScenarioLoader(config.scenariosDir);
@@ -35,17 +87,23 @@ const feedback      = new FeedbackClient(
 );
 const controller    = new ClipController(sessions, coord, scenarios, feedback);
 
+// ── Fastify plugins ───────────────────────────────────────────────────────────
+
 await app.register(websocketPlugin);
 await app.register(cors, { origin: config.corsOrigin });
 await app.register(multipart, {
-    // Maximum size per individual file part (500 MB).
     limits: { fileSize: 500 * 1024 * 1024 },
+});
+
+// ── Auth routes ───────────────────────────────────────────────────────────────
+
+await app.register(authRoutes, {
+    authService,
+    allowRegistration: config.allowRegistration,
 });
 
 // ─── Health ───────────────────────────────────────────────────────────────────
 
-// Timeout for individual backend health-check fetches. Short enough that a
-// single hanging service does not stall the overall health response.
 const HEALTH_CHECK_TIMEOUT_MS = 5_000;
 
 app.get("/health", async (_req, reply) => {
@@ -110,13 +168,26 @@ app.get("/health", async (_req, reply) => {
 app.post<{ Body: CreateSessionRequest }>("/session/create", async (req, reply) => {
     const { user_id, language } = req.body;
 
-    // Admin mode: check for a valid ADMIN_API_KEY in the Authorization header.
-    // Bearer token extraction — header is "Bearer <token>" or absent.
-    const authHeader = req.headers["authorization"] ?? "";
-    const token      = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
-    const isAdmin    = sessions.isAdminToken(token);
+    // Admin mode: accept a valid JWT with role "admin". Falls back to student
+    // session if the token is absent, invalid, or has a non-admin role.
+    // No error is returned for a missing or invalid token — sessions are public
+    // for students.
+    const authHeader   = req.headers["authorization"];
+    const tokenPayload = authService.extractAndVerify(authHeader);
+    const isAdmin      = tokenPayload?.role === "admin";
 
-    const result = sessions.createSession(user_id, language, isAdmin);
+    // When a verified JWT is present, use the authenticated user_id from the
+    // token rather than the client-supplied value.
+    const effectiveUserId = tokenPayload?.sub ?? user_id;
+
+    // Legacy fallback: if no JWT was present but ADMIN_API_KEY is configured
+    // and the header matches, honour the old mechanism. This preserves backwards
+    // compatibility for any tooling that still uses the static key.
+    const legacyAdmin = !tokenPayload && sessions.isAdminToken(
+        authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : undefined
+    );
+
+    const result = sessions.createSession(effectiveUserId, language, isAdmin || legacyAdmin);
 
     if (result.status === "at_capacity") {
         return reply.code(503).send({ error: "at_capacity", message: "Server is at capacity." });
@@ -200,43 +271,37 @@ app.get<{ Params: { scenario_id: string } }>("/scenarios/:scenario_id/clips", as
 /**
  * POST /scenarios
  *
- * Accepts a multipart/form-data upload containing:
- *   - A part named "metadata" with the scenario's JSON metadata as a string.
- *   - One binary file part per clip, named exactly as declared in the clip's
- *     "file" field in the metadata.
- *
- * Protected by ADMIN_API_KEY. Returns 501 if ADMIN_API_KEY is not configured.
- * The Authorization header is checked BEFORE consuming any multipart body to
- * prevent unauthenticated requests from streaming large payloads.
- *
- * Processing strategy: all parts are buffered (metadata as string, files as
- * Buffer), then metadata is parsed and validated, then registerScenario() is
- * called to write files and update the in-memory index atomically.
+ * Protected by admin JWT (primary) or ADMIN_API_KEY (backwards-compatible fallback).
+ * The auth check happens before consuming the multipart body to prevent
+ * unauthenticated requests from streaming large payloads.
  */
 app.post("/scenarios", async (req, reply) => {
-    const adminKey = config.sessionManager.adminApiKey;
-
-    // Check admin key availability before touching the request body.
-    if (!adminKey) {
-        return reply.code(501).send({
-            error:   "admin_unavailable",
-            message: "Admin key is not configured on this server. Set ADMIN_API_KEY to enable scenario upload.",
-        });
-    }
-
-    // Authenticate before consuming any multipart body.
     const authHeader = req.headers["authorization"] ?? "";
-    const token      = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-    if (token !== adminKey) {
+
+    // Primary: valid admin JWT.
+    const jwtPayload = authService.extractAndVerify(authHeader);
+    const jwtIsAdmin = jwtPayload?.role === "admin";
+
+    // Fallback: legacy ADMIN_API_KEY (for backwards-compatible tooling).
+    const legacyToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+    const legacyIsAdmin = !jwtPayload && !!config.sessionManager.adminApiKey && legacyToken === config.sessionManager.adminApiKey;
+
+    if (!jwtIsAdmin && !legacyIsAdmin) {
+        // If ADMIN_API_KEY is unset and no JWT admin, treat as admin unavailable
+        // only when neither mechanism is configured at all.
+        if (!config.sessionManager.adminApiKey && !config.jwtSecret) {
+            return reply.code(501).send({
+                error:   "admin_unavailable",
+                message: "Admin key is not configured on this server.",
+            });
+        }
         return reply.code(401).send({
             error:   "unauthorized",
-            message: "Missing or invalid admin key.",
+            message: "Missing or invalid admin credentials.",
         });
     }
 
-    // Collect all multipart parts.
-    // - "metadata" → JSON string
-    // - everything else → treated as a video file Buffer, keyed by fieldname
+    // Collect multipart parts.
     let metadataJson: string | null = null;
     const videoFiles = new Map<string, Buffer>();
 
@@ -246,7 +311,6 @@ app.post("/scenarios", async (req, reply) => {
             if (part.type === "field" && part.fieldname === "metadata") {
                 metadataJson = part.value as string;
             } else if (part.type === "file") {
-                // part.fieldname is the declared filename (e.g. "clip_01_intro.mp4")
                 const buf = await part.toBuffer();
                 videoFiles.set(part.fieldname, buf);
             }
@@ -259,7 +323,6 @@ app.post("/scenarios", async (req, reply) => {
         });
     }
 
-    // Parse metadata JSON.
     if (metadataJson === null) {
         return reply.code(400).send({
             error:   "validation_error",
@@ -277,7 +340,6 @@ app.post("/scenarios", async (req, reply) => {
         });
     }
 
-    // Register — validate, write disk, update maps.
     try {
         await scenarios.registerScenario(raw, videoFiles);
     } catch (err) {
@@ -306,40 +368,10 @@ app.post("/scenarios", async (req, reply) => {
 
 // ─── WebSocket handler ────────────────────────────────────────────────────────
 
-// Maximum raw WebSocket message size accepted from the client (bytes).
-// A legitimate video_frame with 478 face + 42 hand landmarks is ~15 KB as JSON.
-// A legitimate audio_chunk with 2 s of PCM at 16kHz is ~64 KB base64 + MFCCs.
-// 256 KB gives ample headroom for both while blocking obviously oversized payloads.
-const MAX_WS_MESSAGE_BYTES = 256 * 1024;
-
-// Rate limits for incoming WebSocket messages.
-// Applied as a fixed-window-per-second sliding rate limiter.
-// Messages above the limit are silently dropped — no error is sent to the client.
-//
-// Target rates: video_frame at 30 fps, audio_chunk at one per 2 s.
-// Limits are set at 2× the target to accommodate normal client-side jitter.
-// A well-behaved client operating at target rates will never hit these limits.
-//
-// The limits apply continuously for the lifetime of the WebSocket connection
-// and are not reset between clips. Clip length does not affect the limits.
+const MAX_WS_MESSAGE_BYTES        = 256 * 1024;
 const MAX_FRAMES_PER_SECOND       = 60;
 const MAX_AUDIO_CHUNKS_PER_SECOND = 1;
 
-// ─── Heartbeat constants ──────────────────────────────────────────────────────
-//
-// The server sends a WebSocket protocol-level ping to each client every
-// HEARTBEAT_INTERVAL_MS. Browsers respond automatically with a pong frame —
-// no application code is needed on the client side.
-//
-// If no pong is received within HEARTBEAT_TIMEOUT_MS (default ≈ 2.3 intervals),
-// the connection is treated as dead: the socket is terminated and the session
-// is marked dropped. The client may resume via POST /session/{id}/resume within
-// the recovery window.
-//
-// These values are read from config (populated from HEARTBEAT_INTERVAL_MS and
-// HEARTBEAT_TIMEOUT_MS environment variables) so operators can tune them without
-// rebuilding the image. The module-level constants below are resolved once at
-// startup from the loaded config.
 const HEARTBEAT_INTERVAL_MS = config.heartbeatIntervalMs;
 const HEARTBEAT_TIMEOUT_MS  = config.heartbeatTimeoutMs;
 
@@ -359,32 +391,16 @@ app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
 
     const sendFn = (msg: object) => socket.send(JSON.stringify(msg));
 
-    // Per-connection sliding window state for rate limiting.
-    // Two variables per message type: the timestamp of the current window's
-    // start and the number of messages received within that window.
-    // Windows reset automatically when a second has elapsed.
     let frameWindowStart  = Date.now();
     let frameWindowCount  = 0;
     let audioWindowStart  = Date.now();
     let audioWindowCount  = 0;
 
-    // ── Heartbeat ─────────────────────────────────────────────────────────────
-    //
-    // lastPong tracks the most recent pong from the client.
-    // On each interval tick we either detect a dead connection (no pong in
-    // HEARTBEAT_TIMEOUT_MS) or send another ping to keep the connection alive.
-    //
-    // The interval is stored so it can be cleared on every close path —
-    // both clean and unexpected. A leaked setInterval after socket close
-    // would fire against a dead socket and hold the session in memory.
     let lastPong: number = Date.now();
     let heartbeatInterval: NodeJS.Timeout | null = null;
 
     heartbeatInterval = setInterval(() => {
         if (Date.now() - lastPong > HEARTBEAT_TIMEOUT_MS) {
-            // No pong received within the timeout window — treat as a dead
-            // connection. Clean up and mark the session as dropped so the
-            // recovery timer starts and the slot is released if not resumed.
             app.log.warn({ session_id }, "WebSocket heartbeat timeout — marking session dropped");
             clearInterval(heartbeatInterval!);
             heartbeatInterval = null;
@@ -400,10 +416,6 @@ app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
         lastPong = Date.now();
     });
 
-    // If the session is queued, the socket is open but we wait for a slot.
-    // session_ready is sent when the session is promoted (see promoteNext in
-    // SessionManager — it transitions to CONNECTING, and the timer is running;
-    // the client must then send request_clip { activate: true } to go ACTIVE).
     if (ctx.state === "QUEUED") {
         sessions.setQueuedSocket(session_id, () =>
             sendFn({ type: "session_ready", session_id })
@@ -411,8 +423,6 @@ app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
     }
 
     socket.on("message", (raw: Buffer) => {
-        // Reject oversized messages before parsing — prevents memory exhaustion
-        // from a client sending a single enormous JSON payload.
         if (raw.length > MAX_WS_MESSAGE_BYTES) {
             app.log.warn({ session_id, bytes: raw.length }, "WebSocket message exceeds size limit — dropped");
             return;
@@ -441,8 +451,6 @@ app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
         }
 
         if (msg.type === "video_frame") {
-            // Use the authoritative session_id from the URL path, not from the
-            // message body, to prevent session confusion attacks.
             const now = Date.now();
             if (now - frameWindowStart >= 1000) {
                 frameWindowStart = now;
@@ -458,7 +466,6 @@ app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
         }
 
         if (msg.type === "audio_chunk") {
-            // Same reasoning as video_frame above.
             const now = Date.now();
             if (now - audioWindowStart >= 1000) {
                 audioWindowStart = now;
@@ -474,8 +481,6 @@ app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
         }
 
         if (msg.type === "clip_ended") {
-            // Pass the authoritative session_id from the URL path — same
-            // session confusion defence as video_frame and audio_chunk.
             controller.handleClipEnded(session_id, msg, sendFn).catch(err =>
                 app.log.error({ err, session_id }, "clip_ended handling failed")
             );
@@ -486,9 +491,6 @@ app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
     });
 
     socket.on("close", () => {
-        // Always clear the heartbeat interval on close — regardless of whether
-        // the close was clean or unexpected — to prevent a leaked setInterval
-        // from firing against a dead socket.
         if (heartbeatInterval !== null) {
             clearInterval(heartbeatInterval);
             heartbeatInterval = null;
@@ -499,10 +501,7 @@ app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
             coord.deregisterSession(session_id);
             sessions.markDropped(session_id);
         }
-        // COMPLETED, CONNECTING, QUEUED, DROPPED, EXPIRED — do nothing.
     });
-
-    // ── request_clip handler (closure over session_id and socket context) ─────
 
     function handleRequestClip(
         scenarioId: string,
@@ -521,8 +520,6 @@ app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
         }
 
         if (activate) {
-            // Validate: only permitted from CONNECTING state (first activation)
-            // or on a resumed session that already has a scenario bound.
             if (current.state === "ACTIVE" || current.state === "PAUSED") {
                 send({ type: "error", session_id, code: "activate_not_permitted",
                     message: "Session is already active. Use clip_ended to advance clips." });
@@ -533,16 +530,12 @@ app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
                 const isResumed = current.scenario_id !== null;
 
                 if (isResumed) {
-                    // Resumed session: the scenario is already bound. Reject any
-                    // attempt to activate a clip from a different scenario — the
-                    // session history belongs to the original scenario.
                     if (scenarioId !== current.scenario_id) {
                         send({ type: "error", session_id, code: "activate_not_permitted",
                             message: `Session is already bound to scenario "${current.scenario_id}".` });
                         return;
                     }
                 } else {
-                    // Fresh session: must activate the entry clip unless admin.
                     const entryClip = scenarios.getEntryClip(scenarioId);
                     if (!current.is_admin && clipId !== entryClip) {
                         send({ type: "error", session_id, code: "activate_not_permitted",
@@ -551,21 +544,17 @@ app.get("/ws/:session_id", { websocket: true }, (socket, req) => {
                     }
                 }
 
-                // Bind scenario and coaching context (no-ops on a resumed session
-                // because setScenario and setCoachingContext guard on scenario_id !== null).
                 sessions.setScenario(session_id, scenarioId);
                 sessions.setCoachingContext(session_id, scenarios.getCoachingContext(scenarioId));
                 sessions.setLearningObjectives(session_id, scenarios.getLearningObjectives(scenarioId));
                 sessions.setTargetAudience(session_id, scenarios.getTargetAudience(scenarioId));
                 sessions.setCurrentClip(session_id, clipId);
 
-                // Register with coordinator and transition to ACTIVE.
                 coord.registerSession(session_id, clip, (m) => send(m), current.language);
                 sessions.markActive(session_id);
             }
         }
 
-        // Send clip_data regardless of activate — always a data response.
         send({
             type:              "clip_data",
             session_id,

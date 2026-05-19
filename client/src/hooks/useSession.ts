@@ -113,7 +113,13 @@ export interface UseSessionResult {
      */
     heartbeatStatus:      string | null;
     // Stable callbacks
-    connect:              (userId?: string, language?: string, adminKey?: string) => Promise<void>;
+    /**
+     * Connect to the server and create a session. When `authToken` is provided
+     * (a JWT obtained from POST /auth/login), it is sent as Authorization: Bearer.
+     * If the token belongs to an admin account, the session will be an admin
+     * session with debug_eval messages and unrestricted clip activation.
+     */
+    connect:              (userId?: string, language?: string, authToken?: string) => Promise<void>;
     disconnect:           () => void;
     selectScenario:       (scenarioId: string, entryClipId: string) => void;
     preloadClip:          (scenarioId: string, clipId: string) => void;
@@ -293,8 +299,8 @@ export function useSession(capture: CaptureSession, options: UseSessionOptions =
         return () => { handler.disconnect(); };
     }, [handler]);
 
-    const connect        = useCallback((userId?: string, language?: string, adminKey?: string) =>
-        handler.connect(userId, language, adminKey), [handler]);
+    const connect        = useCallback((userId?: string, language?: string, authToken?: string) =>
+        handler.connect(userId, language, authToken), [handler]);
     const disconnect     = useCallback(() => handler.disconnect(), [handler]);
     const selectScenario = useCallback((scenarioId: string, entryClipId: string) =>
         handler.selectScenario(scenarioId, entryClipId), [handler]);

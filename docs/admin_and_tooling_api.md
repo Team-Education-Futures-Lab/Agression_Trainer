@@ -3,6 +3,8 @@
 Documents the App container's operator-facing HTTP endpoints, admin session mechanics, and all inter-container API calls. None of the endpoints in this document are part of the normal student-facing session flow — they exist for monitoring, debugging, abnormal termination, and internal container communication.
 
 > **Client-facing API** — the session lifecycle, WebSocket messages, and normal clip flow are documented in `api_contract.md`.
+>
+> **Authentication** — user accounts, JWT issuance, and the `/auth/*` endpoints are documented in `auth.md`.
 
 ---
 
@@ -151,11 +153,12 @@ Registers a new scenario by uploading its metadata and video files directly to
 the server. The scenario becomes immediately available for sessions without
 restarting the App container.
 
-**Authentication:** `Authorization: Bearer <ADMIN_API_KEY>`. The header is
-validated before any request body is read. Returns `401` if the key is absent
-or does not match. Returns `501` if `ADMIN_API_KEY` is unset in the server
-environment — the endpoint is permanently unavailable without an admin key
-configured.
+**Authentication:** `Authorization: Bearer <token>`, where `<token>` is either:
+
+- A valid JWT with `role: "admin"`, obtained from `POST /auth/login` (primary mechanism). See `auth.md`.
+- The raw `ADMIN_API_KEY` value (legacy fallback, retained for backwards compatibility with tooling that predates JWT auth). This path works only when `ADMIN_API_KEY` is configured in the server environment.
+
+The header is validated before any request body is read to prevent unauthenticated requests from streaming large payloads. Returns `401` if the token is absent or invalid under both mechanisms.
 
 **Overwrite is not supported.** If a scenario with the same `scenario_id` already
 exists, the upload is rejected with `409`. Delete the existing scenario directory
@@ -203,7 +206,7 @@ full disk).
 }
 ```
 
-**Response 401 — missing or invalid admin key**
+**Response 401 — missing or invalid credentials**
 ```json
 {
     "error": "unauthorized",
@@ -211,21 +214,28 @@ full disk).
 }
 ```
 
-**Response 501 — admin key not configured**
-```json
-{
-    "error": "admin_unavailable",
-    "message": "string"
-}
-```
-
-**Example — curl**
+**Example — curl with JWT**
 ```bash
-curl -X POST http://localhost:3000/scenarios \
-  -H "Authorization: Bearer <ADMIN_API_KEY>" \
+# 1. Obtain a JWT
+TOKEN=$(curl -s -X POST http://localhost:3001/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"yourpassword"}' \
+  | jq -r .token)
+
+# 2. Upload the scenario
+curl -X POST http://localhost:3001/scenarios \
+  -H "Authorization: Bearer $TOKEN" \
   -F "metadata=<scenario_03/metadata.json;type=application/json" \
   -F "clip_01_intro.mp4=@scenario_03/clip_01_intro.mp4" \
   -F "clip_02_calm.mp4=@scenario_03/clip_02_calm.mp4"
+```
+
+**Example — curl with legacy ADMIN_API_KEY**
+```bash
+curl -X POST http://localhost:3001/scenarios \
+  -H "Authorization: Bearer <ADMIN_API_KEY>" \
+  -F "metadata=<scenario_03/metadata.json;type=application/json" \
+  -F "clip_01_intro.mp4=@scenario_03/clip_01_intro.mp4"
 ```
 
 **Durability:** metadata and video files are written to `SCENARIOS_DIR` on the
@@ -239,35 +249,57 @@ cleaned up and the in-memory index is left unchanged.
 ## Admin Sessions
 
 Admin sessions bypass the entry-clip restriction — any clip in a scenario can
-be activated, not just the entry clip. This is the mechanism for a future
-teacher dashboard to start a session at an arbitrary point in the scenario graph.
+be activated, not just the entry clip. They also receive `debug_eval` WebSocket
+messages after each clip containing the full `BehaviourResult`, per-stage
+pipeline intermediates, and App-level capture statistics.
 
 ### Creating an admin session
 
-Include `Authorization: Bearer <ADMIN_API_KEY>` in the `POST /session/create`
-request. If `ADMIN_API_KEY` is unset in the server environment, this header is
-ignored and admin mode is permanently unavailable.
+Log in with an admin account via `POST /auth/login` to obtain a JWT, then
+include `Authorization: Bearer <jwt>` in the `POST /session/create` request.
+The server verifies the token's signature and role — if the role is `admin`,
+the session is created with admin privileges. A missing, expired, or invalid
+token produces a standard student session with no error.
+
+```http
+POST /auth/login
+Content-Type: application/json
+
+{ "username": "teacher-01", "password": "yourpassword" }
+```
+
+```http
+HTTP/1.1 200 OK
+
+{ "token": "<jwt>", "user_id": "...", "username": "teacher-01", "role": "admin", "expires_at": "..." }
+```
 
 ```http
 POST /session/create
-Authorization: Bearer <ADMIN_API_KEY>
+Authorization: Bearer <jwt>
 Content-Type: application/json
 
-{
-    "user_id": "teacher-01",
-    "language": "nl"
-}
+{ "user_id": "teacher-01", "language": "nl" }
 ```
 
 The response is identical to a normal session create. The `is_admin` flag is
 stored internally on the `SessionContext` and is not exposed in any response.
+The server-side admin flag is confirmed when the first `debug_eval` message
+arrives over the WebSocket.
+
+### Legacy fallback
+
+The `ADMIN_API_KEY` env var is still accepted on `POST /session/create` as a
+backwards-compatible mechanism for tooling that predates JWT auth. When both a
+valid admin JWT and `ADMIN_API_KEY` are absent, the session is a standard
+student session.
 
 ### Extension point
 
-When a teacher dashboard is added, replace the single `ADMIN_API_KEY` env var
-check at session creation with a per-token lookup against a teacher credential
-store. Nothing downstream changes — the `is_admin` flag on the session context
-is already threaded through to clip activation validation.
+The `is_admin` flag on `SessionContext` is already threaded through to clip
+activation validation and the debug data path. When a teacher dashboard is
+added, it will obtain a JWT via `POST /auth/login` and pass it on session
+create — no changes to the session or coordinator layer are required.
 
 ---
 

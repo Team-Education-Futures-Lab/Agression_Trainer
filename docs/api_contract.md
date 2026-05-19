@@ -5,6 +5,8 @@ Defines the exact wire format for all communication between the browser client a
 This document is the source of truth for the **client-facing** interface. If a TypeScript type definition and this document conflict, this document takes precedence.
 
 > **Internal and tooling APIs** — the inter-container APIs (App→Transcription, App→Evaluation, App→Feedback), the health endpoint, admin session creation, and debugging endpoints are documented separately in `admin_and_tooling_api.md`.
+>
+> **Authentication** — user accounts, JWT issuance, and the `/auth/*` endpoints are documented in `auth.md`.
 
 ---
 
@@ -50,7 +52,7 @@ bound later via `request_clip` with `activate: true` over the WebSocket.
 }
 ```
 
-> **Admin mode:** pass `Authorization: Bearer <ADMIN_API_KEY>` to create an admin session. Admin sessions bypass clip activation restrictions — any clip can be activated, not just the scenario's entry clip. See `admin_and_tooling_api.md` for details.
+> **Admin mode:** to create an admin session, include `Authorization: Bearer <token>` where `<token>` is a JWT obtained from `POST /auth/login` with an admin account. Admin sessions bypass clip activation restrictions — any clip can be activated, not just the scenario's entry clip — and receive `debug_eval` messages after each clip. When the header is absent or the token is invalid, a standard student session is created with no error. See `auth.md` and `admin_and_tooling_api.md` for details.
 
 ---
 
@@ -138,7 +140,7 @@ clip negotiation, data streaming, evaluation results, and feedback delivery.
 `activate: true` — the client intends to play this clip. On a fresh session,
 also binds the scenario and transitions the session from CONNECTING to ACTIVE.
 In normal mode, must target the scenario's entry clip. In admin mode (session
-created with `ADMIN_API_KEY`), any clip may be activated. On a resumed session,
+created with a valid admin JWT), any clip may be activated. On a resumed session,
 any clip within the already-bound scenario is valid.
 
 `activate: false` — preload only. Pure data lookup with no state change. Valid
@@ -147,46 +149,46 @@ at any point during the session, including while a clip is playing.
 **VideoFrame** — sent continuously while a clip is playing
 ```json
 {
-    "type": "video_frame",
-    "session_id": "string",
-    "frame_id": "integer",
-    "timestamp": "float  // seconds since clip start",
-    "face_landmarks": [
-        { "x": "float", "y": "float", "z": "float", "visibility": "float" }
-        // 478 entries
-    ],
-    "left_hand": [
-        { "x": "float", "y": "float", "z": "float", "visibility": "float" }
-        // 21 entries, empty array if not detected
-    ],
-    "right_hand": [
-        // same as left_hand
-    ]
+  "type": "video_frame",
+  "session_id": "string",
+  "frame_id": "integer",
+  "timestamp": "float  // seconds since clip start",
+  "face_landmarks": [
+    { "x": "float", "y": "float", "z": "float", "visibility": "float" }
+    // 478 entries
+  ],
+  "left_hand": [
+    { "x": "float", "y": "float", "z": "float", "visibility": "float" }
+    // 21 entries, empty array if not detected
+  ],
+  "right_hand": [
+    // same as left_hand
+  ]
 }
 ```
 
 **AudioChunk** — sent continuously while a clip is playing
 ```json
 {
-    "type": "audio_chunk",
-    "session_id": "string",
-    "chunk_id": "integer",
-    "timestamp": "float",
-    "pcm": "string  // base64-encoded raw s16le PCM bytes",
-    "sample_rate": "integer  // typically 16000",
-    "mfccs": [
-        ["float"]
-        // [n_frames][13] — pre-computed client-side via Meyda.js
-    ]
+  "type": "audio_chunk",
+  "session_id": "string",
+  "chunk_id": "integer",
+  "timestamp": "float",
+  "pcm": "string  // base64-encoded raw s16le PCM bytes",
+  "sample_rate": "integer  // typically 16000",
+  "mfccs": [
+    ["float"]
+    // [n_frames][13] — pre-computed client-side via Meyda.js
+  ]
 }
 ```
 
 **ClipEnded** — sent when a scenario clip finishes playing
 ```json
 {
-    "type": "clip_ended",
-    "session_id": "string",
-    "clip_id": "string  // the clip that just finished"
+  "type": "clip_ended",
+  "session_id": "string",
+  "clip_id": "string  // the clip that just finished"
 }
 ```
 
@@ -201,8 +203,8 @@ sending this. The App responds immediately with `clip_candidates`, then with
 **SessionReady** — sent when a queued session is promoted to active
 ```json
 {
-    "type": "session_ready",
-    "session_id": "string"
+  "type": "session_ready",
+  "session_id": "string"
 }
 ```
 
@@ -212,37 +214,37 @@ receiving this message.
 **ScenariosListMessage** — sent in response to `get_scenarios`
 ```json
 {
-    "type": "scenarios_list",
-    "session_id": "string",
-    "scenarios": [
-        {
-            "scenario_id": "string",
-            "title": "string",
-            "description": "string",
-            "language": "string  // ISO 639-1",
-            "entry_clip_id": "string"
-        }
-    ]
+  "type": "scenarios_list",
+  "session_id": "string",
+  "scenarios": [
+    {
+      "scenario_id": "string",
+      "title": "string",
+      "description": "string",
+      "language": "string  // ISO 639-1",
+      "entry_clip_id": "string"
+    }
+  ]
 }
 ```
 
 **ClipData** — sent in response to `request_clip`
 ```json
 {
-    "type": "clip_data",
-    "session_id": "string",
-    "clip_id": "string",
-    "scenario_id": "string",
-    "video_url": "string  // browser-relative path, e.g. /scenarios/scenario_01/clip_01_intro.mp4",
-    "transcript": "string",
-    "notable_features": ["string"],
-    "branch_conditions": [
-        {
-            "min_score": "float",
-            "max_score": "float",
-            "next_clip": "string | null"
-        }
-    ]
+  "type": "clip_data",
+  "session_id": "string",
+  "clip_id": "string",
+  "scenario_id": "string",
+  "video_url": "string  // browser-relative path, e.g. /scenarios/scenario_01/clip_01_intro.mp4",
+  "transcript": "string",
+  "notable_features": ["string"],
+  "branch_conditions": [
+    {
+      "min_score": "float",
+      "max_score": "float",
+      "next_clip": "string | null"
+    }
+  ]
 }
 ```
 
@@ -253,10 +255,10 @@ origin — no cross-origin request is needed.
 **SessionUpdate** — sent when a transcript segment arrives from the Transcription container
 ```json
 {
-    "type": "session_update",
-    "session_id": "string",
-    "transcript": "string  // accumulated transcript for the current clip so far",
-    "queue_position": null
+  "type": "session_update",
+  "session_id": "string",
+  "transcript": "string  // accumulated transcript for the current clip so far",
+  "queue_position": null
 }
 ```
 
@@ -269,23 +271,23 @@ in production.
 **ClipCandidates** — sent immediately on receiving `clip_ended`, before evaluation completes
 ```json
 {
-    "type": "clip_candidates",
-    "session_id": "string",
-    "candidates": [
+  "type": "clip_candidates",
+  "session_id": "string",
+  "candidates": [
+    {
+      "clip_id": "string",
+      "video_url": "string",
+      "transcript": "string",
+      "notable_features": ["string"],
+      "branch_conditions": [
         {
-            "clip_id": "string",
-            "video_url": "string",
-            "transcript": "string",
-            "notable_features": ["string"],
-            "branch_conditions": [
-                {
-                    "min_score": "float",
-                    "max_score": "float",
-                    "next_clip": "string | null"
-                }
-            ]
+          "min_score": "float",
+          "max_score": "float",
+          "next_clip": "string | null"
         }
-    ]
+      ]
+    }
+  ]
 }
 ```
 
@@ -297,10 +299,10 @@ conditions have `next_clip: null` (terminal clip).
 **ClipSelected** — sent once evaluation completes, after `ClipCandidates`
 ```json
 {
-    "type": "clip_selected",
-    "session_id": "string",
-    "clip_id": "string | null  // null if the scenario is terminal",
-    "clip_score": "float  // escalation_score from the clip's BehaviourResult"
+  "type": "clip_selected",
+  "session_id": "string",
+  "clip_id": "string | null  // null if the scenario is terminal",
+  "clip_score": "float  // escalation_score from the clip's BehaviourResult"
 }
 ```
 
@@ -310,32 +312,32 @@ When `clip_id` is null the scenario is complete — the client should wait for
 **FeedbackToken** — streamed during debrief generation
 ```json
 {
-    "type": "feedback_token",
-    "session_id": "string",
-    "token": "string"
+  "type": "feedback_token",
+  "session_id": "string",
+  "token": "string"
 }
 ```
 
 **SessionComplete** — sent once when debrief generation finishes
 ```json
 {
-    "type": "session_complete",
-    "session_id": "string",
-    "advice": "string",
-    "severity": "low | medium | high",
-    "highlights": [
-        "string  // e.g. 'Turn 2: voice tension spiked when student pushed back'"
-    ]
+  "type": "session_complete",
+  "session_id": "string",
+  "advice": "string",
+  "severity": "low | medium | high",
+  "highlights": [
+    "string  // e.g. 'Turn 2: voice tension spiked when student pushed back'"
+  ]
 }
 ```
 
 **Error**
 ```json
 {
-    "type": "error",
-    "session_id": "string",
-    "code": "string",
-    "message": "string"
+  "type": "error",
+  "session_id": "string",
+  "code": "string",
+  "message": "string"
 }
 ```
 
@@ -389,9 +391,9 @@ forwarded in the last `HEARTBEAT_INTERVAL_MS`.
 
 ```json
 {
-    "type": "heartbeat",
-    "session_id": "string",
-    "status": "string  // 'feedback_generating' | 'ok'"
+  "type": "heartbeat",
+  "session_id": "string",
+  "status": "string  // 'feedback_generating' | 'ok'"
 }
 ```
 

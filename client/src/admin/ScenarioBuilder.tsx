@@ -1,11 +1,15 @@
 // =============================================================================
 // ScenarioBuilder — Admin-only scenario authoring tool
 //
-// Supports two output modes:
-//   1. Upload to server — POST /scenarios with multipart/form-data.
-//      Activated when a server URL is provided in the header bar.
+// Auth gate: username + password login via POST /auth/login.
+// Token stored in component state only (not localStorage) — a page reload
+// requires re-login, which is the correct behaviour for a sensitive tool.
+// The server URL is persisted in sessionStorage so it survives React re-renders
+// within the same browser tab but is cleared when the tab is closed.
+//
+// Supports two output modes once logged in:
+//   1. Upload to server — POST /scenarios with multipart/form-data + JWT.
 //   2. Generate & download zip — original behaviour, no server required.
-//      Active when no server URL is configured.
 // =============================================================================
 
 import { useCallback, useRef, useState } from "react";
@@ -158,34 +162,143 @@ function serialise(
     return out;
 }
 
+// ─── Auth gate types ──────────────────────────────────────────────────────────
+
+interface AuthState {
+    token:    string;
+    username: string;
+    role:     string;
+}
+
 // ─── Root component ───────────────────────────────────────────────────────────
 
 export function ScenarioBuilder() {
-    const [storedKey, setStoredKey] = useState<string>(() => localStorage.getItem("admin_key") ?? "");
-    const [keyInput,  setKeyInput]  = useState("");
+    // Server URL persisted in sessionStorage — survives re-renders within the
+    // same browser tab but clears when the tab is closed. Deliberately NOT
+    // localStorage to avoid stale URLs persisting across different school days.
+    const [serverUrl, setServerUrl] = useState<string>(
+        () => sessionStorage.getItem("ar_admin_server_url") ?? ""
+    );
+    const [auth, setAuth]       = useState<AuthState | null>(null);
+    const [loginError, setLoginError] = useState<string>("");
+    const [loginUsername, setLoginUsername] = useState("");
+    const [loginPassword, setLoginPassword] = useState("");
+    const [loginPending,  setLoginPending]  = useState(false);
 
-    const handleKeySubmit = () => {
-        const k = keyInput.trim();
-        if (k) { localStorage.setItem("admin_key", k); setStoredKey(k); setKeyInput(""); }
+    const handleServerUrlChange = (url: string) => {
+        setServerUrl(url);
+        sessionStorage.setItem("ar_admin_server_url", url);
     };
 
-    const handleClearKey = () => { localStorage.removeItem("admin_key"); setStoredKey(""); };
+    const handleLogin = async () => {
+        setLoginError("");
+        const url = serverUrl.trim().replace(/\/$/, "");
+        if (!url) {
+            setLoginError("Enter the server URL before logging in.");
+            return;
+        }
+        if (!loginUsername.trim()) {
+            setLoginError("Username is required.");
+            return;
+        }
+        if (!loginPassword) {
+            setLoginError("Password is required.");
+            return;
+        }
+        setLoginPending(true);
+        try {
+            const res = await fetch(`${url}/auth/login`, {
+                method:  "POST",
+                headers: { "Content-Type": "application/json" },
+                body:    JSON.stringify({ username: loginUsername.trim(), password: loginPassword }),
+            });
+            if (res.ok) {
+                const body = await res.json() as { token: string; username: string; role: string };
+                setAuth({ token: body.token, username: body.username, role: body.role });
+                setLoginPassword("");
+            } else if (res.status === 401) {
+                setLoginError("Invalid username or password.");
+            } else {
+                let msg = `Server returned ${res.status}.`;
+                try { const b = await res.json() as { message?: string }; if (b.message) msg = b.message; } catch { /* ignore */ }
+                setLoginError(msg);
+            }
+        } catch (err) {
+            setLoginError(`Could not reach server: ${String(err instanceof Error ? err.message : err)}`);
+        } finally {
+            setLoginPending(false);
+        }
+    };
 
-    if (!storedKey) {
+    const handleLogout = async () => {
+        if (!auth) return;
+        const url = serverUrl.trim().replace(/\/$/, "");
+        try {
+            await fetch(`${url}/auth/logout`, {
+                method:  "POST",
+                headers: { "Authorization": `Bearer ${auth.token}` },
+            });
+        } catch { /* ignore — token expires naturally */ }
+        setAuth(null);
+        setLoginUsername("");
+    };
+
+    if (!auth) {
         return (
             <div style={st.root}>
                 <div style={st.gate}>
                     <div style={st.gateBox}>
-                        <div style={{ fontSize: "14px", marginBottom: "12px", color: "#aaa" }}>AR Training — Scenario Builder</div>
-                        <div style={{ fontSize: "12px", marginBottom: "8px", color: "#666" }}>Enter admin key to continue</div>
-                        <div style={{ display: "flex", gap: "8px" }}>
+                        <div style={{ fontSize: "14px", marginBottom: "12px", color: "#aaa" }}>
+                            AR Training — Scenario Builder
+                        </div>
+                        <div style={{ fontSize: "12px", marginBottom: "12px", color: "#666" }}>
+                            Log in with your admin account to continue
+                        </div>
+
+                        {loginError && (
+                            <div style={{
+                                padding: "8px 10px", marginBottom: "10px", borderRadius: "4px",
+                                fontSize: "12px", background: "#3a1a1a", color: "#cf6f6f",
+                                border: "1px solid #5c2e2e",
+                            }}>
+                                {loginError}
+                            </div>
+                        )}
+
+                        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
                             <input
-                                type="password" style={st.input} value={keyInput}
-                                placeholder="Admin key" autoFocus
-                                onChange={e => setKeyInput(e.target.value)}
-                                onKeyDown={e => { if (e.key === "Enter") handleKeySubmit(); }}
+                                type="text"
+                                style={{ ...st.input, width: "100%" }}
+                                value={serverUrl}
+                                placeholder="Server URL (e.g. http://localhost:3001)"
+                                onChange={e => handleServerUrlChange(e.target.value)}
                             />
-                            <button style={st.btn} onClick={handleKeySubmit}>Enter</button>
+                            <input
+                                type="text"
+                                style={st.input}
+                                value={loginUsername}
+                                placeholder="Username"
+                                autoFocus
+                                autoComplete="username"
+                                onChange={e => setLoginUsername(e.target.value)}
+                                onKeyDown={e => { if (e.key === "Enter") void handleLogin(); }}
+                            />
+                            <input
+                                type="password"
+                                style={st.input}
+                                value={loginPassword}
+                                placeholder="Password"
+                                autoComplete="current-password"
+                                onChange={e => setLoginPassword(e.target.value)}
+                                onKeyDown={e => { if (e.key === "Enter") void handleLogin(); }}
+                            />
+                            <button
+                                style={{ ...st.btn, ...st.btnPrimary }}
+                                onClick={() => void handleLogin()}
+                                disabled={loginPending}
+                            >
+                                {loginPending ? "Logging in…" : "Log in"}
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -193,21 +306,50 @@ export function ScenarioBuilder() {
         );
     }
 
-    return <BuilderForm onClearKey={handleClearKey} storedKey={storedKey} />;
+    if (auth.role !== "admin") {
+        return (
+            <div style={st.root}>
+                <div style={st.gate}>
+                    <div style={st.gateBox}>
+                        <div style={{ fontSize: "14px", marginBottom: "8px", color: "#aaa" }}>
+                            AR Training — Scenario Builder
+                        </div>
+                        <div style={{ fontSize: "12px", color: "#cf6f6f", marginBottom: "12px" }}>
+                            The account <strong>{auth.username}</strong> does not have admin access.
+                            Only admin accounts can use the Scenario Builder.
+                        </div>
+                        <button style={{ ...st.btn, ...st.btnDanger }} onClick={() => void handleLogout()}>
+                            Log out
+                        </button>
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
+    return (
+        <BuilderForm
+            serverUrl={serverUrl}
+            authToken={auth.token}
+            username={auth.username}
+            onLogout={() => void handleLogout()}
+        />
+    );
 }
 
 // ─── BuilderForm ──────────────────────────────────────────────────────────────
 
 export interface BuilderFormProps {
-    onClearKey: () => void;
-    storedKey:  string;
+    serverUrl: string;
+    authToken: string;
+    username:  string;
+    onLogout:  () => void;
 }
 
-// Banner variant for success/error feedback after an upload attempt.
 type BannerKind = "success" | "error";
 interface Banner { kind: BannerKind; message: string }
 
-export function BuilderForm({ onClearKey, storedKey }: BuilderFormProps) {
+export function BuilderForm({ serverUrl, authToken, username, onLogout }: BuilderFormProps) {
     const [scenarioId,         setScenarioId]         = useState("");
     const [title,              setTitle]              = useState("");
     const [description,        setDescription]        = useState("");
@@ -219,7 +361,6 @@ export function BuilderForm({ onClearKey, storedKey }: BuilderFormProps) {
     const [clips,              setClips]              = useState<ClipForm[]>([makeEmptyClip()]);
     const [errors,             setErrors]             = useState<string[]>([]);
     const [generating,         setGenerating]         = useState(false);
-    const [serverUrl,          setServerUrl]          = useState("");
     const [banner,             setBanner]             = useState<Banner | null>(null);
     const errorBoxRef = useRef<HTMLDivElement | null>(null);
 
@@ -263,8 +404,6 @@ export function BuilderForm({ onClearKey, storedKey }: BuilderFormProps) {
             form.append("metadata", JSON.stringify(metadata));
             for (const clip of clips) {
                 if (clip.file) {
-                    // Part name must match the clip's declared file field exactly
-                    // so the server can match parts to declared filenames.
                     form.append(clip.file.name, clip.file, clip.file.name);
                 }
             }
@@ -272,7 +411,7 @@ export function BuilderForm({ onClearKey, storedKey }: BuilderFormProps) {
             const url = serverUrl.replace(/\/$/, "");
             const res = await fetch(`${url}/scenarios`, {
                 method:  "POST",
-                headers: { "Authorization": `Bearer ${storedKey}` },
+                headers: { "Authorization": `Bearer ${authToken}` },
                 body:    form,
             });
 
@@ -289,7 +428,7 @@ export function BuilderForm({ onClearKey, storedKey }: BuilderFormProps) {
                 if (res.status === 409) {
                     setBanner({ kind: "error", message: "A scenario with this ID already exists on the server." });
                 } else if (res.status === 401) {
-                    setBanner({ kind: "error", message: "Admin key rejected by server." });
+                    setBanner({ kind: "error", message: "Session expired — please log out and log back in." });
                 } else {
                     setBanner({ kind: "error", message });
                 }
@@ -301,7 +440,7 @@ export function BuilderForm({ onClearKey, storedKey }: BuilderFormProps) {
         }
     };
 
-    // ── Zip download (original behaviour) ────────────────────────────────────
+    // ── Zip download ──────────────────────────────────────────────────────────
 
     const handleZip = async () => {
         setBanner(null);
@@ -336,8 +475,8 @@ export function BuilderForm({ onClearKey, storedKey }: BuilderFormProps) {
         }
     };
 
-    const hasServerUrl  = serverUrl.trim().length > 0;
-    const submitLabel   = generating
+    const hasServerUrl = serverUrl.trim().length > 0;
+    const submitLabel  = generating
         ? (hasServerUrl ? "Uploading…" : "Generating zip…")
         : (hasServerUrl ? "Upload to server" : "Generate & download zip");
 
@@ -348,16 +487,14 @@ export function BuilderForm({ onClearKey, storedKey }: BuilderFormProps) {
             <div style={st.statusBar}>
                 <span style={st.appTitle}>AR Training — Scenario Builder</span>
                 <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-                    <input
-                        type="text"
-                        style={{ ...st.input, width: "260px", fontSize: "11px" }}
-                        value={serverUrl}
-                        onChange={e => setServerUrl(e.target.value)}
-                        placeholder="Server URL (optional, e.g. http://localhost:3000)"
-                        title="When set, the primary submit button uploads directly to the server instead of downloading a zip."
-                    />
-                    <button style={{ ...st.btn, ...st.btnDanger, fontSize: "11px" }} onClick={onClearKey}>
-                        Clear key / lock
+                    <span style={{ fontSize: "11px", color: "#888" }}>
+                        Logged in as <strong style={{ color: "#aaa" }}>{username}</strong>
+                    </span>
+                    <button
+                        style={{ ...st.btn, ...st.btnDanger, fontSize: "11px" }}
+                        onClick={onLogout}
+                    >
+                        Log out
                     </button>
                 </div>
             </div>
@@ -432,7 +569,6 @@ export function BuilderForm({ onClearKey, storedKey }: BuilderFormProps) {
                 </Section>
 
                 <div style={{ display: "flex", gap: "12px", alignItems: "center", marginTop: "8px" }}>
-                    {/* Primary action — changes based on whether a server URL is configured */}
                     <button
                         style={{ ...st.btn, ...st.btnPrimary, fontSize: "13px", padding: "8px 20px" }}
                         onClick={() => void (hasServerUrl ? handleUpload() : handleZip())}
@@ -441,7 +577,6 @@ export function BuilderForm({ onClearKey, storedKey }: BuilderFormProps) {
                         {submitLabel}
                     </button>
 
-                    {/* Secondary action — always available as a fallback */}
                     {hasServerUrl && (
                         <button
                             style={{ ...st.btn, fontSize: "12px", padding: "6px 14px" }}

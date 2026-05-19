@@ -32,9 +32,27 @@ No local Python or Node installation is required for deployment. Everything runs
 git clone <repo-url>
 cd ar-training
 
-# 2. Copy the example environment file and fill in INTERNAL_API_KEY
-cp .env.example .env
+# 2. Copy the example environment file and fill in required values
+cp app/.env.example app/.env
+```
 
+Open `app/.env` and set at minimum:
+
+```bash
+# Required — generate with: openssl rand -hex 32
+INTERNAL_API_KEY=<your-key>
+JWT_SECRET=<your-key>
+
+# Bootstrap the first admin account (only used when the users table is empty)
+BOOTSTRAP_ADMIN_USERNAME=admin
+BOOTSTRAP_ADMIN_PASSWORD=<your-password>   # min 8 characters
+```
+
+Once the first admin account has been created, comment out or remove the
+`BOOTSTRAP_ADMIN_USERNAME` and `BOOTSTRAP_ADMIN_PASSWORD` lines. See `auth.md`
+for the full first-time setup options.
+
+```bash
 # 3. Pull the Ollama model (only needed once — stored in models/ on the host)
 #    The ollama/ollama image runs a server as its entrypoint, so the pull must
 #    be done by exec-ing into a running container rather than via `run`.
@@ -79,24 +97,42 @@ The Transcription container has a real Whisper implementation (`TRANSCRIPTION_PO
 
 ### App container (`app/.env`)
 
-| Variable              | Default                     | Description                                                                                                                                                                                                                       |
-|-----------------------|-----------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `INTERNAL_API_KEY`    | _(required)_                | Shared secret for all App→AI service requests. Generate once with `openssl rand -hex 32` and set the same value in all containers.                                                                                                |
-| `EVALUATION_URL`      | `http://evaluation:8001`    | Evaluation instance URL(s). Comma-separated list enables multi-instance load distribution with session pinning.                                                                                                                   |
-| `TRANSCRIPTION_URL`   | `http://transcription:8003` | Transcription instance URL(s). Comma-separated list supported for multi-instance setups.                                                                                                                                          |
-| `FEEDBACK_URL`        | `http://feedback:8002`      | Feedback service URL.                                                                                                                                                                                                             |
-| `SCENARIOS_DIR`       | _(required)_                | Path to the scenarios directory, mounted from the repo root at runtime.                                                                                                                                                           |
-| `BEHAVIOUR_ANALYSER`  | `stub`                      | `stub` or `production`. Selects the Evaluation container's analyser implementation.                                                                                                                                               |
-| `FEEDBACK_GENERATOR`  | `stub`                      | `stub` or `production`. Selects the Feedback container's generator implementation.                                                                                                                                                |
-| `MAX_SESSIONS`        | `32`                        | Maximum concurrent active sessions.                                                                                                                                                                                               |
-| `MAX_QUEUE_SIZE`      | `10`                        | Maximum sessions held in the waiting queue.                                                                                                                                                                                       |
-| `CAPACITY_POLICY`     | `QUEUE`                     | `QUEUE` or `REJECT` when at capacity.                                                                                                                                                                                             |
-| `SESSION_TIMEOUT_MS`  | `30000`                     | ms to wait for a WebSocket connection + activation before dropping a session.                                                                                                                                                     |
-| `RECOVERY_WINDOW_MS`  | `30000`                     | ms a dropped session can be resumed before it expires.                                                                                                                                                                            |
-| `FEEDBACK_TIMEOUT_MS` | `150000`                    | ms to wait for the full feedback SSE stream before treating it as unavailable. Should exceed the Feedback container's `OLLAMA_TIMEOUT_MS` to allow Ollama to time out first.                                                      |
-| `CORS_ORIGIN`         | _(unset — allows any)_      | When unset, HTTP endpoints accept requests from any origin (correct for single-server classroom use). Set to a specific origin (e.g. `http://localhost:3000`) in multi-host or internet-facing deployments.                       |
-| `ADMIN_API_KEY`       | _(unset)_                   | Optional. When set, `POST /session/create` requests carrying `Authorization: Bearer <value>` create admin sessions that can activate any clip. When unset, admin mode is permanently unavailable. See `admin_and_tooling_api.md`. |
-| `PORT`                | `3000`                      | Internal listen port.                                                                                                                                                                                                             |
+#### Core
+
+| Variable              | Default                     | Description                                                                                                                                                                                                                                              |
+|-----------------------|-----------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `INTERNAL_API_KEY`    | _(required)_                | Shared secret for all App→AI service requests. Generate once with `openssl rand -hex 32` and set the same value in all containers.                                                                                                                       |
+| `EVALUATION_URL`      | `http://evaluation:8001`    | Evaluation instance URL(s). Comma-separated list enables multi-instance load distribution with session pinning.                                                                                                                                          |
+| `TRANSCRIPTION_URL`   | `http://transcription:8003` | Transcription instance URL(s). Comma-separated list supported for multi-instance setups.                                                                                                                                                                 |
+| `FEEDBACK_URL`        | `http://feedback:8002`      | Feedback service URL.                                                                                                                                                                                                                                    |
+| `SCENARIOS_DIR`       | _(required)_                | Path to the scenarios directory, mounted from the repo root at runtime.                                                                                                                                                                                  |
+| `BEHAVIOUR_ANALYSER`  | `stub`                      | `stub` or `production`. Selects the Evaluation container's analyser implementation.                                                                                                                                                                      |
+| `FEEDBACK_GENERATOR`  | `stub`                      | `stub` or `production`. Selects the Feedback container's generator implementation.                                                                                                                                                                       |
+| `PORT`                | `3000`                      | Internal listen port.                                                                                                                                                                                                                                    |
+
+#### Authentication
+
+| Variable                   | Default      | Description                                                                                                                                                                                                                                 |
+|----------------------------|--------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `JWT_SECRET`               | _(required)_ | Secret used to sign and verify JWTs. Generate with `openssl rand -hex 32`. All users are signed out if this value changes.                                                                                                                  |
+| `JWT_EXPIRY`               | `8h`         | JWT lifetime. Supports shorthand: `8h`, `30m`, `1d`. Default of 8 hours covers a school day.                                                                                                                                                |
+| `DATA_DIR`                 | _(required)_ | Directory inside the container where `auth.db` is stored. Must be a bind-mounted path (see `docker-compose.yml`) so the database persists across container recreations. Set to `/app/data`; mapped from `./data/` on the host.              |
+| `ALLOW_REGISTRATION`       | `false`      | When `true`, `POST /auth/register` is open for unauthenticated requests. Keep `false` in production — admins create accounts manually. Set to `true` only during initial setup if not using the bootstrap mechanism.                        |
+| `BOOTSTRAP_ADMIN_USERNAME` | _(unset)_    | Creates the first admin account on startup when the users table is empty. Ignored once any user exists. **Unset after the first admin account is confirmed working.**                                                                       |
+| `BOOTSTRAP_ADMIN_PASSWORD` | _(unset)_    | Password for the bootstrap admin (minimum 8 characters). **Unset after the first admin account is confirmed working.**                                                                                                                      |
+| `ADMIN_API_KEY`            | _(unset)_    | Optional. Legacy static key accepted as a fallback on `POST /scenarios` for tooling that predates JWT auth. No longer used on `POST /session/create`. Leave unset for new deployments; JWT auth via `POST /auth/login` is the primary path. |
+
+#### Session management
+
+| Variable              | Default                | Description                                                                                                                                |
+|-----------------------|------------------------|--------------------------------------------------------------------------------------------------------------------------------------------|
+| `MAX_SESSIONS`        | `32`                   | Maximum concurrent active sessions. Use a low value (e.g. 2 or 3) during development to test capacity behaviour.                           |
+| `MAX_QUEUE_SIZE`      | `10`                   | Maximum sessions held in the waiting queue.                                                                                                |
+| `CAPACITY_POLICY`     | `QUEUE`                | `QUEUE` or `REJECT` when at capacity.                                                                                                      |
+| `SESSION_TIMEOUT_MS`  | `30000`                | ms to wait for a WebSocket connection + activation before dropping a session.                                                              |
+| `RECOVERY_WINDOW_MS`  | `30000`                | ms a dropped session can be resumed before it expires.                                                                                     |
+| `FEEDBACK_TIMEOUT_MS` | `150000`               | ms to wait for the full feedback SSE stream before treating it as unavailable. Should exceed the Feedback container's `OLLAMA_TIMEOUT_MS`. |
+| `CORS_ORIGIN`         | _(unset — allows any)_ | When unset, HTTP endpoints accept requests from any origin. Set to a specific origin in multi-host or internet-facing deployments.         |
 
 ### Transcription container (`transcription/.env`)
 
@@ -112,12 +148,12 @@ The Transcription container has a real Whisper implementation (`TRANSCRIPTION_PO
 
 ### Evaluation container (`evaluation/.env`)
 
-| Variable             | Default      | Description                                                                                  |
-|----------------------|--------------|----------------------------------------------------------------------------------------------|
-| `INTERNAL_API_KEY`   | _(required)_ | Must match the value in `app/.env`.                                                          |
-| `BEHAVIOUR_ANALYSER` | `stub`       | `stub` — deterministic canned results; `production` — real multimodal classifier.            |
-| `DEVICE`             | `cpu`        | `cpu` or `cuda`. CUDA requires the NVIDIA Container Toolkit.                                 |
-| `PORT`               | `8001`       | Internal listen port.                                                                        |
+| Variable             | Default      | Description                                                                       |
+|----------------------|--------------|-----------------------------------------------------------------------------------|
+| `INTERNAL_API_KEY`   | _(required)_ | Must match the value in `app/.env`.                                               |
+| `BEHAVIOUR_ANALYSER` | `stub`       | `stub` — deterministic canned results; `production` — real multimodal classifier. |
+| `DEVICE`             | `cpu`        | `cpu` or `cuda`. CUDA requires the NVIDIA Container Toolkit.                      |
+| `PORT`               | `8001`       | Internal listen port.                                                             |
 
 ### Feedback container (`feedback/.env`)
 
@@ -131,6 +167,7 @@ The Transcription container has a real Whisper implementation (`TRANSCRIPTION_PO
 | `OLLAMA_MODEL_DIGEST`    | _(unset)_             | Optional. When set, must be the exact SHA-256 digest of the expected Ollama model manifest in the form `sha256:<64 hex chars>`. At startup (when `FEEDBACK_GENERATOR=production`) the container verifies the model digest matches this value; if it does not, startup fails with a clear error. When unset, digest verification is skipped. **Operators should set this in production deployments.** Obtain the correct digest by running `ollama show <model>` and copying the `digest` field. |
 | `OLLAMA_PULL_TIMEOUT_MS` | `600000`              | How long to wait for a model pull to complete before treating it as failed (ms). Applies only when `FEEDBACK_GENERATOR=production` and the model is not already present locally. Large models can take several minutes; the default is 10 minutes.                                                                                                                                                                                                                                              |
 | `PORT`                   | `8002`                | Internal listen port.                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+
 ---
 
 ## Project Structure
@@ -143,6 +180,7 @@ ar-training/
 │   │                             Handles WebSocket connections, session lifecycle,
 │   │                             and routes data between client and AI services.
 │   ├── src/
+│   │   └── auth/               ← UserStore, AuthService, authRoutes
 │   ├── tests/
 │   ├── package.json
 │   ├── tsconfig.json
@@ -218,6 +256,12 @@ ar-training/
 │       ├── metadata.json       ← Clip definitions, transcripts, branch conditions
 │       └── *.mp4
 │
+├── data/                       ← Persistent App container data (created automatically)
+│   │                             Bind-mounted into the App container at /app/data.
+│   │                             Contains auth.db (SQLite user account database).
+│   │                             Do not commit — add to .gitignore.
+│   └── auth.db                 ← Created on first App container startup
+│
 ├── models/                     ← Ollama model storage and trained ML model files
 │   │                             Bind-mounted into the Ollama container at
 │   │                             /root/.ollama so pulled models are visible on the
@@ -229,13 +273,14 @@ ar-training/
 │   ├── architecture.md
 │   ├── api_contract.md         ← Client-facing session and WebSocket API
 │   ├── admin_and_tooling_api.md← Operator endpoints and inter-container APIs
+│   ├── auth.md                 ← User accounts, JWTs, and /auth/* endpoints
 │   ├── session_lifecycle.md
 │   ├── stub_guide.md
 │   ├── scenario_schema.md
 │   └── dev_setup.md            ← This file
 │
 ├── docker-compose.yml
-└── .gitignore                  ← Repo-wide: .env, *.log, .DS_Store
+└── .gitignore                  ← Repo-wide: .env, *.log, .DS_Store, data/
 ```
 
 ---
@@ -273,7 +318,7 @@ The Python `transcription/` and `evaluation/` containers define their own datacl
 
 ## IDE Setup
 
-**Recommended: WebStorm** opened at the repo root. WebStorm discovers all `package.json` files automatically and provides full IntelliSense across all TypeScript services including cross-service resolution of the `shared/` package. Mark `scenarios/`, `models/`, and `docs/` as excluded directories (Settings → Directories) to prevent WebStorm from indexing video files and keep search fast.
+**Recommended: WebStorm** opened at the repo root. WebStorm discovers all `package.json` files automatically and provides full IntelliSense across all TypeScript services including cross-service resolution of the `shared/` package. Mark `scenarios/`, `models/`, `data/`, and `docs/` as excluded directories (Settings → Directories) to prevent WebStorm from indexing video files and keep search fast.
 
 For Python containers, open each service directory separately in **PyCharm** with a Python interpreter pointing at the service's `.venv` for full IntelliSense and test runner integration. WebStorm provides basic Python syntax support but PyCharm is recommended for any significant Python work.
 
@@ -304,6 +349,17 @@ docker compose logs -f feedback
 docker compose up -d ollama
 docker compose exec ollama ollama pull llama3.2
 
+# Create the first admin account (if not using the bootstrap env vars)
+curl -X POST http://localhost:3001/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"yourpassword","role":"admin"}'
+# Note: requires ALLOW_REGISTRATION=true in app/.env, or use BOOTSTRAP_ADMIN_* vars instead
+
+# Log in and obtain a JWT
+curl -X POST http://localhost:3001/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"yourpassword"}'
+
 # Run TypeScript tests (App container)
 docker compose run --rm app npm test
 
@@ -319,13 +375,12 @@ docker compose run --rm evaluation python -m pytest
 # Run Python tests locally (from service directory with venv active)
 pytest -v
 
-# Stop everything (Ollama models are preserved in models/ on the host)
+# Stop everything (Ollama models and auth.db are preserved on the host)
 docker compose down
 
 # Stop and remove all Docker volumes
-# Note: Ollama models are now stored in models/ (a bind mount), not a Docker
-# volume, so they are NOT removed by this command. Use this only to reset
-# other state.
+# Note: Ollama models (models/) and the auth database (data/) are bind mounts,
+# not Docker volumes, so they are NOT removed by this command.
 docker compose down -v
 ```
 
@@ -339,6 +394,8 @@ docker compose down -v
 4. Verify the branching graph has no dead ends (every non-terminal clip must have conditions covering `-1.0` to `1.0`)
 5. Restart the App container — scenarios are loaded at startup
 6. Verify with `GET /scenarios/{scenario_id}/clips` (see `admin_and_tooling_api.md`) to confirm all clips loaded correctly
+
+Alternatively, use `POST /scenarios` with an admin JWT to upload a scenario without restarting the container. See `admin_and_tooling_api.md`.
 
 ---
 
