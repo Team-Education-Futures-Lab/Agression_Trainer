@@ -26,6 +26,9 @@ logs/
 # Docker override files are typically local-only.
 docker-compose.override.yml
 
+# ── Database ──────────────────────────────────────────────────────────────
+data
+
 # ── Keep empty directories ─────────────────────────────────────────────────
 # .gitkeep files are used to commit otherwise empty directories.
 !**/.gitkeep
