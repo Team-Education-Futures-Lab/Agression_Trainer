@@ -35,10 +35,10 @@ export const authRoutes: FastifyPluginAsync<{ authService: AuthService; allowReg
                     message: "username is required.",
                 });
             }
-            if (!password || typeof password !== "string" || password.length < 8) {
+            if (!password || typeof password !== "string") {
                 return reply.code(400).send({
                     error:   "validation_error",
-                    message: "password is required and must be at least 8 characters.",
+                    message: "password is required.",
                 });
             }
 
