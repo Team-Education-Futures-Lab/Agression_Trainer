@@ -50,10 +50,6 @@ FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS base-amd64
 ARG TARGETARCH
 FROM base-${TARGETARCH} AS final
 
-# ── Architecture-specific PyTorch wheel index ──────────────────────────────────
-# ARG defaults set here are overridden per-arch in the RUN --mount trick below.
-# We use a shell script approach so a single RUN instruction handles both cases
-# without needing BuildKit --mount or complex syntax.
 ARG TARGETARCH
 
 # ── System dependencies ────────────────────────────────────────────────────────
@@ -79,6 +75,9 @@ WORKDIR /app
 #   arm64  → cu130  (only index with ARM64 wheels; required for DGX Spark)
 #   amd64  → cu124  (standard x86_64 CUDA 12.4 wheels)
 #
+# --break-system-packages is required on Ubuntu 24.04 (PEP 668 enforcement).
+# It is safe here because this is an isolated container with no other users.
+#
 # torch is NOT listed in requirements.txt to avoid version conflicts.
 # This RUN instruction is the single source of truth for the torch version.
 RUN if [ "$TARGETARCH" = "arm64" ]; then \
@@ -86,14 +85,14 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
     else \
         TORCH_INDEX="https://download.pytorch.org/whl/cu124"; \
     fi \
-    && pip install --no-cache-dir \
+    && pip install --no-cache-dir --break-system-packages \
         torch \
         torchaudio \
         --index-url "$TORCH_INDEX"
 
 # ── Python dependencies ───────────────────────────────────────────────────────
 COPY evaluation/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
 
 # ── Source and config ─────────────────────────────────────────────────────────
 COPY evaluation/src ./src
