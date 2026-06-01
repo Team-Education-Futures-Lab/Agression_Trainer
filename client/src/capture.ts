@@ -36,7 +36,12 @@ const MEYDA_BUFFER_SIZE     = 512;   // must be a power of 2
 const TARGET_FPS             = 30;
 const FRAME_INTERVAL_MS      = 1000 / TARGET_FPS;  // 33.33 ms
 
-const MEDIAPIPE_WASM = "/mediapipe";
+// import.meta.env.BASE_URL is set by Vite from the `base` option in
+// vite.config.ts, which reads the VITE_BASE_PATH build arg.
+// Defaults to "/" for local dev; set to "/client/" (or whatever subpath
+// Traefik routes to this container) in the Dokploy Build Args tab.
+const BASE_URL       = import.meta.env.BASE_URL;
+const MEDIAPIPE_WASM = `${BASE_URL}mediapipe`;
 const FACE_MODEL_URL =
     "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
 const HAND_MODEL_URL =
@@ -310,7 +315,10 @@ export class CaptureSession {
         // The worklet accumulates raw samples and posts them back to the main
         // thread in blocks. We reassemble them here rather than in the worklet
         // so that the chunk boundary aligns with our 2-second target.
-        await this.audioCtx.audioWorklet.addModule("/worklets/pcm-processor.js");
+        //
+        // BASE_URL is prepended so this path resolves correctly whether the app
+        // is served at / (local dev) or a subpath like /client/ (Traefik proxy).
+        await this.audioCtx.audioWorklet.addModule(`${BASE_URL}worklets/pcm-processor.js`);
 
         this.workletNode = new AudioWorkletNode(this.audioCtx, "pcm-processor");
         this.sourceNode.connect(this.workletNode);

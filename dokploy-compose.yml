@@ -8,6 +8,7 @@
 #   JWT_SECRET               — secret for signing JWTs
 #   BOOTSTRAP_ADMIN_PASSWORD — initial admin account password (remove after first deploy)
 #   VITE_APP_HTTP_URL        — public URL of the app container as seen from the browser
+#   VITE_BASE_PATH          — URL prefix for assets, e.g. /client/ (default: /)
 #
 # Optional overrides (Dokploy env tab):
 #   BOOTSTRAP_ADMIN_USERNAME — defaults to "admin"
@@ -35,6 +36,7 @@ services:
       dockerfile: client/Dockerfile
       args:
         VITE_APP_HTTP_URL: ${VITE_APP_HTTP_URL}
+        VITE_BASE_PATH: ${VITE_BASE_PATH:-/}
     volumes:
       - ./scenarios:/usr/share/nginx/html/scenarios:ro
     expose:

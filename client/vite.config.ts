@@ -11,8 +11,22 @@ if (devToolsEnabled) {
   );
 }
 
+// VITE_BASE_PATH sets the URL prefix for all asset references in the built output.
+// Vite bakes this into every <script src>, <link href>, and import() at build time,
+// and exposes it as import.meta.env.BASE_URL in source code.
+//
+// Set this in Dokploy's Build Args tab (not Environment Variables — it is a
+// build-time value, not a runtime one) to match the subpath Traefik routes to
+// this container. Must begin and end with a slash when set to a subpath.
+//
+// Examples:
+//   /          — served at the root (local dev default)
+//   /client/   — served at localhost/client/ behind Traefik strip-prefix
+const base = process.env["VITE_BASE_PATH"] ?? "/";
+
 export default defineConfig({
   plugins: [react()],
+  base,
 
   build: {
     rollupOptions: {
@@ -28,8 +42,8 @@ export default defineConfig({
         ...(devToolsEnabled ? {
           devtools: resolve(__dirname, "devtools.html"),
         } : {}),
-        // AudioWorklet — compiled to a plain JS file, referenced at
-        // runtime via new URL("/worklets/pcm-processor.js", import.meta.url)
+        // AudioWorklet — compiled to a plain JS file, referenced at runtime via
+        // `${import.meta.env.BASE_URL}worklets/pcm-processor.js` in capture.ts.
         "worklets/pcm-processor": resolve(
             __dirname,
             "src/worklets/pcm-processor.ts",
