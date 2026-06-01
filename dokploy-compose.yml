@@ -1,0 +1,168 @@
+# docker-compose.dokploy.yml
+#
+# Dokploy deployment variant of docker-compose.yml.
+# All environment variables are injected via Dokploy's Environment Variables
+# tab using ${VARIABLE_NAME} substitution. Do not use this file for local
+# development — use docker-compose.yml with per-service .env files instead.
+#
+# Required host directories (create once on the DGX before first deploy):
+#   mkdir -p ./scenarios ./data ./models/hf_cache
+#
+# GPU access requires the NVIDIA Container Toolkit on the host.
+# Remove the deploy.resources blocks if running CPU-only.
+
+services:
+
+  # ── Client ──────────────────────────────────────────────────────────────────
+  # VITE_APP_HTTP_URL must be set in Dokploy's Environment Variables tab.
+  # It is consumed at build time by Vite — it is NOT a runtime variable.
+  client:
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+      args:
+        VITE_APP_HTTP_URL: ${VITE_APP_HTTP_URL}
+    volumes:
+      - ./scenarios:/usr/share/nginx/html/scenarios:ro
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+
+  # ── App ─────────────────────────────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: app/Dockerfile
+    environment:
+      # Service URLs — fixed internal hostnames, not configurable
+      EVALUATION_URL:    http://evaluation:8001
+      FEEDBACK_URL:      http://feedback:8002
+      TRANSCRIPTION_URL: http://transcription:8003
+      DATA_DIR:          /app/data
+      SCENARIOS_DIR:     /app/scenarios
+      # Injected from Dokploy Environment Variables tab
+      PORT:                      ${APP_PORT:-3000}
+      INTERNAL_API_KEY:          ${INTERNAL_API_KEY}
+      JWT_SECRET:                ${JWT_SECRET}
+      JWT_EXPIRY:                ${JWT_EXPIRY:-8h}
+      ALLOW_REGISTRATION:        ${ALLOW_REGISTRATION:-false}
+      BOOTSTRAP_ADMIN_USERNAME:  ${BOOTSTRAP_ADMIN_USERNAME}
+      BOOTSTRAP_ADMIN_PASSWORD:  ${BOOTSTRAP_ADMIN_PASSWORD}
+      MAX_SESSIONS:              ${MAX_SESSIONS:-32}
+      MAX_QUEUE_SIZE:            ${MAX_QUEUE_SIZE:-10}
+      CAPACITY_POLICY:           ${CAPACITY_POLICY:-QUEUE}
+      SESSION_TIMEOUT_MS:        ${SESSION_TIMEOUT_MS:-30000}
+      RECOVERY_WINDOW_MS:        ${RECOVERY_WINDOW_MS:-30000}
+      FEEDBACK_TIMEOUT_MS:       ${FEEDBACK_TIMEOUT_MS:-150000}
+      CORS_ORIGIN:               ${CORS_ORIGIN:-}
+    volumes:
+      - ./scenarios:/app/scenarios:ro
+      - ./data:/app/data
+    ports:
+      - "3001:3000"
+    depends_on:
+      transcription:
+        condition: service_healthy
+      evaluation:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Transcription ────────────────────────────────────────────────────────────
+  transcription:
+    build:
+      context: .
+      dockerfile: transcription/Dockerfile
+    environment:
+      PORT:                ${TRANSCRIPTION_PORT:-8003}
+      INTERNAL_API_KEY:    ${INTERNAL_API_KEY}
+      TRANSCRIPTION_POOL:  ${TRANSCRIPTION_POOL:-production}
+      WHISPER_MODEL:       ${WHISPER_MODEL:-base}
+      WHISPER_LANGUAGE:    ${WHISPER_LANGUAGE:-nl}
+      WHISPER_WORKERS:     ${WHISPER_WORKERS:-4}
+      DEVICE:              ${TRANSCRIPTION_DEVICE:-cuda}
+    expose:
+      - "8003"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/transcription/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # ── Evaluation ───────────────────────────────────────────────────────────────
+  evaluation:
+    build:
+      context: .
+      dockerfile: evaluation/Dockerfile
+    environment:
+      PORT:                ${EVALUATION_PORT:-8001}
+      INTERNAL_API_KEY:    ${INTERNAL_API_KEY}
+      BEHAVIOUR_ANALYSER:  ${BEHAVIOUR_ANALYSER:-production}
+      DEVICE:              ${EVALUATION_DEVICE:-cuda}
+      EVALUATION_CONFIG:   ${EVALUATION_CONFIG:-evaluation_config.toml}
+    volumes:
+      - ./models/hf_cache:/root/.cache/huggingface
+    expose:
+      - "8001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/evaluate/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # ── Feedback ─────────────────────────────────────────────────────────────────
+  feedback:
+    build:
+      context: .
+      dockerfile: feedback/Dockerfile
+    environment:
+      PORT:                    ${FEEDBACK_PORT:-8002}
+      INTERNAL_API_KEY:        ${INTERNAL_API_KEY}
+      FEEDBACK_GENERATOR:      ${FEEDBACK_GENERATOR:-production}
+      OLLAMA_HOST:             ${OLLAMA_HOST:-http://ollama:11434}
+      OLLAMA_MODEL:            ${OLLAMA_MODEL:-llama3.2}
+      OLLAMA_TIMEOUT_MS:       ${OLLAMA_TIMEOUT_MS:-120000}
+      OLLAMA_PULL_TIMEOUT_MS:  ${OLLAMA_PULL_TIMEOUT_MS:-600000}
+      OLLAMA_MODEL_DIGEST:     ${OLLAMA_MODEL_DIGEST:-}
+    expose:
+      - "8002"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/feedback/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+  # ── Ollama ───────────────────────────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama
+    volumes:
+      - ./models:/root/.ollama
+    expose:
+      - "11434"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped

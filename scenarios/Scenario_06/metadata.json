@@ -61,7 +61,7 @@
         },
 
         "clip_02_blij": {
-            "file": "video/clip_02_blij.mp4",
+            "file": "videos/clip_02_blij.mp4",
             "transcript": "Wat sta je nu stom te grijnzen.",
             "clip_duration_seconds": 7.0,
             "notable_features": [
