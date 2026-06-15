@@ -8,7 +8,7 @@
 #   JWT_SECRET               — secret for signing JWTs
 #   BOOTSTRAP_ADMIN_PASSWORD — initial admin account password (remove after first deploy)
 #   VITE_APP_HTTP_URL        — public URL of the app container as seen from the browser
-#   VITE_BASE_PATH          — URL prefix for assets, e.g. /client/ (default: /)
+#   VITE_BASE_PATH           — URL prefix for assets, e.g. /client/ (default: /)
 #
 # Optional overrides (Dokploy env tab):
 #   BOOTSTRAP_ADMIN_USERNAME — defaults to "admin"
@@ -19,17 +19,11 @@
 # client and app use expose: only — bind them to domains in the Dokploy UI.
 #
 # Required host directories (create once on the DGX before first deploy):
-#   mkdir -p ./scenarios ./data ./models/hf_cache
+#   mkdir -p ./scenarios ./data
 
 services:
 
   # ── Client ──────────────────────────────────────────────────────────────────
-  # VITE_APP_HTTP_URL is a Vite build-time variable — set it in Dokploy's
-  # Environment Variables tab. It is baked into the JS bundle at build time;
-  # changing it requires a rebuild.
-  #
-  # Bind this service to your public domain in Dokploy's domain settings.
-  # Container port: 80
   client:
     build:
       context: .
@@ -44,35 +38,29 @@ services:
     restart: unless-stopped
 
   # ── App ─────────────────────────────────────────────────────────────────────
-  # Bind this service to your public API domain in Dokploy's domain settings.
-  # Container port: 3000
   app:
     build:
       context: .
       dockerfile: app/Dockerfile
     environment:
-      # Fixed internal service URLs — not overridable
       EVALUATION_URL:    http://evaluation:8001
       FEEDBACK_URL:      http://feedback:8002
       TRANSCRIPTION_URL: http://transcription:8003
       DATA_DIR:          /app/data
       SCENARIOS_DIR:     /app/scenarios
       PORT:              3000
-      # Auth — secrets must be set in Dokploy
       INTERNAL_API_KEY:          ${INTERNAL_API_KEY}
       JWT_SECRET:                ${JWT_SECRET}
       JWT_EXPIRY:                ${JWT_EXPIRY:-8h}
       ALLOW_REGISTRATION:        ${ALLOW_REGISTRATION:-false}
       BOOTSTRAP_ADMIN_USERNAME:  ${BOOTSTRAP_ADMIN_USERNAME:-admin}
       BOOTSTRAP_ADMIN_PASSWORD:  ${BOOTSTRAP_ADMIN_PASSWORD}
-      # Session management
       MAX_SESSIONS:              32
       MAX_QUEUE_SIZE:            10
       CAPACITY_POLICY:           QUEUE
       SESSION_TIMEOUT_MS:        30000
       RECOVERY_WINDOW_MS:        30000
       FEEDBACK_TIMEOUT_MS:       150000
-      # CORS — leave unset for single-server classroom use
       CORS_ORIGIN:               ${CORS_ORIGIN:-}
     volumes:
       - ./scenarios:/app/scenarios:ro
@@ -93,12 +81,17 @@ services:
       dockerfile: transcription/Dockerfile
     environment:
       INTERNAL_API_KEY:   ${INTERNAL_API_KEY}
-      PORT:               8003
+      PORT:                8003
       TRANSCRIPTION_POOL: production
       WHISPER_MODEL:      large-v3-turbo
       WHISPER_LANGUAGE:   nl
       WHISPER_WORKERS:    4
       DEVICE:             cuda
+      # Overriding the default CTranslate2/Faster-Whisper cache path
+      HF_HUB_CACHE:       /root/.cache/huggingface
+    volumes:
+      # Named volume isolates large whisper models across pipeline updates
+      - hf_cache:/root/.cache/huggingface
     expose:
       - "8003"
     healthcheck:
@@ -117,19 +110,18 @@ services:
     restart: unless-stopped
 
   # ── Evaluation ───────────────────────────────────────────────────────────────
-  # Base image and torch wheels target CUDA 13.0 / ARM64 (DGX Spark).
-  # See evaluation/Dockerfile for x86_64 fallback instructions.
   evaluation:
     build:
       context: .
       dockerfile: evaluation/Dockerfile
     environment:
       INTERNAL_API_KEY:   ${INTERNAL_API_KEY}
-      PORT:               8001
+      PORT:                8001
       BEHAVIOUR_ANALYSER: production
       DEVICE:             cuda
     volumes:
-      - ./models/hf_cache:/root/.cache/huggingface
+      # Swapped out host relative bind mount for shared named volume reference
+      - hf_cache:/root/.cache/huggingface
     expose:
       - "8001"
     healthcheck:
@@ -160,8 +152,6 @@ services:
       OLLAMA_MODEL:           qwen3:32b
       OLLAMA_TIMEOUT_MS:      120000
       OLLAMA_PULL_TIMEOUT_MS: 600000
-      # Optional — pin model digest for production safety.
-      # Obtain with: docker compose exec ollama ollama show qwen3:32b
       OLLAMA_MODEL_DIGEST:    ${OLLAMA_MODEL_DIGEST:-}
     expose:
       - "8002"
@@ -177,7 +167,8 @@ services:
   ollama:
     image: ollama/ollama
     volumes:
-      - ./models:/root/.ollama
+      # Named volume isolates heavy LLM weights safely within Docker storage engines
+      - ollama_storage:/root/.ollama
     expose:
       - "11434"
     deploy:
@@ -188,3 +179,10 @@ services:
               count: 1
               capabilities: [gpu]
     restart: unless-stopped
+
+# ── Named Volume Declarations ──────────────────────────────────────────────────
+volumes:
+  hf_cache:
+    name: agressiontrainer_hf_cache
+  ollama_storage:
+    name: agressiontrainer_ollama_storage
