@@ -24,6 +24,11 @@ if (devToolsEnabled) {
 //   /client/   — served at localhost/client/ behind Traefik strip-prefix
 const base = process.env["VITE_BASE_PATH"] ?? "/";
 
+// Log the URLs being baked into the build so the build log makes it immediately
+// visible whether the correct values were passed as build args.
+console.log(`[build] HTTP base: ${process.env["VITE_APP_HTTP_URL"] ?? "http://localhost:3001 (default)"}`);
+console.log(`[build] WS base:   ${process.env["VITE_APP_WS_URL"]   ?? "ws://localhost:3001 (default)"}`);
+
 export default defineConfig({
   plugins: [react()],
   base,
