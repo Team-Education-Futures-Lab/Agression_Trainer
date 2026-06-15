@@ -6,12 +6,13 @@
 # ---------------------------------------
 # - amd64 (x86_64): Installs the standard binary wheel straight from PyPI.
 # - arm64 (aarch64): Compiles CTranslate2 with native GPU acceleration against
-#   LTS CUDA toolkits to ensure GCC compiler compliance on DGX hardware.
+#   CUDA toolkits using explicitly declared GCC-12 compliance overrides.
 # =============================================================================
 
 # ── Architecture-specific base images ─────────────────────────────────────────
-FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS base-arm64
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS base-amd64
+# Using Ubuntu 24.04 provides Python 3.12, fully satisfying NumPy 2.x targets.
+FROM nvidia/cuda:12.8.0-devel-ubuntu24.04 AS base-arm64
+FROM nvidia/cuda:12.8.0-runtime-ubuntu24.04 AS base-amd64
 
 ARG TARGETARCH
 FROM base-${TARGETARCH} AS final
@@ -19,6 +20,7 @@ FROM base-${TARGETARCH} AS final
 ARG TARGETARCH
 
 # ── System dependencies ────────────────────────────────────────────────────────
+# Explicitly pulling gcc-12/g++-12 to act as compatible alternative host compilers.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         python3 \
@@ -26,15 +28,14 @@ RUN apt-get update \
         python3-dev \
         python3-setuptools \
         build-essential \
+        gcc-12 \
+        g++-12 \
         cmake \
         git \
         curl \
         ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/python3 /usr/bin/python
-
-# Upgrade pip to ensure version parity (>23.0) across all environments
-RUN pip3 install --no-cache-dir --upgrade pip wheel setuptools
 
 WORKDIR /app
 
@@ -44,7 +45,7 @@ ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 # ── Python & Component Installation ───────────────────────────────────────────
 COPY transcription/requirements.txt .
 
-# 1. Install regular application dependencies
+# 1. Install regular application dependencies (safely processing NumPy 2.x via Python 3.12)
 RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
 
 # 2. Branch conditionally based on CPU target architecture
@@ -52,9 +53,17 @@ RUN if [ "$TARGETARCH" = "arm64" ] ; then \
         echo "Building CTranslate2 from source with CUDA support for ARM64..." && \
         git clone --recursive https://github.com/OpenNMT/CTranslate2.git /tmp/ctranslate2 && \
         mkdir /tmp/ctranslate2/build && cd /tmp/ctranslate2/build && \
-        cmake .. -DWITH_CUDA=ON -DWITH_MKL=OFF -DWITH_DNNL=OFF -DOPENMP_RUNTIME=COMP && \
+        # Crucial: Enforce GCC 12 variants to prevent the nvcc host compiler error block
+        cmake .. \
+          -DCMAKE_C_COMPILER=gcc-12 \
+          -DCMAKE_CXX_COMPILER=g++-12 \
+          -DWITH_CUDA=ON \
+          -DWITH_MKL=OFF \
+          -DWITH_DNNL=OFF \
+          -DOPENMP_RUNTIME=COMP && \
         make -j$(nproc) && make install && ldconfig && \
         cd /tmp/ctranslate2/python && \
+        pip install --no-cache-dir --break-system-packages --upgrade pip wheel && \
         pip install --no-cache-dir --break-system-packages -r install_requirements.txt && \
         python setup.py bdist_wheel && \
         pip install --no-cache-dir --break-system-packages --force-reinstall dist/*.whl && \
@@ -65,7 +74,7 @@ RUN if [ "$TARGETARCH" = "arm64" ] ; then \
     fi
 
 # ── Multi-Stage Layer Clean up ─────────────────────────────────────────────────
-RUN apt-get purge -y cmake git build-essential && apt-get autoremove -y
+RUN apt-get purge -y cmake git build-essential gcc-12 g++-12 && apt-get autoremove -y
 
 # ── Source Allocation ─────────────────────────────────────────────────────────
 COPY transcription/src ./src
