@@ -1,29 +1,17 @@
-﻿# =============================================================================
+# =============================================================================
 # AR Training — Transcription Container
 # Build context must be the repo root (docker compose handles this).
 #
-# Architecture-aware build
-# ------------------------
-# faster-whisper uses ctranslate2 for inference. The ctranslate2 PyPI wheel
-# is compiled with CUDA support, but it requires the CUDA runtime libraries
-# to be present on the host at startup. The default python:3.12-slim base
-# image has no CUDA libraries, causing the error:
+# Architecture-aware & Platform-Agnostic Build
+# --------------------------------------------
+# faster-whisper uses ctranslate2 for inference. The default PyPI wheels for 
+# ctranslate2 often fail to resolve compiled CUDA components on modern runtimes
+# (like ARM64 platforms with CUDA 13 or specific x86 workstation setups).
 #
-#   ValueError: This CTranslate2 package was not compiled with CUDA support
-#
-# The fix is to use an NVIDIA CUDA base image so the runtime libraries are
-# present. ctranslate2 and faster-whisper are then installed normally from PyPI.
-#
-#   aarch64 (ARM64) — DGX Spark
-#     Base: nvidia/cuda:13.0.0-runtime-ubuntu24.04
-#
-#   amd64 (x86_64) — standard server / workstation
-#     Base: nvidia/cuda:12.4.1-runtime-ubuntu22.04
-#
-# Docker injects TARGETARCH automatically. No manual flag is needed.
-#
-# Requires: NVIDIA Container Toolkit on the host and the deploy.resources
-# section in docker-compose.dokploy.yml to expose the GPU to this container.
+# This Dockerfile automatically handles base selection using TARGETARCH and builds
+# target-agnostic Python steps that pull heavily optimized packages from NVIDIA's
+# registry, fallback cleanly to standard PyPI mirrors, and configure the necessary
+# runtime paths for GPU execution.
 # =============================================================================
 
 # ── Architecture-specific base images ─────────────────────────────────────────
@@ -47,15 +35,22 @@ RUN apt-get update \
 
 WORKDIR /app
 
+# ── Environment & Library Discovery ───────────────────────────────────────────
+# Explicitly ensure that any underlying CUDA or Nvidia components can find their 
+# respective libraries during CTranslate2 runtime binding.
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
+
 # ── Python dependencies ───────────────────────────────────────────────────────
-# faster-whisper pulls in ctranslate2 from PyPI. The PyPI wheel is compiled
-# with CUDA support — it just requires the CUDA runtime libraries to be present,
-# which the base image above provides.
+# We install standard dependencies first. Then, we execute a force reinstall on 
+# ctranslate2 leveraging NVIDIA's index as a high-priority source while falling
+# back gracefully to PyPI. 
 #
-# --break-system-packages is required on Ubuntu 24.04 (PEP 668).
-# It is safe inside a container — there is no system package manager conflict.
+# --break-system-packages is required on Ubuntu 24.04+ (PEP 668) inside the container.
 COPY transcription/requirements.txt .
-RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
+
+RUN pip install --no-cache-dir --break-system-packages -r requirements.txt \
+    && pip install --no-cache-dir --break-system-packages --force-reinstall \
+        ctranslate2 --extra-index-url https://pypi.nvidia.com
 
 # ── Source ────────────────────────────────────────────────────────────────────
 COPY transcription/src ./src
