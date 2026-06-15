@@ -2,32 +2,35 @@
 # AR Training — Transcription Container
 # Build context must be the repo root (docker compose handles this).
 #
-# Architecture-aware & Platform-Agnostic Build
-# --------------------------------------------
-# faster-whisper uses ctranslate2 for inference. The default PyPI wheels for 
-# ctranslate2 often fail to resolve compiled CUDA components on modern runtimes
-# (like ARM64 platforms with CUDA 13 or specific x86 workstation setups).
-#
-# This Dockerfile automatically handles base selection using TARGETARCH and builds
-# target-agnostic Python steps that pull heavily optimized packages from NVIDIA's
-# registry, fallback cleanly to standard PyPI mirrors, and configure the necessary
-# runtime paths for GPU execution.
+# Architecture-aware Multi-Platform Setup
+# ---------------------------------------
+# - amd64 (x86_64): Installs the standard binary wheel straight from PyPI,
+#   which natively packs pre-compiled CUDA 12.x capabilities.
+# - arm64 (aarch64): PyPI binaries are strictly CPU-only. For deployment on 
+#   NVIDIA DGX Spark / Grace Hopper configurations, we pull the source repository
+#   and compile the CUDA/C++ binding binaries directly against the local GPU hardware.
 # =============================================================================
 
 # ── Architecture-specific base images ─────────────────────────────────────────
-FROM nvidia/cuda:13.0.0-runtime-ubuntu24.04 AS base-arm64
+# Note: ARM64 maps to a development layer (-devel) to access nvcc and headers.
+FROM nvidia/cuda:13.0.0-devel-ubuntu24.04 AS base-arm64
 FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS base-amd64
 
 ARG TARGETARCH
 FROM base-${TARGETARCH} AS final
 
+ARG TARGETARCH
+
 # ── System dependencies ────────────────────────────────────────────────────────
-# curl:   used by the Docker healthcheck
-# ffmpeg: required by faster-whisper for audio decoding
+# cmake, git, and build-essential are required strictly during the ARM64 compile path.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         python3 \
         python3-pip \
+        python3-dev \
+        build-essential \
+        cmake \
+        git \
         curl \
         ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
@@ -35,24 +38,39 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# ── Environment & Library Discovery ───────────────────────────────────────────
-# Explicitly ensure that any underlying CUDA or Nvidia components can find their 
-# respective libraries during CTranslate2 runtime binding.
+# ── Environmental Mapping ──────────────────────────────────────────────────────
+# Ensures CTranslate2 and underlying CUDA dependencies bind cleanly at runtime 
+# regardless of differences in underlying OS filesystem layouts.
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 
-# ── Python dependencies ───────────────────────────────────────────────────────
-# We install standard dependencies first. Then, we execute a force reinstall on 
-# ctranslate2 leveraging NVIDIA's index as a high-priority source while falling
-# back gracefully to PyPI. 
-#
-# --break-system-packages is required on Ubuntu 24.04+ (PEP 668) inside the container.
+# ── Python & Component Installation ───────────────────────────────────────────
 COPY transcription/requirements.txt .
 
-RUN pip install --no-cache-dir --break-system-packages -r requirements.txt \
-    && pip install --no-cache-dir --break-system-packages --force-reinstall \
-        ctranslate2 --extra-index-url https://pypi.nvidia.com
+# 1. Install regular application dependencies
+RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
 
-# ── Source ────────────────────────────────────────────────────────────────────
+# 2. Branch conditionally based on CPU target architecture
+RUN if [ "$TARGETARCH" = "arm64" ] ; then \
+        echo "Building CTranslate2 from source with CUDA support for ARM64 (DGX/Grace Hopper)..." && \
+        git clone --recursive https://github.com/OpenNMT/CTranslate2.git /tmp/ctranslate2 && \
+        mkdir /tmp/ctranslate2/build && cd /tmp/ctranslate2/build && \
+        cmake .. -DWITH_CUDA=ON -DWITH_MKL=OFF -DWITH_DNNL=OFF && \
+        make -j$(nproc) && make install && ldconfig && \
+        cd /tmp/ctranslate2/python && \
+        pip install --no-cache-dir --break-system-packages -r install_requirements.txt && \
+        python setup.py bdist_wheel && \
+        pip install --no-cache-dir --break-system-packages --force-reinstall dist/*.whl && \
+        rm -rf /tmp/ctranslate2 ; \
+    else \
+        echo "Installing standard stable CTranslate2 wheels with CUDA support for AMD64..." && \
+        pip install --no-cache-dir --break-system-packages --force-reinstall ctranslate2 ; \
+    fi
+
+# ── Multi-Stage Layer Clean up ─────────────────────────────────────────────────
+# Strips development packages to keep production image size lean.
+RUN apt-get purge -y cmake git build-essential && apt-get autoremove -y
+
+# ── Source Allocation ─────────────────────────────────────────────────────────
 COPY transcription/src ./src
 
 WORKDIR /app/src
