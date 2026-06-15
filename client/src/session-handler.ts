@@ -38,8 +38,14 @@ import type { TransportInterface } from "./transport.ts";
 
 const HTTP_BASE = import.meta.env["VITE_APP_HTTP_URL"] as string | undefined
     ?? "http://localhost:3001";
+
+// Derive the WebSocket base from the HTTP base so only one build arg is needed.
+// If VITE_APP_WS_URL is explicitly set it takes precedence; otherwise the
+// scheme is swapped mechanically: https:// → wss://, http:// → ws://.
+// This means VITE_APP_WS_URL never needs to be set in Dokploy Build Args —
+// setting VITE_APP_HTTP_URL alone is sufficient.
 const WS_BASE = import.meta.env["VITE_APP_WS_URL"] as string | undefined
-    ?? "ws://localhost:3001";
+    ?? HTTP_BASE.replace(/^https:\/\//, "wss://").replace(/^http:\/\//, "ws://");
 
 // ─── Callbacks ────────────────────────────────────────────────────────────────
 
