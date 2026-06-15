@@ -10,7 +10,6 @@
 # =============================================================================
 
 # ── Architecture-specific base images ─────────────────────────────────────────
-# Using Ubuntu 24.04 provides Python 3.12, fully satisfying NumPy 2.x targets.
 FROM nvidia/cuda:12.8.0-devel-ubuntu24.04 AS base-arm64
 FROM nvidia/cuda:12.8.0-runtime-ubuntu24.04 AS base-amd64
 
@@ -20,13 +19,13 @@ FROM base-${TARGETARCH} AS final
 ARG TARGETARCH
 
 # ── System dependencies ────────────────────────────────────────────────────────
-# Explicitly pulling gcc-12/g++-12 to act as compatible alternative host compilers.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         python3 \
         python3-pip \
         python3-dev \
         python3-setuptools \
+        python3-wheel \
         build-essential \
         gcc-12 \
         g++-12 \
@@ -45,7 +44,7 @@ ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 # ── Python & Component Installation ───────────────────────────────────────────
 COPY transcription/requirements.txt .
 
-# 1. Install regular application dependencies (safely processing NumPy 2.x via Python 3.12)
+# 1. Install regular application dependencies
 RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
 
 # 2. Branch conditionally based on CPU target architecture
@@ -53,7 +52,6 @@ RUN if [ "$TARGETARCH" = "arm64" ] ; then \
         echo "Building CTranslate2 from source with CUDA support for ARM64..." && \
         git clone --recursive https://github.com/OpenNMT/CTranslate2.git /tmp/ctranslate2 && \
         mkdir /tmp/ctranslate2/build && cd /tmp/ctranslate2/build && \
-        # Crucial: Enforce GCC 12 variants to prevent the nvcc host compiler error block
         cmake .. \
           -DCMAKE_C_COMPILER=gcc-12 \
           -DCMAKE_CXX_COMPILER=g++-12 \
@@ -63,10 +61,11 @@ RUN if [ "$TARGETARCH" = "arm64" ] ; then \
           -DOPENMP_RUNTIME=COMP && \
         make -j$(nproc) && make install && ldconfig && \
         cd /tmp/ctranslate2/python && \
-        pip install --no-cache-dir --break-system-packages --upgrade pip wheel && \
+        # Removed the problematic inline upgrade command causing the Debian drop block
         pip install --no-cache-dir --break-system-packages -r install_requirements.txt && \
         python setup.py bdist_wheel && \
-        pip install --no-cache-dir --break-system-packages --force-reinstall dist/*.whl && \
+        # Force-install using ignore-installed to bypass system package manager conflicts
+        pip install --no-cache-dir --break-system-packages --ignore-installed --force-reinstall dist/*.whl && \
         rm -rf /tmp/ctranslate2 ; \
     else \
         echo "Installing standard stable CTranslate2 wheels with CUDA support for AMD64..." && \
