@@ -10,8 +10,6 @@
 # =============================================================================
 
 # ── Architecture-specific base images ─────────────────────────────────────────
-# Crucial: Using Ubuntu 22.04 base environments here guarantees GCC 11/12 compatibility 
-# with the NVIDIA compiler, resolving the C++ source optimization drops.
 FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS base-arm64
 FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS base-amd64
 
@@ -35,6 +33,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/python3 /usr/bin/python
 
+# Upgrade pip to ensure version parity (>23.0) across all environments
+RUN pip3 install --no-cache-dir --upgrade pip wheel setuptools
+
 WORKDIR /app
 
 # ── Environmental Mapping ──────────────────────────────────────────────────────
@@ -51,11 +52,9 @@ RUN if [ "$TARGETARCH" = "arm64" ] ; then \
         echo "Building CTranslate2 from source with CUDA support for ARM64..." && \
         git clone --recursive https://github.com/OpenNMT/CTranslate2.git /tmp/ctranslate2 && \
         mkdir /tmp/ctranslate2/build && cd /tmp/ctranslate2/build && \
-        # Explicitly enforce OpenMP compatibility blocks via -DOPENMP_RUNTIME=COMP
         cmake .. -DWITH_CUDA=ON -DWITH_MKL=OFF -DWITH_DNNL=OFF -DOPENMP_RUNTIME=COMP && \
         make -j$(nproc) && make install && ldconfig && \
         cd /tmp/ctranslate2/python && \
-        pip install --no-cache-dir --break-system-packages --upgrade pip wheel && \
         pip install --no-cache-dir --break-system-packages -r install_requirements.txt && \
         python setup.py bdist_wheel && \
         pip install --no-cache-dir --break-system-packages --force-reinstall dist/*.whl && \
