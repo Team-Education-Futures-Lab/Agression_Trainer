@@ -208,21 +208,25 @@ export class StubFeedbackGenerator implements FeedbackGeneratorInterface {
 
 ## Testing the Full Pipeline with Stubs
 
-With all stubs active, a complete session flows as follows:
+The cleanest way to test the full pipeline is to use the browser client at `http://localhost:5173/demo` (Vite dev server) or `http://localhost:3000/demo` (Docker). The `/demo` page runs the normal two-phase student flow: watch the clip, then respond during a countdown. This exercises every layer — capture, WebSocket, transcription, evaluation, branching, and feedback.
 
-1. `POST /session/create` → `SessionContext` with `state: active`
-2. Open WebSocket → send `VideoFrame` and `AudioChunk` messages
-3. Receive `SessionUpdate` messages carrying the live accumulated transcript as the Transcription container processes audio
-4. Send `ClipEnded` when the clip finishes playing
-5. Receive `clip_candidates` immediately — full clip data for each possible next clip, allowing preloading to begin while evaluation runs
-6. Receive `clip_selected` with the resolved `next_clip_id` and `clip_score` from `StubBehaviourAnalyser`
-7. If `next_clip_id` is non-null: load the next clip and repeat from step 2
-8. If `next_clip_id` is null: the scenario is complete — wait for the debrief
-9. Receive `FeedbackToken` stream then `SessionComplete` from `StubFeedbackGenerator`
+For lower-level integration testing without a browser, the raw WebSocket flow is:
+
+1. Obtain a session: `POST /session/create` → `SessionContext` with `state: "active"` or `"queued"`. If queued, wait for `session_ready` over the WebSocket.
+2. Open the WebSocket at the returned `ws_path`.
+3. Send `get_scenarios` → receive `scenarios_list`; or send `request_clip { activate: true }` directly if you already know the scenario and entry clip ID.
+4. Send `VideoFrame` and `AudioChunk` messages continuously while the clip plays.
+5. Receive `SessionUpdate` messages carrying the live accumulated transcript.
+6. Send `clip_ended` when the clip finishes.
+7. Receive `clip_candidates` immediately — full clip data for each possible next clip.
+8. Receive `clip_selected` with the resolved `next_clip_id` and `clip_score` from `StubBehaviourAnalyser`.
+9. If `next_clip_id` is non-null: load the next clip and repeat from step 4.
+10. If `next_clip_id` is null: the scenario is complete — wait for the debrief.
+11. Receive `feedback_token` stream then `session_complete` from `StubFeedbackGenerator`.
 
 If this flow completes without errors, the full inter-container pipeline is working correctly and real implementations can be dropped in independently.
 
-> **Note:** `POST /session/{id}/end` exists as an explicit termination route but is not part of the normal clip flow. Feedback is triggered automatically when a terminal clip is reached via `ClipEnded`. The `/end` route handles abnormal termination only and does **not** stream feedback to the client.
+> **Note:** `POST /session/{id}/end` exists as an explicit termination route but is not part of the normal clip flow. Feedback is triggered automatically when a terminal clip is reached via `clip_ended`. The `/end` route handles abnormal termination only and does **not** stream feedback to the client.
 
 ---
 

@@ -147,9 +147,9 @@ Describes observable behaviours of the **actor** in this clip — the stimulus t
 
 Required. Controls how the Evaluation container interprets the rubric for this clip.
 
-| Value | Behaviour |
-|---|---|
-| `"rubric"` | The scorer evaluates the student's signals against both `de_escalation_rubric` and `escalation_rubric` and produces a graded score. Use for clips where specific positive behaviours are expected and should be rewarded. |
+| Value         | Behaviour                                                                                                                                                                                                                                                                                                                                             |
+|---------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `"rubric"`    | The scorer evaluates the student's signals against both `de_escalation_rubric` and `escalation_rubric` and produces a graded score. Use for clips where specific positive behaviours are expected and should be rewarded.                                                                                                                             |
 | `"threshold"` | The scorer only checks whether the student crossed into clear escalation territory. Absence of positive signals is not penalised. Use for clips where the actor is very difficult and any calm, non-escalating response is a reasonable outcome — penalising a student for not smiling during a threatening scene is pedagogically counterproductive. |
 
 #### `de_escalation_rubric` and `escalation_rubric`
@@ -271,6 +271,7 @@ This table states which fields travel to each AI container at runtime. Fields no
 
 ---
 
+
 ## Example — `scenarios/scenario_01/metadata.json`
 
 ```json
@@ -293,7 +294,7 @@ This table states which fields travel to each AI container at runtime. Fields no
         "clip_01_intro": {
             "file": "clip_01_intro.mp4",
             "transcript": "Dit is niet eerlijk! Ik heb zo hard gewerkt en dan krijg ik toch een onvoldoende. U snapt gewoon niet hoe moeilijk dit voor mij is.",
-            "clip_duration_seconds": 12.0,
+            "clip_duration_seconds": 9.5,
             "notable_features": ["raised_voice", "aggressive_posture", "direct_eye_contact"],
             "scoring_mode": "rubric",
             "de_escalation_rubric": [
@@ -312,22 +313,22 @@ This table states which fields travel to each AI container at runtime. Fields no
             "critical_failures": ["raised_voice"],
             "score_range": { "min": -0.9, "max": 0.9 },
             "clip_learning_objectives": ["emotieregulatie", "empathie tonen"],
-            "ideal_response": "Erken de frustratie zonder in de verdediging te schieten. Spreek rustig op een lage toon. Stel een open vraag zoals 'Kun je me vertellen wat er voor jou niet klopte aan de beoordeling?'",
+            "ideal_response": "Erken de frustratie zonder in de verdediging te schieten. Spreek rustig op een lage toon en houd een open, ontspannen houding. Stel een open vraag zoals 'Kun je me vertellen wat er voor jou niet klopte aan de beoordeling?' om de student ruimte te geven.",
             "response_warnings": [
                 "ga niet in de verdediging over de beoordeling",
-                "minimaliseer de emotie niet met zinnen als 'rustig maar'",
+                "minimaliseer de emotie niet met zinnen als 'rustig maar' of 'het valt wel mee'",
                 "vermijd sarcasme of een verwijtende toon"
             ],
             "branch_conditions": [
-                { "min_score": -1.0, "max_score": 0.2,  "next_clip": "clip_02_calm" },
-                { "min_score":  0.2, "max_score": 1.01, "next_clip": "clip_02_escalated" }
+                { "min_score": -1.0, "max_score":  0.2,  "next_clip": "clip_02_calm" },
+                { "min_score":  0.2, "max_score":  1.01, "next_clip": "clip_02_escalated" }
             ]
         },
 
         "clip_02_calm": {
             "file": "clip_02_calm.mp4",
             "transcript": "Oké... misschien heb ik me laten meeslepen. Kunt u me uitleggen wat er precies mis was?",
-            "clip_duration_seconds": 8.0,
+            "clip_duration_seconds": 7.5,
             "notable_features": ["calm_voice", "open_posture"],
             "scoring_mode": "rubric",
             "de_escalation_rubric": [
@@ -343,21 +344,21 @@ This table states which fields travel to each AI container at runtime. Fields no
             "critical_failures": [],
             "score_range": { "min": -0.9, "max": 0.8 },
             "clip_learning_objectives": ["actief luisteren", "open vragen stellen"],
-            "ideal_response": "Bevestig de de-escalatie en geef een heldere, feitelijke uitleg van de beoordeling. Blijf open en benaderbaar; dit is het moment om de relatie te herstellen.",
+            "ideal_response": "Bevestig de de-escalatie en geef een heldere, feitelijke uitleg van de beoordeling. Blijf open en benaderbaar; dit is het moment om de relatie te herstellen en concrete vervolgstappen te bieden.",
             "response_warnings": [
                 "ga nu niet alsnog in de verdediging",
-                "vermijd een bestraffende toon bij het uitleggen"
+                "vermijd een bestraffende toon bij het uitleggen van de criteria"
             ],
             "branch_conditions": [
-                { "min_score": -1.0, "max_score": 0.3,  "next_clip": "clip_03_end_good" },
-                { "min_score":  0.3, "max_score": 1.01, "next_clip": "clip_03_end_bad" }
+                { "min_score": -1.0, "max_score":  0.3,  "next_clip": "clip_03_end_good" },
+                { "min_score":  0.3, "max_score":  1.01, "next_clip": "clip_03_end_bad" }
             ]
         },
 
         "clip_02_escalated": {
             "file": "clip_02_escalated.mp4",
             "transcript": "Ziet u wel! U luistert toch niet. Dit is altijd hetzelfde met u!",
-            "clip_duration_seconds": 7.0,
+            "clip_duration_seconds": 6.0,
             "notable_features": ["raised_voice", "pointing_gesture", "aggressive_posture"],
             "scoring_mode": "threshold",
             "de_escalation_rubric": [
@@ -373,14 +374,14 @@ This table states which fields travel to each AI container at runtime. Fields no
             "critical_failures": ["raised_voice"],
             "score_range": { "min": -0.5, "max": 1.0 },
             "clip_learning_objectives": ["emotieregulatie"],
-            "ideal_response": "Blijf kalm ondanks de escalatie. Stel een grens als dat nodig is, maar doe dit vriendelijk en zonder verwijt.",
+            "ideal_response": "Blijf kalm ondanks de persoonlijke aanval. Stel eventueel een korte, vriendelijke grens ('Ik merk dat je erg gefrustreerd bent — laten we dit rustig bespreken') zonder zelf de toon omhoog te brengen.",
             "response_warnings": [
                 "reageer niet defensief op de persoonlijke aanval",
                 "stem de eigen toon niet mee omhoog"
             ],
             "branch_conditions": [
-                { "min_score": -1.0, "max_score": 0.0,  "next_clip": "clip_03_end_bad" },
-                { "min_score":  0.0, "max_score": 1.01, "next_clip": "clip_03_end_bad" }
+                { "min_score": -1.0, "max_score":  0.0,  "next_clip": "clip_03_end_bad" },
+                { "min_score":  0.0, "max_score":  1.01, "next_clip": "clip_03_end_bad" }
             ]
         },
 
@@ -398,7 +399,8 @@ This table states which fields travel to each AI container at runtime. Fields no
             "escalation_rubric": [],
             "critical_failures": [],
             "score_range": { "min": -1.0, "max": 0.2 },
-            "ideal_response": "Sluit het gesprek positief af. Bevestig de openheid van de student en geef een bemoedigende afsluiting die de relatie intact laat.",
+            "clip_learning_objectives": [],
+            "ideal_response": "Sluit het gesprek positief en bemoedigend af. Bevestig de openheid van de student en geef een korte, opbouwende afsluiting die de relatie intact laat.",
             "response_warnings": [],
             "branch_conditions": [
                 { "min_score": -1.0, "max_score": 1.01, "next_clip": null }
@@ -422,10 +424,11 @@ This table states which fields travel to each AI container at runtime. Fields no
             ],
             "critical_failures": [],
             "score_range": { "min": -0.3, "max": 1.0 },
-            "ideal_response": "Ook in een geëscaleerde situatie is het belangrijk kalm te blijven en de deur open te houden voor een later gesprek.",
+            "clip_learning_objectives": [],
+            "ideal_response": "Ook in een geëscaleerde situatie is het belangrijk kalm te blijven en de deur open te houden voor een later gesprek. Benoem dat je beschikbaar bent als de student tot rust is gekomen.",
             "response_warnings": [
                 "ga niet mee in de dreiging",
-                "sluit het gesprek niet af op een afwijzende manier"
+                "sluit het gesprek niet af op een afwijzende of verwijtende manier"
             ],
             "branch_conditions": [
                 { "min_score": -1.0, "max_score": 1.01, "next_clip": null }

@@ -134,18 +134,17 @@ Deletes a user account. Admin JWT required. Cannot delete the last admin account
 
 ### `POST /session/create`
 
-Previously gated on `ADMIN_API_KEY` for admin sessions. Now uses JWT-based auth as the primary mechanism, with `ADMIN_API_KEY` retained as a backwards-compatible fallback.
+Previously gated on `ADMIN_API_KEY` for admin sessions. Now uses JWT-based auth as the primary mechanism. `ADMIN_API_KEY` is no longer accepted on this endpoint.
 
 **Behaviour:**
 - If `Authorization: Bearer <token>` is present and the token is a valid JWT with `role: "admin"`, an admin session is created.
-- If the header is absent or the token is invalid, a student session is created. No error is returned — sessions are public for students.
-- If `ADMIN_API_KEY` is configured and the header matches it exactly (legacy path), an admin session is created. This path exists only for tooling that predates JWT auth.
+- If the header is absent or the token is invalid, a standard student session is created. No error is returned — sessions are public for students.
 
 When a valid JWT is present, `user_id` is taken from the token's `sub` claim rather than the request body.
 
 ### `POST /scenarios`
 
-Previously gated on `ADMIN_API_KEY` only. Now accepts either a valid admin JWT (primary) or `ADMIN_API_KEY` (backwards-compatible fallback for existing tooling). Returns `401` if neither is present or valid.
+Accepts either a valid admin JWT (primary) or `ADMIN_API_KEY` (backwards-compatible fallback for existing tooling). Returns `401` if neither is present or valid.
 
 ---
 
@@ -176,23 +175,34 @@ The following variables are added to the App container. See `app/.env.example` f
 | `BOOTSTRAP_ADMIN_USERNAME` | No       | —       | Creates the first admin on startup if the users table is empty. |
 | `BOOTSTRAP_ADMIN_PASSWORD` | No       | —       | Password for the bootstrap admin (min 8 characters).            |
 
-`ADMIN_API_KEY` is retained for the legacy fallback path. It is no longer required and can be left unset in new deployments.
+`ADMIN_API_KEY` is retained as a legacy fallback on `POST /scenarios` only. It is no longer accepted on `POST /session/create` and can be left unset in new deployments.
 
 ---
 
 ## First-Time Setup
 
-When the database is empty (first deployment), create the initial admin account in one of two ways:
+When the database is empty (first deployment), create the initial admin account using bootstrap env vars:
 
-**Option A — bootstrap env vars (recommended for automated deployments)**
+**Set `BOOTSTRAP_ADMIN_USERNAME` and `BOOTSTRAP_ADMIN_PASSWORD` in `app/.env` before the first `docker compose up`.** The App container creates the account on startup and logs a warning reminding you to change the password. Once the account exists, these vars are ignored on subsequent starts — unset them from `.env` after confirming the account works.
 
-Set `BOOTSTRAP_ADMIN_USERNAME` and `BOOTSTRAP_ADMIN_PASSWORD` in `app/.env` before the first `docker compose up`. The App container creates the account on startup and logs a warning reminding you to change the password. Once the account exists, these vars are ignored on subsequent starts — unset them from `.env` after confirming the account works.
+```bash
+# app/.env (first deployment only)
+BOOTSTRAP_ADMIN_USERNAME=admin
+BOOTSTRAP_ADMIN_PASSWORD=yourpassword   # min 8 characters
+```
 
-**Option B — enable registration temporarily**
+After confirming the admin account works:
 
-Set `ALLOW_REGISTRATION=true` in `app/.env`, start the stack, and call `POST /auth/register` with `{ "username": "...", "password": "...", "role": "admin" }`. Because no JWT is present in the request, the `role` field will be ignored and a student account is created — this only works for the first admin if you also set `ALLOW_REGISTRATION=true` *and* accept that the first account must be student-promoted manually via SQLite, or use the bootstrap path instead.
+```bash
+# Log in
+curl -X POST http://localhost:3001/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"yourpassword"}'
 
-The bootstrap env var approach is cleaner. Use Option A.
+# Then remove BOOTSTRAP_ADMIN_USERNAME and BOOTSTRAP_ADMIN_PASSWORD from app/.env
+```
+
+> **Note on `ALLOW_REGISTRATION`:** Setting `ALLOW_REGISTRATION=true` and calling `POST /auth/register` without a JWT will always create a **student** account, not an admin. This path cannot be used to create the first admin account. Use the bootstrap env vars above.
 
 ---
 
@@ -210,7 +220,7 @@ The HuggingFace model cache (`./models/hf_cache`) and Ollama models (`./models`)
 
 ### Scenario Builder (`/admin`)
 
-The Scenario Builder's gate screen now shows a login form (username + password) instead of a raw key input. On successful login via `POST /auth/login`, the JWT is stored in component state only — not `localStorage` — so a page reload requires re-login. The server URL is persisted in `sessionStorage` for the duration of the browser tab.
+The Scenario Builder's gate screen shows a login form (username + password) instead of a raw key input. On successful login via `POST /auth/login`, the JWT is stored in component state only — not `localStorage` — so a page reload requires re-login. The server URL is persisted in `sessionStorage` for the duration of the browser tab.
 
 If the logged-in account's role is not `admin`, the form displays an access-denied message rather than the builder.
 
@@ -224,7 +234,7 @@ The JWT is not cleared on session disconnect, so you can reconnect as admin imme
 
 ### `SessionHandler` / `useSession`
 
-The `connect()` method's third parameter has been renamed from `adminKey` to `authToken` to reflect that it now expects a JWT rather than a static key. The wire protocol is unchanged — the value is sent as `Authorization: Bearer <authToken>` on `POST /session/create`. Callers that passed a static ADMIN_API_KEY string will continue to work via the legacy fallback path on the server, but should migrate to JWT-based auth.
+The `connect()` method's third parameter has been renamed from `adminKey` to `authToken` to reflect that it now expects a JWT rather than a static key. The wire protocol is unchanged — the value is sent as `Authorization: Bearer <authToken>` on `POST /session/create`. Callers that passed a static `ADMIN_API_KEY` string must migrate to JWT-based auth — the legacy fallback is no longer accepted on session creation.
 
 ---
 

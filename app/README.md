@@ -21,7 +21,7 @@ No ML models are loaded here — all processing is delegated to the Evaluation, 
 
 ### Classes
 
-**`SessionManager`** — owns session state. Tracks every session from creation through completion or expiry, enforces capacity limits, manages the waiting queue, and preserves session state across dropped connections within the recovery window. Admin sessions (created with a valid `ADMIN_API_KEY`) bypass entry-clip restrictions and receive debug data after each clip.
+**`SessionManager`** — owns session state. Tracks every session from creation through completion or expiry, enforces capacity limits, manages the waiting queue, and preserves session state across dropped connections within the recovery window. Admin sessions (created with a valid admin JWT via `POST /auth/login`) bypass entry-clip restrictions and receive debug data after each clip.
 
 **`Coordinator`** — coordinates the data pipeline for each active session. Creates one `ClipSession` per clip, routes incoming frames and audio into it, calls `flush()` on `ClipEnded`, awaits the resolved `AnalysisWindow`, and dispatches it to the Evaluation container. Adds `X-Debug: true` to the evaluation request for admin sessions and stores the returned debug payload for the `ClipController` to forward. Threads the session language through to every `ClipSession` so the Transcription container uses the correct Whisper language for each session.
 
@@ -43,15 +43,16 @@ No ML models are loaded here — all processing is delegated to the Evaluation, 
 
 See `docs/api_contract.md` for the full wire format. See `docs/admin_and_tooling_api.md` for admin session creation and inter-container APIs.
 
-| Method | Path                   | Description                                                                                                     |
-|--------|------------------------|-----------------------------------------------------------------------------------------------------------------|
-| `POST` | `/session/create`      | Create a session — returns active or queued. Pass `Authorization: Bearer <ADMIN_API_KEY>` for an admin session. |
-| `POST` | `/session/:id/resume`  | Resume a dropped session within the recovery window                                                             |
-| `POST` | `/session/:id/end`     | End a session explicitly (abnormal path only)                                                                   |
-| `GET`  | `/session/:id/queue`   | Poll queue position                                                                                             |
-| `GET`  | `/scenarios/:id/clips` | List all clips in a scenario (debugging and tooling)                                                            |
-| `WS`   | `/ws/:session_id`      | Stream frames and audio, receive transcript updates and feedback                                                |
-| `GET`  | `/health`              | Aggregated health across evaluation, transcription, and feedback                                                |
+| Method | Path                   | Description                                                                                                          |
+|--------|------------------------|----------------------------------------------------------------------------------------------------------------------|
+| `POST` | `/session/create`      | Create a session — returns active or queued. Pass `Authorization: Bearer <jwt>` with an admin JWT for admin session. |
+| `POST` | `/session/:id/resume`  | Resume a dropped session within the recovery window                                                                  |
+| `POST` | `/session/:id/end`     | End a session explicitly (abnormal path only)                                                                        |
+| `GET`  | `/session/:id/queue`   | Poll queue position                                                                                                  |
+| `GET`  | `/scenarios/:id/clips` | List all clips in a scenario (debugging and tooling)                                                                 |
+| `POST` | `/scenarios`           | Upload a new scenario without restarting (admin JWT required)                                                        |
+| `WS`   | `/ws/:session_id`      | Stream frames and audio, receive transcript updates and feedback                                                     |
+| `GET`  | `/health`              | Aggregated health across evaluation, transcription, and feedback                                                     |
 
 ### WebSocket message types
 
@@ -76,22 +77,30 @@ See `docs/api_contract.md` for the full wire format. See `docs/admin_and_tooling
 
 Copy `.env.example` to `.env` and adjust as needed. All variables have defaults except those marked required.
 
-| Variable              | Default   | Description                                                                                                                                                               |
-|-----------------------|-----------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `PORT`                | `3000`    | Internal listen port                                                                                                                                                      |
-| `EVALUATION_URL`      | required  | Base URL of the Evaluation container. Treated as a comma-separated list — multiple values enable multi-instance load distribution                                         |
-| `TRANSCRIPTION_URL`   | required  | Base URL of the Transcription container. Comma-separated list supported for multi-instance setups                                                                         |
-| `FEEDBACK_URL`        | required  | Base URL of the Feedback container                                                                                                                                        |
-| `SCENARIOS_DIR`       | required  | Path to the scenarios directory, mounted from the repo root                                                                                                               |
-| `INTERNAL_API_KEY`    | required  | Shared secret sent as `Authorization: Bearer` on all requests to AI services. Generate with `openssl rand -hex 32`                                                        |
-| `MAX_SESSIONS`        | `32`      | Maximum concurrent active sessions                                                                                                                                        |
-| `MAX_QUEUE_SIZE`      | `10`      | Maximum sessions in the waiting queue                                                                                                                                     |
-| `CAPACITY_POLICY`     | `QUEUE`   | `QUEUE` or `REJECT` when at capacity                                                                                                                                      |
-| `SESSION_TIMEOUT_MS`  | `30000`   | ms to wait for WebSocket before dropping session                                                                                                                          |
-| `RECOVERY_WINDOW_MS`  | `30000`   | ms a dropped session can be resumed                                                                                                                                       |
-| `FEEDBACK_TIMEOUT_MS` | `150000`  | ms to wait for the full feedback SSE stream. Set slightly above the Feedback container's `OLLAMA_TIMEOUT_MS`.                                                             |
-| `ADMIN_API_KEY`       | _(unset)_ | Optional. When set, requests to `POST /session/create` carrying `Authorization: Bearer <value>` create admin sessions. When unset, admin mode is permanently unavailable. |
-| `CORS_ORIGIN`         | _(unset)_ | When unset, HTTP endpoints accept any origin (correct for single-server classroom use). Set to a specific origin for multi-host deployments.                              |
+| Variable                   | Default   | Description                                                                                                                                                                      |
+|----------------------------|-----------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `PORT`                     | `3000`    | Internal listen port                                                                                                                                                             |
+| `EVALUATION_URL`           | required  | Base URL of the Evaluation container. Treated as a comma-separated list — multiple values enable multi-instance load distribution                                                |
+| `TRANSCRIPTION_URL`        | required  | Base URL of the Transcription container. Comma-separated list supported for multi-instance setups                                                                                |
+| `FEEDBACK_URL`             | required  | Base URL of the Feedback container                                                                                                                                               |
+| `SCENARIOS_DIR`            | required  | Path to the scenarios directory, mounted from the repo root                                                                                                                      |
+| `INTERNAL_API_KEY`         | required  | Shared secret sent as `Authorization: Bearer` on all requests to AI services. Generate with `openssl rand -hex 32`                                                               |
+| `JWT_SECRET`               | required  | Secret used to sign and verify JWTs. Generate with `openssl rand -hex 32`. All users are signed out if this value changes.                                                       |
+| `JWT_EXPIRY`               | `8h`      | JWT lifetime. Supports shorthand: `8h`, `30m`, `1d`. Default of 8 hours covers a school day.                                                                                     |
+| `DATA_DIR`                 | required  | Directory inside the container where `auth.db` is stored. Must be a bind-mounted path. Set to `/app/data`; mapped from `./data/` on the host.                                    |
+| `ALLOW_REGISTRATION`       | `false`   | When `true`, `POST /auth/register` is open for unauthenticated requests. Keep `false` in production.                                                                             |
+| `BOOTSTRAP_ADMIN_USERNAME` | _(unset)_ | Creates the first admin account on startup when the users table is empty. Unset after first login is confirmed.                                                                  |
+| `BOOTSTRAP_ADMIN_PASSWORD` | _(unset)_ | Password for the bootstrap admin (minimum 8 characters). Unset after first login is confirmed.                                                                                   |
+| `ADMIN_API_KEY`            | _(unset)_ | Optional. Legacy static key accepted as a fallback on `POST /scenarios` only, for tooling that predates JWT auth. Leave unset for new deployments; JWT auth is the primary path. |
+| `MAX_SESSIONS`             | `32`      | Maximum concurrent active sessions                                                                                                                                               |
+| `MAX_QUEUE_SIZE`           | `10`      | Maximum sessions in the waiting queue                                                                                                                                            |
+| `CAPACITY_POLICY`          | `QUEUE`   | `QUEUE` or `REJECT` when at capacity                                                                                                                                             |
+| `SESSION_TIMEOUT_MS`       | `30000`   | ms to wait for WebSocket before dropping session                                                                                                                                 |
+| `RECOVERY_WINDOW_MS`       | `30000`   | ms a dropped session can be resumed                                                                                                                                              |
+| `FEEDBACK_TIMEOUT_MS`      | `150000`  | ms to wait for the full feedback SSE stream. Set slightly above the Feedback container's `OLLAMA_TIMEOUT_MS`.                                                                    |
+| `HEARTBEAT_INTERVAL_MS`    | `30000`   | How often the server sends a WebSocket protocol-level ping to detect dead connections (ms). Also governs the application-level heartbeat during feedback generation.             |
+| `HEARTBEAT_TIMEOUT_MS`     | `70000`   | If no pong is received within this window (ms), the connection is treated as dead and the session is dropped. Keep at approximately 2.3× `HEARTBEAT_INTERVAL_MS`.                |
+| `CORS_ORIGIN`              | _(unset)_ | When unset, HTTP endpoints accept any origin (correct for single-server classroom use). Set to a specific origin for multi-host deployments.                                     |
 
 ---
 
@@ -152,3 +161,5 @@ docker compose up --build
 ```
 
 Do not run `docker build` from inside `app/` — the build will fail because `shared/` will be outside the build context.
+
+---

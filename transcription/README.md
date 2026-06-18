@@ -7,9 +7,10 @@ The Transcription container receives a continuous stream of raw audio from the A
 ## Responsibilities
 
 - **Audio ingestion** — accepts a persistent WebSocket connection per clip from the App container, receives `AudioChunk` messages containing base64-encoded s16le PCM at 16 kHz, and accumulates audio into a per-session buffer
-- **Rolling transcription** — once the buffer exceeds a minimum threshold (~6 s), gates the window against a silence check, and if speech is present dispatches the window to the Whisper pool and emits a partial `Transcript` message back over the WebSocket
+- **Rolling transcription** — once the buffer exceeds a minimum threshold (~2 s), dispatches the window to the Whisper pool and emits a partial `Transcript` message back over the WebSocket; the tail of each dispatched window (`overlap_pcm`) is retained and prepended to the next buffer to avoid cutting words at window boundaries
+- **Deduplication** — tracks `emitted_until` (the end time of the last emitted word) so that words from the overlap region are not re-emitted in subsequent windows
 - **Finalisation** — on `POST /transcription/finalise/{session_id}`, transcribes any remaining buffered audio and emits a final `Transcript` message (`is_final: true`), which signals the App container that the clip transcript is complete
-- **Buffer reset** — on `POST /transcription/reset/{session_id}`, clears the per-session PCM buffer and initial-prompt cache between clips
+- **Buffer reset** — on `POST /transcription/reset/{session_id}`, clears the per-session PCM buffer, `overlap_pcm`, `emitted_until`, and `window_seq` counter between clips
 - **Health reporting** — `GET /transcription/health` reports total and available Whisper workers and the inference device
 
 ---
@@ -18,15 +19,15 @@ The Transcription container receives a continuous stream of raw audio from the A
 
 ### Classes
 
-**`TranscriptionService`** — the orchestration layer. Owns all per-session logic: PCM accumulation, silence gating, rolling window dispatch, initial-prompt threading, finalisation, and `Transcript` emission. Holds a `SessionStore` reference and delegates inference to the injected `TranscriptionPoolInterface`. Route handlers in `main.py` are thin — they call `TranscriptionService` methods and translate the results into HTTP responses or WebSocket messages.
+**`TranscriptionService`** — the orchestration layer. Owns all per-session logic: PCM accumulation, rolling window dispatch, overlap handling, deduplication, finalisation, and `Transcript` emission. Holds a `SessionStore` reference and delegates inference to the injected `TranscriptionPoolInterface`. Route handlers in `main.py` are thin — they call `TranscriptionService` methods and translate the results into HTTP responses or WebSocket messages.
 
-**`SessionStore`** — in-memory registry of active sessions. Each entry holds the live WebSocket reference, the raw PCM accumulation buffer, a monotonically increasing `window_seq` counter, a `flush_lock` that serialises concurrent buffer access between rolling windows and finalisation, and the per-session `language` code supplied at connection time. Keyed by `session_id`. The App container pins each session to a single container instance so entries are never shared across processes.
+**`SessionStore`** — in-memory registry of active sessions. Each entry holds the live WebSocket reference, the raw PCM accumulation buffer, the overlap PCM tail from the last dispatched window, the `emitted_until` timestamp for deduplication, a monotonically increasing `window_seq` counter, and the per-session `language` code supplied at connection time. Keyed by `session_id`. The App container pins each session to a single container instance so entries are never shared across processes.
 
-**`WhisperPool`** — real faster-whisper implementation of `TranscriptionPoolInterface`. Maintains a fixed pool of `WhisperModel` instances (one per worker). Each `transcribe()` call acquires a free model via an `asyncio.Semaphore`, runs inference in a `ThreadPoolExecutor` (so the event loop is never blocked), and releases the model back to the pool. Accepts a per-call `language` override and an `initial_prompt` to seed Whisper's decoder from prior transcript text, reducing hallucination on short windows. If inference raises, the model instance is discarded rather than returned to the pool to prevent a corrupt model from affecting future requests. Silero VAD (`vad_filter=True`) runs as a pre-pass on each audio buffer so any remaining silence is automatically skipped.
+**`WhisperPool`** — real faster-whisper implementation of `TranscriptionPoolInterface`. Maintains a fixed pool of `WhisperModel` instances (one per worker). Each `transcribe()` call acquires a free model via an `asyncio.Semaphore`, runs inference in a `ThreadPoolExecutor` (so the event loop is never blocked), and releases the model back to the pool. Accepts a per-call `language` override. Silero VAD (`vad_filter=True`) runs as a pre-pass on each audio buffer so silence is automatically skipped. If inference raises, the model instance is discarded rather than returned to the pool to prevent a corrupt model from affecting future requests.
 
 **`StubTranscriptionPool`** — development stub. Returns a fixed Dutch placeholder string without calling Whisper. Used when `TRANSCRIPTION_POOL=stub`. See `docs/stub_guide.md`.
 
-**`SessionEntry`** — dataclass holding per-session state: WebSocket reference, PCM bytearray buffer, `window_seq` counter, `flush_lock`, and the per-session `language` code. Created by `SessionStore.open()` on each new WebSocket connection, discarded on disconnect.
+**`SessionEntry`** — dataclass holding per-session state: WebSocket reference, PCM bytearray buffer, `overlap_pcm` (tail of the last dispatched window, prepended to the next dispatch), `emitted_until` (float seconds — end time of the last word sent to the App, used to filter duplicates from the overlap region), `window_seq` counter, and the per-session `language` code. Created by `SessionStore.open()` on each new WebSocket connection, discarded on disconnect.
 
 ### Audio pipeline
 
@@ -37,17 +38,16 @@ App container (ClipSession)
     ▼
 TranscriptionService.on_audio_chunk()
     │  decode base64 → append to pcm_buffer
-    │  if buffer ≥ _MIN_BUFFER_BYTES (6 s):
-    ▼
-_is_silent(pcm)?  ──yes──► discard window, no message emitted
-    │ no
+    │  if buffer ≥ _MIN_BUFFER_BYTES (~2 s at 16 kHz s16le):
     ▼
 TranscriptionService._transcribe_window(is_final=False)
-    │  acquire flush_lock
-    │  snapshot + clear buffer
-    │  pool.transcribe(pcm, language=entry.language, initial_prompt=last_text)
-    │  → TranscriptSegment
-    │  update last_text cache
+    │  prepend overlap_pcm to snapshot → dispatch to pool
+    │  pool.transcribe(pcm, language=entry.language)
+    │  → TranscriptSegment with word timings
+    │  filter words where word.end ≤ emitted_until  (deduplication)
+    │  update emitted_until = max word end time
+    │  retain tail of pcm as overlap_pcm for next window
+    │  clear main buffer
     ▼
 Transcript message (is_final=False) → WebSocket → ClipSession
 
@@ -56,16 +56,14 @@ Transcript message (is_final=False) → WebSocket → ClipSession
 POST /transcription/finalise/{session_id}
     ▼
 TranscriptionService.finalise()
-    │  acquire flush_lock
-    │  snapshot + clear buffer
-    │  silence check → skip pool if silent, emit empty final
-    │  pool.transcribe(pcm, language=entry.language, initial_prompt=last_text)
-    │  → TranscriptSegment
+    │  prepend overlap_pcm to remaining buffer
+    │  pool.transcribe(pcm, language=entry.language)
+    │  filter duplicates via emitted_until
     ▼
 Transcript message (is_final=True) → WebSocket → ClipSession resolves
 ```
 
-Each rolling window covers a clean, non-overlapping segment of audio. `ClipSession` on the App side concatenates all received transcript text — partial and final — into a single running string. The `is_final: true` message signals that the string is complete, not that it contains the entire transcript by itself.
+Each rolling window is deduped using `emitted_until` so the App container never receives the same word twice, even though the overlap region is present in both the current and the previous dispatch. `ClipSession` on the App side concatenates all received transcript text — partial and final — into a single running string. The `is_final: true` message signals that the string is complete, not that it contains the entire transcript by itself.
 
 ---
 
@@ -79,7 +77,7 @@ All endpoints except `/transcription/health` require `Authorization: Bearer <INT
 |--------|----------------------------------------|----------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `WS`   | `/ws/{session_id}?language={code}`     | Required | Persistent audio stream per clip. `language` is an optional ISO 639-1 query param (e.g. `nl`, `en`). Overrides the container default for this session. Accepts `AudioChunk`, emits `Transcript` |
 | `POST` | `/transcription/finalise/{session_id}` | Required | Flush remaining audio and emit final `Transcript`. Returns 404 if session unknown                                                                                                               |
-| `POST` | `/transcription/reset/{session_id}`    | Required | Clear PCM buffer and initial-prompt cache between clips                                                                                                                                         |
+| `POST` | `/transcription/reset/{session_id}`    | Required | Clear PCM buffer, `overlap_pcm`, `emitted_until`, and `window_seq` between clips                                                                                                                |
 | `GET`  | `/transcription/health`                | None     | Worker pool status and inference device                                                                                                                                                         |
 
 ### WebSocket message types
@@ -151,12 +149,12 @@ Set `TRANSCRIPTION_POOL=stub` (the default) during development so tests and loca
 
 Tests live in `tests/` and use pytest with pytest-asyncio. Run the full suite with `pytest`.
 
-| File                                    | Coverage                                                                                                                                                                                 |
-|-----------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `tests/test_session_store.py`           | Open/close/reset lifecycle, PCM accumulation, sequence counter, isolation between sessions                                                                                               |
-| `tests/test_stub_transcription_pool.py` | Stub contract: fixed text, full confidence, pool properties                                                                                                                              |
-| `tests/test_transcription_service.py`   | PCM buffering, rolling window trigger and dispatch, silence gating, initial-prompt threading, Whisper error handling, finalisation, empty-buffer path, window_seq, send failure handling |
-| `tests/test_routes.py`                  | Auth enforcement on all endpoints, HTTP response shapes, WebSocket lifecycle, message routing                                                                                            |
+| File                                    | Coverage                                                                                                                                                                                       |
+|-----------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `tests/test_session_store.py`           | Open/close/reset lifecycle, PCM accumulation, sequence counter, isolation between sessions                                                                                                     |
+| `tests/test_stub_transcription_pool.py` | Stub contract: fixed text, full confidence, pool properties                                                                                                                                    |
+| `tests/test_transcription_service.py`   | PCM buffering, rolling window trigger and dispatch, overlap prepend, `emitted_until` deduplication, Whisper error handling, finalisation, empty-buffer path, window_seq, send failure handling |
+| `tests/test_routes.py`                  | Auth enforcement on all endpoints, HTTP response shapes, WebSocket lifecycle, message routing                                                                                                  |
 
 ---
 

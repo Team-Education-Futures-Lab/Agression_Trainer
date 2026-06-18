@@ -112,27 +112,29 @@ The Transcription container has a real Whisper implementation (`TRANSCRIPTION_PO
 
 #### Authentication
 
-| Variable                   | Default      | Description                                                                                                                                                                                                                                 |
-|----------------------------|--------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `JWT_SECRET`               | _(required)_ | Secret used to sign and verify JWTs. Generate with `openssl rand -hex 32`. All users are signed out if this value changes.                                                                                                                  |
-| `JWT_EXPIRY`               | `8h`         | JWT lifetime. Supports shorthand: `8h`, `30m`, `1d`. Default of 8 hours covers a school day.                                                                                                                                                |
-| `DATA_DIR`                 | _(required)_ | Directory inside the container where `auth.db` is stored. Must be a bind-mounted path (see `docker-compose.yml`) so the database persists across container recreations. Set to `/app/data`; mapped from `./data/` on the host.              |
-| `ALLOW_REGISTRATION`       | `false`      | When `true`, `POST /auth/register` is open for unauthenticated requests. Keep `false` in production — admins create accounts manually. Set to `true` only during initial setup if not using the bootstrap mechanism.                        |
-| `BOOTSTRAP_ADMIN_USERNAME` | _(unset)_    | Creates the first admin account on startup when the users table is empty. Ignored once any user exists. **Unset after the first admin account is confirmed working.**                                                                       |
-| `BOOTSTRAP_ADMIN_PASSWORD` | _(unset)_    | Password for the bootstrap admin (minimum 8 characters). **Unset after the first admin account is confirmed working.**                                                                                                                      |
-| `ADMIN_API_KEY`            | _(unset)_    | Optional. Legacy static key accepted as a fallback on `POST /scenarios` for tooling that predates JWT auth. No longer used on `POST /session/create`. Leave unset for new deployments; JWT auth via `POST /auth/login` is the primary path. |
+| Variable                   | Default      | Description                                                                                                                                                                                                                                     |
+|----------------------------|--------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `JWT_SECRET`               | _(required)_ | Secret used to sign and verify JWTs. Generate with `openssl rand -hex 32`. All users are signed out if this value changes.                                                                                                                      |
+| `JWT_EXPIRY`               | `8h`         | JWT lifetime. Supports shorthand: `8h`, `30m`, `1d`. Default of 8 hours covers a school day.                                                                                                                                                    |
+| `DATA_DIR`                 | _(required)_ | Directory inside the container where `auth.db` is stored. Must be a bind-mounted path (see `docker-compose.yml`) so the database persists across container recreations. Set to `/app/data`; mapped from `./data/` on the host.                  |
+| `ALLOW_REGISTRATION`       | `false`      | When `true`, `POST /auth/register` is open for unauthenticated requests. Keep `false` in production — admins create accounts manually.                                                                                                          |
+| `BOOTSTRAP_ADMIN_USERNAME` | _(unset)_    | Creates the first admin account on startup when the users table is empty. Ignored once any user exists. **Unset after the first admin account is confirmed working.**                                                                           |
+| `BOOTSTRAP_ADMIN_PASSWORD` | _(unset)_    | Password for the bootstrap admin (minimum 8 characters). **Unset after the first admin account is confirmed working.**                                                                                                                          |
+| `ADMIN_API_KEY`            | _(unset)_    | Optional. Legacy static key accepted as a fallback on `POST /scenarios` only, for tooling that predates JWT auth. Not accepted on `POST /session/create`. Leave unset for new deployments; JWT auth via `POST /auth/login` is the primary path. |
 
 #### Session management
 
-| Variable              | Default                | Description                                                                                                                                |
-|-----------------------|------------------------|--------------------------------------------------------------------------------------------------------------------------------------------|
-| `MAX_SESSIONS`        | `32`                   | Maximum concurrent active sessions. Use a low value (e.g. 2 or 3) during development to test capacity behaviour.                           |
-| `MAX_QUEUE_SIZE`      | `10`                   | Maximum sessions held in the waiting queue.                                                                                                |
-| `CAPACITY_POLICY`     | `QUEUE`                | `QUEUE` or `REJECT` when at capacity.                                                                                                      |
-| `SESSION_TIMEOUT_MS`  | `30000`                | ms to wait for a WebSocket connection + activation before dropping a session.                                                              |
-| `RECOVERY_WINDOW_MS`  | `30000`                | ms a dropped session can be resumed before it expires.                                                                                     |
-| `FEEDBACK_TIMEOUT_MS` | `150000`               | ms to wait for the full feedback SSE stream before treating it as unavailable. Should exceed the Feedback container's `OLLAMA_TIMEOUT_MS`. |
-| `CORS_ORIGIN`         | _(unset — allows any)_ | When unset, HTTP endpoints accept requests from any origin. Set to a specific origin in multi-host or internet-facing deployments.         |
+| Variable                | Default                | Description                                                                                                                                                                                    |
+|-------------------------|------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `MAX_SESSIONS`          | `32`                   | Maximum concurrent active sessions. Use a low value (e.g. 2 or 3) during development to test capacity behaviour.                                                                               |
+| `MAX_QUEUE_SIZE`        | `10`                   | Maximum sessions held in the waiting queue.                                                                                                                                                    |
+| `CAPACITY_POLICY`       | `QUEUE`                | `QUEUE` or `REJECT` when at capacity.                                                                                                                                                          |
+| `SESSION_TIMEOUT_MS`    | `30000`                | ms to wait for a WebSocket connection + activation before dropping a session.                                                                                                                  |
+| `RECOVERY_WINDOW_MS`    | `30000`                | ms a dropped session can be resumed before it expires.                                                                                                                                         |
+| `FEEDBACK_TIMEOUT_MS`   | `150000`               | ms to wait for the full feedback SSE stream before treating it as unavailable. Should exceed the Feedback container's `OLLAMA_TIMEOUT_MS`.                                                     |
+| `HEARTBEAT_INTERVAL_MS` | `30000`                | How often the server sends a WebSocket protocol-level ping (ms). Also governs the application-level heartbeat during feedback generation. See `api_contract.md` for the full heartbeat design. |
+| `HEARTBEAT_TIMEOUT_MS`  | `70000`                | If no pong is received within this window (ms), the connection is treated as dead and the session is dropped. Keep at approximately 2.3× `HEARTBEAT_INTERVAL_MS`.                              |
+| `CORS_ORIGIN`           | _(unset — allows any)_ | When unset, HTTP endpoints accept requests from any origin. Set to a specific origin in multi-host or internet-facing deployments.                                                             |
 
 ### Transcription container (`transcription/.env`)
 
@@ -148,12 +150,15 @@ The Transcription container has a real Whisper implementation (`TRANSCRIPTION_PO
 
 ### Evaluation container (`evaluation/.env`)
 
-| Variable             | Default      | Description                                                                       |
-|----------------------|--------------|-----------------------------------------------------------------------------------|
-| `INTERNAL_API_KEY`   | _(required)_ | Must match the value in `app/.env`.                                               |
-| `BEHAVIOUR_ANALYSER` | `stub`       | `stub` — deterministic canned results; `production` — real multimodal classifier. |
-| `DEVICE`             | `cpu`        | `cpu` or `cuda`. CUDA requires the NVIDIA Container Toolkit.                      |
-| `PORT`               | `8001`       | Internal listen port.                                                             |
+| Variable             | Default                                                 | Description                                                                       |
+|----------------------|---------------------------------------------------------|-----------------------------------------------------------------------------------|
+| `INTERNAL_API_KEY`   | _(required)_                                            | Must match the value in `app/.env`.                                               |
+| `BEHAVIOUR_ANALYSER` | `stub`                                                  | `stub` — deterministic canned results; `production` — real multimodal classifier. |
+| `DEVICE`             | `cpu`                                                   | `cpu` or `cuda`. CUDA requires the NVIDIA Container Toolkit.                      |
+| `EMOTION_MODEL`      | `audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim` | HuggingFace model ID for the audio emotion classifier (production only).          |
+| `SENTIMENT_MODEL`    | `cardiffnlp/twitter-xlm-roberta-base-sentiment`         | HuggingFace model ID for the text sentiment classifier (production only).         |
+| `EVALUATION_CONFIG`  | `evaluation_config.toml`                                | Path to the signal threshold and lexical phrase configuration file.               |
+| `PORT`               | `8001`                                                  | Internal listen port.                                                             |
 
 ### Feedback container (`feedback/.env`)
 
@@ -167,6 +172,29 @@ The Transcription container has a real Whisper implementation (`TRANSCRIPTION_PO
 | `OLLAMA_MODEL_DIGEST`    | _(unset)_             | Optional. When set, must be the exact SHA-256 digest of the expected Ollama model manifest in the form `sha256:<64 hex chars>`. At startup (when `FEEDBACK_GENERATOR=production`) the container verifies the model digest matches this value; if it does not, startup fails with a clear error. When unset, digest verification is skipped. **Operators should set this in production deployments.** Obtain the correct digest by running `ollama show <model>` and copying the `digest` field. |
 | `OLLAMA_PULL_TIMEOUT_MS` | `600000`              | How long to wait for a model pull to complete before treating it as failed (ms). Applies only when `FEEDBACK_GENERATOR=production` and the model is not already present locally. Large models can take several minutes; the default is 10 minutes.                                                                                                                                                                                                                                              |
 | `PORT`                   | `8002`                | Internal listen port.                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+
+### Client build arguments
+
+`VITE_APP_WS_URL` and `VITE_APP_HTTP_URL` are **Vite build-time arguments**, not runtime environment variables. They are baked into the compiled client output at build time. Setting them as container runtime env vars has no effect.
+
+Pass them as Docker build arguments (in Dokploy, use the Build Args tab):
+
+```bash
+docker build \
+  --build-arg VITE_APP_WS_URL=ws://your-server:3001 \
+  --build-arg VITE_APP_HTTP_URL=http://your-server:3001 \
+  -f client/Dockerfile .
+```
+
+For local development, set them in `client/.env.local` (Vite reads this at `npm run dev` time; it is not used in Docker builds):
+
+| Build argument      | Default (local dev)     | Description                                                                                                                  |
+|---------------------|-------------------------|------------------------------------------------------------------------------------------------------------------------------|
+| `VITE_APP_WS_URL`   | `ws://localhost:3001`   | WebSocket URL for the App container                                                                                          |
+| `VITE_APP_HTTP_URL` | `http://localhost:3001` | HTTP URL for the App container                                                                                               |
+| `VITE_BASE_PATH`    | `/`                     | URL prefix for all asset references (used behind a Traefik strip-prefix). Must begin and end with `/` when set to a subpath. |
+
+> ⚠️ **`VITE_DEV_TOOLS`** — when set to `true` at build time, the `/devtools` page is compiled into the client. **Never set this in production builds.** See the Developer tools section below.
 
 ---
 
@@ -227,6 +255,8 @@ ar-training/
 │   └── .gitignore
 │
 ├── client/                     ← Browser client (TypeScript / React)
+│   │                             Four entry points: / (debug harness), /demo (student
+│   │                             player), /admin (scenario builder), /devtools (dev only).
 │   │                             Captures webcam and microphone, extracts landmarks
 │   │                             and audio features, communicates with the App container.
 │   │                             Served by its own Nginx instance in production.
@@ -236,7 +266,10 @@ ar-training/
 │   ├── package.json
 │   ├── tsconfig.json
 │   ├── vite.config.ts
-│   ├── index.html
+│   ├── index.html              ← Entry: / (debug harness)
+│   ├── demo.html               ← Entry: /demo (student-facing session player)
+│   ├── admin.html              ← Entry: /admin (scenario builder, admin login required)
+│   ├── devtools.html           ← Entry: /devtools (dev only — excluded unless VITE_DEV_TOOLS=true)
 │   ├── nginx.conf              ← Nginx config for the production Docker image
 │   ├── Dockerfile
 │   ├── README.md
@@ -266,7 +299,6 @@ ar-training/
 │   │                             Bind-mounted into the Ollama container at
 │   │                             /root/.ollama so pulled models are visible on the
 │   │                             host and persist across container recreation.
-│   │                             Also used for classifier.pkl (provided separately).
 │   └── classifier.pkl          ← Provided separately, mounted at runtime
 │
 ├── docs/                       ← Project-level documentation
@@ -342,18 +374,15 @@ docker compose up app client transcription evaluation feedback
 docker compose up --scale transcription=3
 docker compose up --scale evaluation=3
 
+# Start with devtools page compiled into the client (development only)
+docker compose --profile devtools up --build
+
 # View logs for a specific container
 docker compose logs -f feedback
 
 # Pull an Ollama model (stored in models/ on the host — only needed once)
 docker compose up -d ollama
 docker compose exec ollama ollama pull llama3.2
-
-# Create the first admin account (if not using the bootstrap env vars)
-curl -X POST http://localhost:3001/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"yourpassword","role":"admin"}'
-# Note: requires ALLOW_REGISTRATION=true in app/.env, or use BOOTSTRAP_ADMIN_* vars instead
 
 # Log in and obtain a JWT
 curl -X POST http://localhost:3001/auth/login \
@@ -383,6 +412,20 @@ docker compose down
 # not Docker volumes, so they are NOT removed by this command.
 docker compose down -v
 ```
+
+---
+
+## Developer Tools Page
+
+The client includes a `/devtools` page for database management during local development. It is **not** compiled into the client by default. To include it, set `VITE_DEV_TOOLS=true` as a build argument:
+
+```bash
+docker compose --profile devtools up --build
+```
+
+The devtools profile sets `VITE_DEV_TOOLS=true` in the client build args. `vite.config.ts` logs a warning and skips the `devtools.html` entry point if the flag is absent or false.
+
+> **Never deploy a build with `VITE_DEV_TOOLS=true`** to a production or shared server. The page exposes database operations without authentication.
 
 ---
 
