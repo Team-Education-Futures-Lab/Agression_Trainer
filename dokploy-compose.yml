@@ -18,8 +18,8 @@
 # Port binding is handled by Dokploy's domain/proxy configuration, not here.
 # client and app use expose: only — bind them to domains in the Dokploy UI.
 #
-# Required host directories (create once on the DGX before first deploy):
-#   mkdir -p ./scenarios ./data
+# Named volumes must be pre-populated before first deploy:
+#   docker run --rm -v agressiontrainer_scenarios:/dst -v /path/to/scenarios:/src alpine cp -r /src/. /dst/
 
 services:
 
@@ -33,7 +33,7 @@ services:
         VITE_APP_WS_URL: ${VITE_APP_WS_URL}
         VITE_BASE_PATH: ${VITE_BASE_PATH:-/}
     volumes:
-      - ./scenarios:/usr/share/nginx/html/scenarios:ro
+      - scenarios:/usr/share/nginx/html/scenarios:ro
     expose:
       - "80"
     restart: unless-stopped
@@ -64,8 +64,8 @@ services:
       FEEDBACK_TIMEOUT_MS:       150000
       CORS_ORIGIN:               ${CORS_ORIGIN:-}
     volumes:
-      - ./scenarios:/app/scenarios:ro
-      - ./data:/app/data
+      - scenarios:/app/scenarios:ro
+      - app_data:/app/data
     expose:
       - "3000"
     depends_on:
@@ -88,10 +88,8 @@ services:
       WHISPER_LANGUAGE:   nl
       WHISPER_WORKERS:    4
       DEVICE:             cuda
-      # Overriding the default CTranslate2/Faster-Whisper cache path
       HF_HUB_CACHE:       /root/.cache/huggingface
     volumes:
-      # Named volume isolates large whisper models across pipeline updates
       - hf_cache:/root/.cache/huggingface
     expose:
       - "8003"
@@ -121,7 +119,6 @@ services:
       BEHAVIOUR_ANALYSER: production
       DEVICE:             cuda
     volumes:
-      # Swapped out host relative bind mount for shared named volume reference
       - hf_cache:/root/.cache/huggingface
     expose:
       - "8001"
@@ -168,7 +165,6 @@ services:
   ollama:
     image: ollama/ollama
     volumes:
-      # Named volume isolates heavy LLM weights safely within Docker storage engines
       - ollama_storage:/root/.ollama
     expose:
       - "11434"
@@ -183,6 +179,10 @@ services:
 
 # ── Named Volume Declarations ──────────────────────────────────────────────────
 volumes:
+  scenarios:
+    name: agressiontrainer_scenarios
+  app_data:
+    name: agressiontrainer_app_data
   hf_cache:
     name: agressiontrainer_hf_cache
   ollama_storage:
