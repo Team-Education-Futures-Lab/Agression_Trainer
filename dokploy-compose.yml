@@ -18,8 +18,8 @@
 # Port binding is handled by Dokploy's domain/proxy configuration, not here.
 # client and app use expose: only — bind them to domains in the Dokploy UI.
 #
-# Named volumes must be pre-populated before first deploy:
-#   docker run --rm -v agressiontrainer_scenarios:/dst -v /path/to/scenarios:/src alpine cp -r /src/. /dst/
+# scenarios/ is a bind mount into the Dokploy working directory (the repo root).
+# It is read-only in all containers — scenario content is managed via Git.
 
 services:
 
@@ -33,7 +33,7 @@ services:
         VITE_APP_WS_URL: ${VITE_APP_WS_URL}
         VITE_BASE_PATH: ${VITE_BASE_PATH:-/}
     volumes:
-      - scenarios:/usr/share/nginx/html/scenarios:ro
+      - ./scenarios:/usr/share/nginx/html/scenarios:ro
     expose:
       - "80"
     restart: unless-stopped
@@ -64,7 +64,7 @@ services:
       FEEDBACK_TIMEOUT_MS:       150000
       CORS_ORIGIN:               ${CORS_ORIGIN:-}
     volumes:
-      - scenarios:/app/scenarios:ro
+      - ./scenarios:/app/scenarios:ro
       - app_data:/app/data
     expose:
       - "3000"
@@ -179,8 +179,6 @@ services:
 
 # ── Named Volume Declarations ──────────────────────────────────────────────────
 volumes:
-  scenarios:
-    name: agressiontrainer_scenarios
   app_data:
     name: agressiontrainer_app_data
   hf_cache:
