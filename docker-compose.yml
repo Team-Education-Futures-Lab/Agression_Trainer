@@ -103,6 +103,13 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     restart: unless-stopped
 
   # ── Evaluation ───────────────────────────────────────────────────────────────
@@ -122,6 +129,13 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     restart: unless-stopped
 
   # ── Feedback ─────────────────────────────────────────────────────────────────
@@ -147,4 +161,11 @@ services:
       - ./models:/root/.ollama
     expose:
       - "11434"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     restart: unless-stopped

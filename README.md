@@ -43,7 +43,7 @@ app/            App container (session/auth/coordinator)
 transcription/  Whisper transcription container
 evaluation/     Behaviour analyser container (signal extraction + scorer)
 feedback/       Ollama debrief container
-client/         Browser client — 4 entry points: / (debug), /demo (student), /admin (scenario builder), /devtools (dev only)
+client/         Browser client — 4 entry points: / (debug), /demo.html (student), /admin (scenario builder), /devtools.html (dev only)
 shared/         Shared TypeScript DTO types (file: dependency for app/feedback/client)
 scenarios/      One directory per scenario: metadata.json + .mp4 clips (video via Git LFS)
 docs/           Architecture, API contract, schemas, lifecycle, auth, dev setup
@@ -89,7 +89,7 @@ and `TRANSCRIPTION_POOL=stub`, so no models and no Ollama are needed.
 ### 3. Fetch the scenario videos (Git LFS)
 
 Clips are stored in Git LFS. Without them the App still boots, but the browser gets
-`404` on the `<video>` element and the `/demo` flow cannot complete.
+`404` on the `<video>` element and the demo flow cannot complete.
 
 ```bash
 git lfs install
@@ -102,7 +102,12 @@ git lfs pull
 docker compose up --build app client transcription evaluation feedback
 ```
 
-- Client: `http://localhost:3000`  (student flow at `/demo`, scenario builder at `/admin`)
+- Client: `http://localhost:3000`  (student flow at `/demo.html`, scenario builder at `/admin`)
+
+> Only `/admin` has a pretty-URL rewrite in `client/nginx.conf`. `/demo` and
+> `/devtools` are served under their real filenames (`/demo.html`,
+> `/devtools.html`) — the extension-less URL falls through to the SPA
+> catch-all and serves the debug harness (`/`) instead.
 - App API: `http://localhost:3001`
 
 > The client image bakes in `http://localhost:3001` / `ws://localhost:3001` as the App
