@@ -48,6 +48,7 @@ class WhisperPool(TranscriptionPoolInterface):
         self._worker_count = cfg.whisper_workers
         self._language     = cfg.whisper_language
         self._device       = cfg.device
+        self._beam_size    = cfg.whisper_beam_size
 
         self._executor = ThreadPoolExecutor(
             max_workers        = cfg.whisper_workers,
@@ -108,6 +109,7 @@ class WhisperPool(TranscriptionPoolInterface):
                     model,
                     audio,
                     effective_language,
+                    self._beam_size,
                 )
             except Exception as exc:
                 discard = True
@@ -154,9 +156,10 @@ def _pcm_to_float32(pcm: bytes) -> np.ndarray:
 
 
 def _run_transcription(
-    model:    WhisperModel,
-    audio:    np.ndarray,
-    language: str,
+    model:      WhisperModel,
+    audio:      np.ndarray,
+    language:   str,
+    beam_size:  int,
 ) -> TranscriptSegment:
     """
     Synchronous transcription call — runs inside a thread executor.
@@ -177,7 +180,7 @@ def _run_transcription(
         audio,
         language        = language,
         vad_filter      = True,
-        beam_size       = 5,
+        beam_size       = beam_size,
         word_timestamps = True,
     )
     segments = list(segments_gen)
