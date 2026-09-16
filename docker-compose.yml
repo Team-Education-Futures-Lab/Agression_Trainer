@@ -95,6 +95,10 @@ services:
       context: .
       dockerfile: transcription/Dockerfile
     env_file: transcription/.env
+    volumes:
+      # Persist the HuggingFace model cache (downloaded Whisper models)
+      # across container recreations — otherwise every recreate re-downloads.
+      - ./models/hf_cache:/root/.cache/huggingface
     expose:
       - "8003"
     healthcheck:
