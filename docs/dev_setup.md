@@ -146,6 +146,7 @@ The Transcription container has a real Whisper implementation (`TRANSCRIPTION_PO
 | `WHISPER_LANGUAGE`   | `nl`         | ISO 639-1 language code passed to Whisper.                                           |
 | `WHISPER_WORKERS`    | `4`          | Number of `WhisperModel` instances in the pool — controls transcription parallelism. |
 | `WHISPER_BEAM_SIZE`  | `5`          | Beam search width passed to `model.transcribe()`. Lower for faster, less accurate decoding (e.g. `1` for greedy). |
+| `WHISPER_WINDOW_SECONDS` | `6`      | Seconds of audio buffered per rolling Whisper window (min `1`). Also the worst-case size of the final, blocking transcription at the end of a clip; lower it for a faster clip transition, at some cost in accuracy. |
 | `DEVICE`             | `cpu`        | `cpu` or `cuda`. CUDA requires the NVIDIA Container Toolkit.                         |
 | `PORT`               | `8003`       | Internal listen port.                                                                |
 

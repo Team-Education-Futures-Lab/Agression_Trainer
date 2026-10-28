@@ -20,7 +20,7 @@ from auth import make_verify_token, ws_verify_token
 from config import load_config, TranscriptionConfig
 from interfaces import HealthStatus, WorkerStatus, TranscriptionPoolInterface
 from session_store import SessionStore
-from transcription_service import TranscriptionService
+from transcription_service import TranscriptionService, window_bytes_for_seconds
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -52,7 +52,10 @@ def create_app() -> FastAPI:
     cfg   = load_config()
     store = SessionStore()
     pool  = _make_pool(cfg)
-    svc   = TranscriptionService(pool, store)
+    svc   = TranscriptionService(
+        pool, store,
+        min_buffer_bytes = window_bytes_for_seconds(cfg.whisper_window_seconds),
+    )
 
     verify_token = make_verify_token(cfg.internal_api_key)
 
