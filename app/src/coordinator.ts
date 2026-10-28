@@ -49,6 +49,7 @@ export class Coordinator {
     private readonly sessions:     Map<string, SessionState> = new Map();
     private readonly authHeader:   string;
     private readonly wsFactory:    WsFactory;
+    private readonly frameStride:  number;
 
     constructor(
         config:    CoordinatorConfig,
@@ -58,6 +59,7 @@ export class Coordinator {
         this.transRouter = new ServiceRouter(config.transcriptionUrls);
         this.authHeader  = `Bearer ${config.internalApiKey}`;
         this.wsFactory   = wsFactory;
+        this.frameStride = config.frameStride;
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -122,6 +124,12 @@ export class Coordinator {
         const state = this.sessions.get(sessionId);
         if (!state) return;
 
+        // Drop the previous clip's outcome up front. If this clip's window never
+        // resolves (CLIP_RESOLVE_TIMEOUT_MS) or evaluation fails, callers must
+        // see "no result" rather than silently reusing the last clip's score.
+        state.lastResult = null;
+        state.lastDebug  = null;
+
         state.clipSession.flush();
 
         const timeout = new Promise<null>(res =>
@@ -134,6 +142,16 @@ export class Coordinator {
         await this.dispatchWindow(sessionId, state, window, isAdmin);
     }
 
+    /**
+     * Swaps in a fresh ClipSession for the next clip and resets the per-session
+     * buffers in the Evaluation and Transcription containers.
+     *
+     * The in-process swap and both reset requests happen synchronously, before
+     * the returned promise is handed back; the promise only settles once the
+     * containers have answered. Callers that do not need to block on the
+     * network round-trip (e.g. to send clip_selected sooner) can therefore start
+     * the reset, do other work, and await the promise afterwards.
+     */
     async resetSession(sessionId: string, nextClip: ClipMetadata | null): Promise<void> {
         const state = this.sessions.get(sessionId);
         if (!state) return;
@@ -204,6 +222,7 @@ export class Coordinator {
                 queue_position: null,
             }),
             language,
+            this.frameStride,
         );
     }
 

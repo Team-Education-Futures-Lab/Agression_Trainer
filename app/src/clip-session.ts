@@ -76,6 +76,8 @@ export class ClipSession {
     private readonly authHeader:         string;
     private readonly sequence:           number = 1;
     private readonly onTranscriptUpdate: TranscriptUpdateCallback | undefined;
+    private readonly frameStride:        number;
+    private framesReceived               = 0;
 
     constructor(
         sessionId:           string,
@@ -87,6 +89,8 @@ export class ClipSession {
         onTranscriptUpdate?: TranscriptUpdateCallback,
         /** ISO 639-1 language code for this session, e.g. "nl" or "en". */
         language:            string = "",
+        /** Keep only every Nth received frame (1 = keep all). */
+        frameStride:         number = 1,
     ) {
         this.sessionId          = sessionId;
         this.clip               = clip;
@@ -94,6 +98,7 @@ export class ClipSession {
         this.authHeader         = authHeader;
         this.sequence           = sequence;
         this.onTranscriptUpdate = onTranscriptUpdate;
+        this.frameStride        = Math.max(1, Math.floor(frameStride));
 
         this.promise = new Promise(res => { this.resolve = res; });
 
@@ -166,6 +171,12 @@ export class ClipSession {
     // ── Data ingestion ────────────────────────────────────────────────────────
 
     onFrame(frame: VideoFrame): void {
+        // Thin the stream by arrival order (not frame_id): frames dropped by the
+        // per-second rate limit would otherwise leave holes in the sampling.
+        const keep = this.framesReceived % this.frameStride === 0;
+        this.framesReceived++;
+        if (!keep) return;
+
         if (this.frames.length < MAX_FRAMES) {
             this.frames.push(frame);
         }
