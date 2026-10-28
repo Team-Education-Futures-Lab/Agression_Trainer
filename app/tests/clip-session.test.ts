@@ -208,6 +208,33 @@ describe("ClipSession", () => {
         });
     });
 
+    describe("frame stride", () => {
+        async function framesKept(stride: number, total: number): Promise<number[]> {
+            const ws = new MockWebSocket();
+            const session = new ClipSession(
+                "s1", makeClip(), TRANSCRIPTION_URL, AUTH_HEADER, makeWsFactory(ws),
+                1, undefined, "", stride,
+            );
+            ws.open();
+            for (let i = 0; i < total; i++) session.onFrame(makeFrame(i));
+            session.flush();
+            emitTranscript(ws, "tekst", true);
+            return (await session).frames.map(f => f.frame_id);
+        }
+
+        it("keeps every frame by default", async () => {
+            expect(await framesKept(1, 6)).toEqual([0, 1, 2, 3, 4, 5]);
+        });
+
+        it("keeps every Nth received frame, starting with the first", async () => {
+            expect(await framesKept(3, 10)).toEqual([0, 3, 6, 9]);
+        });
+
+        it("treats a stride below 1 as 1", async () => {
+            expect(await framesKept(0, 3)).toEqual([0, 1, 2]);
+        });
+    });
+
     // ── Thenable resolution ───────────────────────────────────────────────────
 
     describe("thenable resolution", () => {

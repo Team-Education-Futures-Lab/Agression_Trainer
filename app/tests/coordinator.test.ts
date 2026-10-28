@@ -36,6 +36,7 @@ function makeConfig(): CoordinatorConfig {
         evaluationUrls:    [EVALUATION_URL],
         transcriptionUrls: [TRANSCRIPTION_URL],
         internalApiKey:    "test-key",
+        frameStride:       1,
     };
 }
 
@@ -187,6 +188,31 @@ describe("Coordinator", () => {
 
     // ── Frame and audio buffering ─────────────────────────────────────────────
 
+    describe("frame stride", () => {
+        it("thins frames in the dispatched window according to config.frameStride", async () => {
+            const ws      = new MockWebSocket();
+            const factory = vi.fn().mockReturnValue(ws);
+            const coord   = new Coordinator({ ...makeConfig(), frameStride: 3 }, factory);
+            const fetchMock = vi.fn().mockResolvedValue({
+                ok:   true,
+                json: () => Promise.resolve(makeBehaviourResult("s1", "s1:1", 0.1)),
+            });
+            vi.stubGlobal("fetch", fetchMock);
+
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "nl");
+            ws.open();
+            for (let i = 0; i < 10; i++) coord.onFrame("s1", makeFrame("s1", i));
+
+            const flush = coord.flushSession("s1");
+            emitTranscript(ws, "tekst", true);
+            await flush;
+
+            const call = fetchMock.mock.calls.find(c => (c[0] as string).includes("/evaluate/analyse"))!;
+            const body = JSON.parse(call[1].body);
+            expect(body.frames.map((f: VideoFrame) => f.frame_id)).toEqual([0, 3, 6, 9]);
+        });
+    });
+
     describe("frame and audio buffering", () => {
         it("does not dispatch to evaluation before flushSession is called", () => {
             const ws = new MockWebSocket();
@@ -319,6 +345,52 @@ describe("Coordinator", () => {
             await flush;
 
             expect(coord.getLastResult("s1")).toEqual(result);
+        });
+
+        it("does not reuse the previous clip's result when evaluation fails", async () => {
+            const ws = new MockWebSocket();
+            const { coord } = makeCoord(ws);
+
+            mockFetchSuccess(makeBehaviourResult("s1", "s1:1", 0.9));
+            coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "nl");
+            ws.open();
+            let flush = coord.flushSession("s1");
+            emitTranscript(ws, "tekst", true);
+            await flush;
+            expect(coord.getLastResult("s1")?.escalation_score).toBe(0.9);
+
+            mockFetchFailure();
+            flush = coord.flushSession("s1");
+            emitTranscript(ws, "tekst", true);
+            await flush;
+
+            expect(coord.getLastResult("s1")).toBeNull();
+        });
+
+        it("does not reuse the previous clip's result when the transcription never resolves", async () => {
+            vi.useFakeTimers();
+            try {
+                const ws = new MockWebSocket();
+                const { coord } = makeCoord(ws);
+
+                mockFetchSuccess(makeBehaviourResult("s1", "s1:1", 0.9));
+                coord.registerSession("s1", makeClip("clip_01"), vi.fn(), "nl");
+                ws.open();
+                let flush = coord.flushSession("s1");
+                emitTranscript(ws, "tekst", true);
+                await flush;
+                expect(coord.getLastResult("s1")?.escalation_score).toBe(0.9);
+
+                // Next clip: the window never resolves, so the 5 s guard fires.
+                await coord.resetSession("s1", makeClip("clip_02"));
+                flush = coord.flushSession("s1");
+                await vi.advanceTimersByTimeAsync(5_000);
+                await flush;
+
+                expect(coord.getLastResult("s1")).toBeNull();
+            } finally {
+                vi.useRealTimers();
+            }
         });
 
         it("does not throw when the evaluation request fails", async () => {

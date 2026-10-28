@@ -26,11 +26,12 @@ import type {
 //   4. Read clip score from the single BehaviourResult returned by Evaluation
 //   5. Resolve next clip from branch conditions
 //   6. Append a ConversationTurn (with stripped ClipMetadataForFeedback) to history
-//   7. Reset evaluation and transcription buffers
-//   8. Send clip_selected to the client
+//   7. Start the evaluation / transcription buffer reset (not awaited yet)
+//   8. Send clip_selected to the client — it does not wait for the reset
 //   9. For admin sessions: send debug_eval immediately after clip_selected
-//   10a. If terminal: trigger feedback and end the session
-//   10b. If not terminal: advance coordinator and session to the next clip
+//   10. Await the reset, then:
+//       a. If terminal: trigger feedback and end the session
+//       b. If not terminal: advance coordinator and session to the next clip
 // ─────────────────────────────────────────────────────────────────────────────
 
 export class ClipController {
@@ -113,7 +114,10 @@ export class ClipController {
         const nextClipMeta = nextClipId
             ? this.scenarios.getClip(ctx.scenario_id, nextClipId) ?? null
             : null;
-        await this.coord.resetSession(sessionId, nextClipMeta);
+        //    The reset requests are issued here but not awaited yet: the client
+        //    does not need to wait for them, and it cannot send the next clip's
+        //    first audio chunk before they are already on the wire.
+        const resetDone = this.coord.resetSession(sessionId, nextClipMeta);
 
         // 8. Notify the client which candidate was selected.
         sendFn({ type: "clip_selected", session_id: sessionId, clip_id: nextClipId, clip_score: clipScore });
@@ -123,6 +127,8 @@ export class ClipController {
         if (ctx.is_admin) {
             this.sendDebugEval(sessionId, result, evalLatencyMs, sendFn);
         }
+
+        await resetDone;
 
         // 10. Advance or complete.
         if (nextClipId === null) {

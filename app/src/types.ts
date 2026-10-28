@@ -84,6 +84,12 @@ export interface CoordinatorConfig {
     transcriptionUrls: string[];
     /** Shared secret sent as Authorization: Bearer on all outbound AI requests. */
     internalApiKey:  string;
+    /**
+     * Only every Nth received video frame is kept for evaluation (1 = keep all).
+     * The client captures at 30 fps; 3 yields ~10 fps, which is plenty for the
+     * gesture / nod / facing signals and cuts the Evaluation payload by 3x.
+     */
+    frameStride:     number;
 }
 
 // ─── Session Manager config ───────────────────────────────────────────────────

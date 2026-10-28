@@ -46,6 +46,7 @@ from behaviour_analyser import (
     _arousal_valence_to_emotion,
     _AudioEmotionResult,
     _compute_peak_frequency,
+    _estimate_fps,
     _count_syllables_nl,
     _is_open_hand,
     _normalise_sentiment_label,
@@ -219,6 +220,45 @@ class TestComputePeakFrequency:
         assert 0.5 <= result <= 3.0
 
 
+class TestPeakFrequencyAtReducedFps:
+    """The App container may thin frames (FRAME_STRIDE), so nods must be
+    detected at any effective frame rate, not just the nominal 30 fps."""
+
+    @pytest.mark.parametrize("fps", [30.0, 15.0, 10.0])
+    def test_detects_nod_frequency_at_any_fps(self, fps):
+        freq   = 2.0
+        n      = int(fps * 4)  # 4 seconds
+        t      = np.arange(n) / fps
+        signal = np.sin(2 * np.pi * freq * t).tolist()
+        result = _compute_peak_frequency(signal, fps=fps)
+        assert abs(result - freq) < 0.5
+
+
+class TestEstimateFps:
+    @staticmethod
+    def _frames(timestamps):
+        return [
+            VideoFrame(
+                session_id="s1", frame_id=i, timestamp=ts,
+                face_landmarks=[], left_hand=[], right_hand=[],
+            )
+            for i, ts in enumerate(timestamps)
+        ]
+
+    def test_matches_timestamp_spacing(self):
+        frames = self._frames([i * 0.1 for i in range(31)])  # 10 fps
+        assert _estimate_fps(frames) == pytest.approx(10.0)
+
+    def test_falls_back_to_nominal_for_single_frame(self):
+        assert _estimate_fps(self._frames([0.0])) == 30.0
+
+    def test_falls_back_to_nominal_for_empty_list(self):
+        assert _estimate_fps([]) == 30.0
+
+    def test_falls_back_to_nominal_when_timestamps_do_not_advance(self):
+        assert _estimate_fps(self._frames([1.0, 1.0, 1.0])) == 30.0
+
+
 class TestIsOpenHand:
     def test_open_hand_returns_true(self):
         assert _is_open_hand(make_hand_landmarks(open_hand=True))
@@ -360,6 +400,25 @@ class TestStageB:
             frames.append(f)
         result = analyser._stage_b(frames)
         assert result.head_nod_frequency > 0.0
+
+    def test_nodding_signal_detected_when_frames_are_thinned_to_10_fps(self):
+        analyser = self._make_analyser()
+        frames = []
+        for i in range(40):
+            t  = i * 0.1  # 10 fps
+            lm = make_face_landmarks_forward()
+            lm[1]  = make_landmark(y=0.5 + 0.05 * math.sin(2 * math.pi * 1.5 * t))
+            lm[10] = make_landmark(y=0.35)
+            frames.append(VideoFrame(
+                session_id     = "s1",
+                frame_id       = i * 3,
+                timestamp      = t,
+                face_landmarks = lm,
+                left_hand      = [],
+                right_hand     = [],
+            ))
+        result = analyser._stage_b(frames)
+        assert result.head_nod_frequency == pytest.approx(1.5, abs=0.5)
 
     def test_total_frame_count_matches_input(self):
         analyser = self._make_analyser()

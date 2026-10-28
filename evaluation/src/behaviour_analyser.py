@@ -500,7 +500,7 @@ class BehaviourAnalyser(BehaviourAnalyserInterface):
                 mfcc_array.T,
                 sr     = _SAMPLE_RATE,
                 n_mels = 128,
-                n_iter = 32,
+                n_iter = 16,
             )
             peak = np.abs(audio).max()
             if peak > 1e-6:
@@ -633,7 +633,7 @@ class BehaviourAnalyser(BehaviourAnalyserInterface):
             if fl and len(fl) > max(_NOSE_TIP_INDEX, _FOREHEAD_INDEX):
                 nose_y.append((fl[_NOSE_TIP_INDEX].y + fl[_FOREHEAD_INDEX].y) / 2.0)
 
-        nod_fft_peak_hz = _compute_peak_frequency(nose_y, fps=30.0)
+        nod_fft_peak_hz = _compute_peak_frequency(nose_y, fps=_estimate_fps(frames))
 
         # ── Facing ratio ──────────────────────────────────────────────────────
         facing_count = facing_total = 0
@@ -903,15 +903,38 @@ def _is_open_hand(landmarks: list) -> bool:
     return extended >= 3
 
 
-def _compute_peak_frequency(values: list[float], fps: float = 30.0) -> float:
+_NOMINAL_FPS = 30.0
+
+
+def _estimate_fps(frames: list) -> float:
+    """
+    Effective frame rate of `frames`, from their first and last timestamps.
+
+    The App container may thin the stream before dispatch (FRAME_STRIDE), so the
+    capture rate cannot be assumed. Falls back to the nominal 30 fps when the
+    timestamps are unusable (fewer than two frames, or no time elapsed).
+    """
+    if len(frames) < 2:
+        return _NOMINAL_FPS
+    span = frames[-1].timestamp - frames[0].timestamp
+    if span <= 0:
+        return _NOMINAL_FPS
+    return (len(frames) - 1) / span
+
+
+def _compute_peak_frequency(values: list[float], fps: float = _NOMINAL_FPS) -> float:
     if len(values) < 10:
         return 0.0
     y = np.array(values, dtype=np.float32)
     y -= y.mean()
     if np.std(y) < 1e-6:
         return 0.0
-    if len(y) >= _NOD_SMOOTH_WINDOW:
-        kernel = np.ones(_NOD_SMOOTH_WINDOW) / _NOD_SMOOTH_WINDOW
+    # _NOD_SMOOTH_WINDOW is defined in frames at the nominal rate; scale it so the
+    # smoothing spans the same duration (~0.17 s) at any frame rate. Without this
+    # a coarser stream would be smoothed over a longer time and attenuate nods.
+    window = max(1, round(_NOD_SMOOTH_WINDOW * fps / _NOMINAL_FPS))
+    if len(y) >= window > 1:
+        kernel = np.ones(window) / window
         y      = np.convolve(y, kernel, mode="same")
     fft_mag = np.abs(np.fft.rfft(y))
     freqs   = np.fft.rfftfreq(len(y), d=1.0 / fps)

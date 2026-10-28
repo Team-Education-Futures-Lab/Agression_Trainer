@@ -169,6 +169,7 @@ export function loadConfig(): AppConfig {
             evaluationUrls,
             transcriptionUrls,
             internalApiKey,
+            frameStride: Math.max(1, intEnv("FRAME_STRIDE", 3)),
         },
         sessionManager: {
             maxSessions:      intEnv("MAX_SESSIONS",       32),

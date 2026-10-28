@@ -69,8 +69,14 @@ from session_store import SessionStore, BYTES_PER_SECOND
 logger = logging.getLogger(__name__)
 
 # ── Rolling window threshold ──────────────────────────────────────────────────
-# At 16 kHz s16le (2 bytes/sample): 192_000 bytes = 6 s.
+# Default: at 16 kHz s16le (2 bytes/sample), 192_000 bytes = 6 s. Override per
+# deployment via WHISPER_WINDOW_SECONDS (see window_bytes_for_seconds).
 _MIN_BUFFER_BYTES = 192_000
+
+
+def window_bytes_for_seconds(seconds: float) -> int:
+    """PCM bytes for `seconds` of audio, rounded down to a whole s16le sample."""
+    return int(seconds * BYTES_PER_SECOND) // 2 * 2
 
 # ── Silence gate ──────────────────────────────────────────────────────────────
 # RMS threshold below which a window is considered silent (~-44 dBFS).
@@ -90,9 +96,21 @@ class TranscriptionService:
     One shared instance per container process.
     """
 
-    def __init__(self, pool: TranscriptionPoolInterface, store: SessionStore) -> None:
-        self._pool  = pool
-        self._store = store
+    def __init__(
+        self,
+        pool:             TranscriptionPoolInterface,
+        store:            SessionStore,
+        min_buffer_bytes: int = _MIN_BUFFER_BYTES,
+    ) -> None:
+        """
+        min_buffer_bytes is how much PCM must accumulate before a rolling window
+        is transcribed. A smaller value lowers the amount of untranscribed audio
+        left when the clip ends (faster finalise) at the cost of more, shorter
+        Whisper calls with less context each.
+        """
+        self._pool             = pool
+        self._store            = store
+        self._min_buffer_bytes = min_buffer_bytes
 
     # ── Session lifecycle ─────────────────────────────────────────────────────
 
@@ -128,7 +146,7 @@ class TranscriptionService:
         self._store.append_pcm(session_id, pcm)
 
         entry = self._store.get(session_id)
-        if entry and len(entry.pcm_buffer) >= _MIN_BUFFER_BYTES:
+        if entry and len(entry.pcm_buffer) >= self._min_buffer_bytes:
             await self._transcribe_window(session_id, is_final=False)
 
     # ── Finalise ──────────────────────────────────────────────────────────────

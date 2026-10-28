@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../src"))
 
 from interfaces import TranscriptSegment, WordTiming
 from session_store import SessionStore, BYTES_PER_SECOND
-from transcription_service import TranscriptionService, _OVERLAP_WORDS
+from transcription_service import window_bytes_for_seconds, TranscriptionService, _OVERLAP_WORDS
 from whisper_pool import TranscriptionError
 
 
@@ -467,6 +467,35 @@ _MIN_BUFFER_BYTES = 192_000
 def make_audio_msg_of_size(n_bytes: int, silent: bool = False) -> dict:
     pcm = make_silent_pcm(n_bytes) if silent else make_speech_pcm(n_bytes)
     return make_audio_msg(pcm)
+
+
+class TestConfigurableWindow:
+    @pytest.mark.asyncio
+    async def test_custom_threshold_triggers_earlier_than_default(self):
+        pool  = make_pool()
+        store = SessionStore()
+        svc   = TranscriptionService(pool, store, min_buffer_bytes=64_000)  # 2 s
+        svc.open_session("s1", make_ws())
+
+        await svc.on_audio_chunk("s1", make_audio_msg_of_size(64_000))
+        pool.transcribe.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_custom_threshold_does_not_trigger_below_it(self):
+        pool  = make_pool()
+        store = SessionStore()
+        svc   = TranscriptionService(pool, store, min_buffer_bytes=320_000)  # 10 s
+        svc.open_session("s1", make_ws())
+
+        await svc.on_audio_chunk("s1", make_audio_msg_of_size(_MIN_BUFFER_BYTES))
+        pool.transcribe.assert_not_called()
+
+    def test_default_threshold_is_six_seconds(self):
+        assert window_bytes_for_seconds(6.0) == _MIN_BUFFER_BYTES
+
+    def test_window_bytes_are_whole_samples(self):
+        assert window_bytes_for_seconds(2.5) == 80_000
+        assert window_bytes_for_seconds(0.33333) % 2 == 0
 
 
 class TestRollingWindow:

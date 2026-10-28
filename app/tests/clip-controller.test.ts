@@ -172,6 +172,46 @@ describe("ClipController", () => {
             expect(callOrder.indexOf("append")).toBeLessThan(callOrder.indexOf("reset"));
         });
 
+        it("sends clip_selected without waiting for the container reset round-trip", async () => {
+            let finishReset!: () => void;
+            const resetPending = new Promise<void>(res => { finishReset = res; });
+            const coord = makeMockCoord({
+                resetSession: vi.fn().mockReturnValue(resetPending),
+            });
+            const sessions = makeMockSessions();
+            const ctrl     = new ClipController(sessions, coord, makeMockScenarios(makeClip("clip_01", "clip_02")), makeMockFeedback());
+            const sent: string[] = [];
+            const sendFn = vi.fn().mockImplementation((m: { type: string }) => { sent.push(m.type); });
+
+            const done = ctrl.handleClipEnded("s1", makeClipEndedMsg("s1", "clip_01"), sendFn);
+            await vi.waitFor(() => expect(sent).toContain("clip_selected"));
+
+            // Reset has been started, but the session has not advanced yet.
+            expect(coord.resetSession).toHaveBeenCalledOnce();
+            expect(sessions.markActive).not.toHaveBeenCalled();
+
+            finishReset();
+            await done;
+            expect(sessions.markActive).toHaveBeenCalledWith("s1");
+        });
+
+        it("starts the reset before clip_selected and advances the session only afterwards", async () => {
+            const callOrder: string[] = [];
+            const coord = makeMockCoord({
+                resetSession: vi.fn().mockImplementation(async () => { callOrder.push("reset"); }),
+            });
+            const sessions = makeMockSessions({
+                markActive: vi.fn().mockImplementation(() => callOrder.push("active")),
+            });
+            const ctrl = new ClipController(sessions, coord, makeMockScenarios(makeClip("clip_01", "clip_02")), makeMockFeedback());
+            const sendFn = vi.fn().mockImplementation((m: { type: string }) => { callOrder.push(m.type); });
+
+            await ctrl.handleClipEnded("s1", makeClipEndedMsg("s1", "clip_01"), sendFn);
+
+            expect(callOrder.indexOf("reset")).toBeLessThan(callOrder.indexOf("clip_selected"));
+            expect(callOrder.indexOf("clip_selected")).toBeLessThan(callOrder.indexOf("active"));
+        });
+
         it("passes is_admin to flushSession", async () => {
             const coord = makeMockCoord();
             const ctrl  = new ClipController(

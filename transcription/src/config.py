@@ -37,6 +37,19 @@ def _int_env(key: str, fallback: int) -> int:
         raise RuntimeError(f"Environment variable {key} must be an integer, got: {val!r}")
 
 
+def _float_env(key: str, fallback: float, minimum: float) -> float:
+    val = os.environ.get(key)
+    if not val:
+        return fallback
+    try:
+        parsed = float(val)
+    except ValueError:
+        raise RuntimeError(f"Environment variable {key} must be a number, got: {val!r}")
+    if parsed < minimum:
+        raise RuntimeError(f"Environment variable {key} must be >= {minimum}, got: {val!r}")
+    return parsed
+
+
 def _enum_env(key: str, allowed: list[str], fallback: str) -> str:
     val = os.environ.get(key)
     if not val:
@@ -69,6 +82,7 @@ class TranscriptionConfig:
     whisper_language: str   # ISO 639-1, e.g. "nl"
     whisper_workers:  int   # Number of WhisperModel instances in the pool
     whisper_beam_size: int  # Beam search width passed to model.transcribe()
+    whisper_window_seconds: float  # Audio buffered before a rolling window is transcribed
     device:           str   # "cpu" | "cuda"
     pool_impl:        str   # "stub" | "production"
 
@@ -81,6 +95,7 @@ def load_config() -> TranscriptionConfig:
         whisper_language  = os.environ.get("WHISPER_LANGUAGE", "nl"),
         whisper_workers   = _int_env("WHISPER_WORKERS", 4),
         whisper_beam_size = _int_env("WHISPER_BEAM_SIZE", 5),
+        whisper_window_seconds = _float_env("WHISPER_WINDOW_SECONDS", 6.0, minimum=1.0),
         device            = _enum_env("DEVICE", ["cpu", "cuda"], "cpu"),
         pool_impl         = _enum_env("TRANSCRIPTION_POOL", ["stub", "production"], "stub"),
     )
